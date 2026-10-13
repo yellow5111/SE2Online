@@ -261,7 +261,7 @@ internal static class MpMenu
 
     private static bool Pressed(string binding, ref bool down)
     {
-        bool now = KeyBinding.TryParse(binding, out var key) && key.IsDown(GameKeys.IsDown);
+        bool now = KeyBinding.TryParse(binding, out var key) && key.IsDown(GameKeys.IsDown) && GameKeys.OwnWindowInFront();
         bool edge = now && !down;
         down = now;
         return edge;

@@ -26,6 +26,8 @@ public sealed class OnlineScreenViewModel : ScreenViewModel
         OnTick += () => { if (MpClock.NowMs() < _nextRefresh) return; _nextRefresh = MpClock.NowMs() + 500; Refresh?.Invoke(); };
     }
     public void Close() => SignalWantsClose();
+    // Esc while rebinding a key cancels the rebind (KeyBindButton) instead of closing the screen.
+    protected override void OnCloseRequested() { if (!KeyBindButton.Listening) base.OnCloseRequested(); }
 }
 
 public sealed class OnlineScreen : ScreenView

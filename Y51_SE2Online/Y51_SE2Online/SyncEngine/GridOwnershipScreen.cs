@@ -55,11 +55,12 @@ internal sealed class GridOwnershipView
         Grid.SetRow(_players, 4); right.Children.Add(_players);
         var transfer = OnlineUi.Row(_transfer, _claim); transfer.Margin = new Thickness(0, 14, 0, 10); Grid.SetRow(transfer, 5); right.Children.Add(transfer);
         Grid.SetRow(_release, 6); right.Children.Add(_release);
+        // The focused panel owns the right-hand column itself; a control can have only one parent.
+        if (focus != null) { Focused = OnlineUi.Panel(right, new Thickness(20)); RefreshControls(); return; }
         Navigation = OnlineUi.Row(_search, OnlineUi.Button("Refresh", () => RefreshPage(_snapshot.Offset), "RefreshOwnership"));
         Body = OnlineUi.Columns(OnlineUi.Panel(left), OnlineUi.Panel(right), "*,24,640");
         Actions = OnlineUi.Row(OnlineUi.Button("Factions", SocialUi.OpenFactions, "OwnershipFactions"));
         EmbeddedActions = OnlineUi.Row();
-        if (focus != null) { Focused = OnlineUi.Panel(right, new Thickness(20)); RefreshControls(); return; }
         RefreshControls(); RefreshPage(0);
     }
     private SocialGrid SelectedGrid => _focus != null ? _focus() : _grids.SelectedItem as SocialGrid;

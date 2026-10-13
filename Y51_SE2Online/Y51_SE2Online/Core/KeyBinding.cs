@@ -50,9 +50,9 @@ public readonly record struct KeyBinding(int Vk, bool Ctrl, bool Shift, bool Alt
         return true;
     }
 
-    /// <summary>Formats a key name from Avalonia's Key enum (or any alias above) with the held modifiers; null if unsupported.</summary>
-    public static string Format(string keyName, bool ctrl, bool shift, bool alt)
-        => Keys.TryGetValue(keyName, out int vk) ? new KeyBinding(vk, ctrl, shift, alt).ToString() : null;
+    /// <summary>Formats a virtual-key code with the held modifiers; null if the key has no name here.</summary>
+    public static string Format(int vk, bool ctrl, bool shift, bool alt)
+        => Names.ContainsKey(vk) ? new KeyBinding(vk, ctrl, shift, alt).ToString() : null;
 
     public bool IsDown(Func<int, bool> isDown)
         => Vk != 0 && isDown(Vk) && isDown(VkCtrl) == Ctrl && isDown(VkAlt) == Alt && (!Shift || isDown(VkShift));
