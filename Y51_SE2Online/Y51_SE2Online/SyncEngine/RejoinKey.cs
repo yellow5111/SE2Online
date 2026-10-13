@@ -1,5 +1,10 @@
 using System;
-using System.Runtime.InteropServices;
+using Keen.VRage.Core;
+using Keen.VRage.Core.Input;
+using Keen.VRage.Core.Platform;
+using Keen.VRage.DCS.Components;
+using Keen.VRage.Input;
+using Keen.VRage.Library.Utils;
 
 namespace Y51_SE2Online.SyncEngine;
 
@@ -16,7 +21,7 @@ internal static class RejoinKey
 		bool flag;
 		try
 		{
-			flag = Override?.Invoke() ?? (OperatingSystem.IsWindows() && IsDown(114) && OwnWindowInFront());
+			flag = Override?.Invoke() ?? (IsDown(114) && OwnWindowInFront());
 		}
 		catch (Exception)
 		{
@@ -32,7 +37,7 @@ internal static class RejoinKey
 		bool flag;
 		try
 		{
-			flag = OperatingSystem.IsWindows() && IsDown(vk) && OwnWindowInFront();
+			flag = IsDown(vk) && OwnWindowInFront();
 		}
 		catch (Exception)
 		{
@@ -43,28 +48,21 @@ internal static class RejoinKey
 		return result;
 	}
 
+	// The game's keyboard devices use Windows virtual-key codes on every platform. Checks all of them, not just
+	// the default one: a plugin can register its own keyboard as the default (Remote does).
 	internal static bool IsDown(int vk)
 	{
-		return (GetAsyncKeyState(vk) & 0x8000) != 0;
+		if (!ManualSingleton<InputDeviceManager>.HasValue) return false;
+		var key = new DigitalInput(vk, GenericDeviceClass.Keyboard);
+		foreach (var keyboard in InputDeviceManager.Instance.GetAllDevices(GenericDeviceClass.Keyboard))
+		{
+			if (keyboard.GetDigitalState(key)) return true;
+		}
+		return false;
 	}
 
 	internal static bool OwnWindowInFront()
 	{
-		nint foregroundWindow = GetForegroundWindow();
-		if (foregroundWindow == IntPtr.Zero)
-		{
-			return false;
-		}
-		GetWindowThreadProcessId(foregroundWindow, out var processId);
-		return processId == (uint)Environment.ProcessId;
+		return Singleton<VRageCore>.Instance.Engine.Single<IPlatformWindows>().Window?.IsActive ?? false;
 	}
-
-	[DllImport("user32.dll")]
-	private static extern short GetAsyncKeyState(int vKey);
-
-	[DllImport("user32.dll")]
-	private static extern nint GetForegroundWindow();
-
-	[DllImport("user32.dll")]
-	private static extern uint GetWindowThreadProcessId(nint hWnd, out uint processId);
 }
