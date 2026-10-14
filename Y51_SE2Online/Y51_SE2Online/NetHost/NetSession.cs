@@ -122,9 +122,57 @@ internal sealed class NetSession
 
 	public void Kick(ulong id, string reason = "") => LocalAdmin(new AdminRequest(AdminAction.Kick, id, reason));
 
+	/// <summary>A listen host saved settings while hosting: listing, join and world rules change without restarting hosting.</summary>
+	public void ApplyHostSettings(OnlineSettings before, OnlineSettings after, IReadOnlyList<string> changes)
+	{
+		if (!_o.Host || _o.Dedicated) return;
+		_o.MaxPlayers = after.MaxPlayers;
+		_o.FriendsOnly = after.FriendsOnly;
+		_o.Advertise = after.Advertise;
+		_o.SessionName = after.SessionName.Trim();
+		_o.Description = after.Description.Trim();
+		_o.PublicAddress = after.PublicAddress ?? "";
+		_o.Password = after.Password ?? "";
+		_o.Pvp = after.Pvp;
+		_o.OfflineRaidProtection = after.OfflineRaidProtection;
+		_o.PcuLimit = after.PcuLimit;
+		_o.SunRotation = after.SunRotation;
+		_o.SunPeriodMinutes = after.SunPeriodMinutes;
+		_o.StreamingRadiusMeters = after.StreamingRadiusMeters;
+		_o.VoiceRadiusMeters = after.VoiceRadiusMeters;
+		_o.WaterSync = after.WaterSync;
+		_o.UsageMultipliers = after.UsageMultipliers;
+		ResourceMultipliers.Current = after.UsageMultipliers;
+		_host?.ApplySettings(before, after, changes);
+		_log.Info("host: settings applied without restarting hosting" + (changes.Count > 0 ? ": " + string.Join(", ", changes) : ""));
+	}
+
 	internal static string AccessPath(bool dedicated) => dedicated && Y51_SE2Online.Dedicated.DedicatedRuntime.Config != null
 		? System.IO.Path.Combine(Y51_SE2Online.Dedicated.DedicatedRuntime.Config.Directory, "access.json")
-		: PluginPaths.Data("Y51_SE2Online.access.json");
+		: WorldAccessPath(HostWorld.Current?.WorldKey);
+
+	// A listen host keeps admins, bans, whitelist and runtime choices per world; one shared file made every
+	// player promoted in any hosted world an admin in all of them. The old shared file only seeds bans.
+	private AccessList LoadAccess(string path)
+	{
+		_log.Info("host: admins, bans and whitelist from " + path);
+		return AccessList.Load(path);
+	}
+
+	internal static string WorldAccessPath(string? worldKey)
+	{
+		string legacy = PluginPaths.Data("Y51_SE2Online.access.json");
+		if (string.IsNullOrWhiteSpace(worldKey) || worldKey == "?") return legacy;
+		string safe = string.Concat(worldKey.Select(c => char.IsLetterOrDigit(c) || c is '-' or '_' ? c : '_'));
+		if (safe.Length > 80) safe = safe[..80];
+		string path = PluginPaths.Data("Y51_SE2Online.access." + safe + ".json");
+		if (!System.IO.File.Exists(path) && System.IO.File.Exists(legacy))
+		{
+			try { AccessList.Load(legacy).BansOnlyCopy(path); }
+			catch (Exception) { }
+		}
+		return path;
+	}
 
 
 	private NetSession(MpOptions o, IMpLog log, string pluginVersion, string gameVersion)
@@ -333,6 +381,8 @@ internal sealed class NetSession
 
 	private void RunCore()
 	{
+		// Before Steam: a dedicated server whose network fails still runs its world with the configured rules.
+		if (_o.Host) ResourceMultipliers.Current = _o.UsageMultipliers;
 		SteamLink? steamLink = null;
 		using var dedicatedSteam = _o.Dedicated ? new SteamDedicatedSession() : null;
 		TcpLink? tcpLink = null;
@@ -373,7 +423,8 @@ internal sealed class NetSession
 			if (!_o.Dedicated) SteamNetworkingUtils.InitRelayNetworkAccess();
 			_log.Info("net: relay network init requested; " + SteamLink.RelayStatus(_o.Dedicated));
 			steamLink = new SteamLink(_log, _o.VirtualPort, _o.SendRateMinBytes, _o.SendRateMaxBytes,
-				id => (_o.Allow.Count == 0 || _o.Allow.Contains(id)) && (!_o.FriendsOnly || SteamFriends.GetFriendRelationship(new CSteamID(id)) == EFriendRelationship.k_EFriendRelationshipFriend),
+				// Another game instance on the host's own Steam account (Steam authenticates the identity) is never a stranger.
+				id => (id != 0 && id == _localIdentity) || ((_o.Allow.Count == 0 || _o.Allow.Contains(id)) && (!_o.FriendsOnly || SteamFriends.GetFriendRelationship(new CSteamID(id)) == EFriendRelationship.k_EFriendRelationshipFriend)),
 				_o.SteamListenIp, _o.Dedicated);
 			steamLink.Start(_o.Host);
 			link = steamLink;
@@ -427,14 +478,16 @@ internal sealed class NetSession
 						ResolveType = EngineCodec.ResolveType,
 						IsClientInput = EngineCodec.IsClientInput,
 						CheckSignal = CommandLayouts.Check,
-						Settings = new HostSettings(_o.Identities, _o.Grids, _o.Research),
+						Settings = new HostSettings(_o.Identities, _o.Grids, _o.Research, _o.WaterSync),
 						HostName = name,
 						LookTotals = _o.Predict,
 						MaxPlayers = _o.MaxPlayers,
 						HostCountsAsPlayer = !_o.Dedicated,
-						Access = AccessList.Load(AccessPath(_o.Dedicated)),
+						Access = LoadAccess(AccessPath(_o.Dedicated)),
 						Password = _o.Password ?? "",
 						SessionName = _o.SessionName,
+						Motd = _o.Dedicated ? Y51_SE2Online.Dedicated.DedicatedRuntime.Config?.Motd ?? "" : "",
+						MotdTitle = _o.Dedicated ? Y51_SE2Online.Dedicated.DedicatedRuntime.Config?.MotdTitle ?? "" : "",
 						Dedicated = _o.Dedicated,
 						HostSteamId = _o.Dedicated ? 0 : localId,
 						HostIdentity = PlayerIdentities.HotfixIdentity,
@@ -444,6 +497,8 @@ internal sealed class NetSession
 						PvpChanged = TurretRelations.SetPvp,
 						OfflineRaidProtection = _o.OfflineRaidProtection,
 						PcuLimit = _o.PcuLimit,
+						StreamingRadiusMeters = _o.StreamingRadiusMeters,
+						VoiceRadiusMeters = _o.VoiceRadiusMeters,
 						SunRotation = _o.SunRotation,
 						SunPeriodMinutes = _o.SunPeriodMinutes,
 						OfflineRaidChanged = on => PvpRules.OfflineRaid = on
@@ -509,12 +564,21 @@ internal sealed class NetSession
 				_log.Warn("net: error while disconnecting: " + ex.Message);
 			}
 			link.Dispose();
+			if (_o.Host) ResourceMultipliers.Current = ResourceMultipliers.Default;
 			_log.Info("net: stopped (" + _stopReason + ")");
 		}
 	}
 
 	private void UpdateDirectory(long now)
 	{
+		// Advertise can be switched while hosting; the publisher follows it on the net thread.
+		if (_directory == null && _o.Host && _o.Advertise && _o.NeedsSteam && _transport != null)
+			_directory = new DirectoryPublisher(new DirectoryClient(_o.Dedicated ? _o.ServersDirectory : _o.SessionsDirectory), message => _log.WarnOnce("directory-publish", message));
+		else if (_directory != null && !_o.Advertise)
+		{
+			_ = _directory.StopAsync();
+			_directory = null;
+		}
 		if (_directory == null || now < _nextDirectoryMs) return;
 		_nextDirectoryMs = now + 1000;
 		var world = HostWorld.Current;
@@ -527,7 +591,7 @@ internal sealed class NetSession
 				Description = _o.Description, SteamId = _localIdentity.ToString(System.Globalization.CultureInfo.InvariantCulture), Address = _o.PublicAddress,
 				VirtualPort = _o.VirtualPort, Players = (_host?.Players().Count(p => p.Peer.HasValue) ?? 0) + (_o.Dedicated ? 0 : 1), MaxPlayers = _o.MaxPlayers,
 				PluginVersion = _pluginVersion, GameVersion = _gameVersion, SyncVersion = SyncProtocol.Version, FriendsOnly = _o.FriendsOnly,
-				Tags = new[] { string.IsNullOrEmpty(_o.Password) ? null : "Password", _host?.Access.WhitelistOnly == true ? "Whitelist" : null }.Where(t => t != null).ToArray()
+				Tags = _host != null ? ServerInfoUi.ListingTags(_host) : new[] { string.IsNullOrEmpty(_o.Password) ? null : "Password" }.Where(t => t != null).ToArray()
 			};
 		}
 		_directory.Tick(listing, now);
@@ -716,7 +780,11 @@ internal sealed class NetSession
 						{
 							ulong hostId = JoinTargetRule.SteamConnectId(_joinTarget, _o);
 							_log.Info($"net: connect attempt {attempts} to host {hostId}{(networkReady ? "" : " (relay network not ready yet)")}");
-							conn = _o.UseSteamIp ? steam.Connect(_o.JoinIp) : steam.Connect(hostId);
+							// Steam refuses P2P to your own Steam ID, so a second game instance on this account joins
+							// the first one through its Steam IP listener on this PC instead.
+							conn = _o.UseSteamIp ? steam.Connect(_o.JoinIp)
+								: hostId == _localIdentity && hostId != 0 ? steam.Connect(new IPEndPoint(IPAddress.Loopback, SyncEngine.MpMenu.Settings?.ListenPort ?? MpOptions.DefaultIpPort))
+								: steam.Connect(hostId);
 						}
 						else
 						{

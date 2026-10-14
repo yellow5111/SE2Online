@@ -201,6 +201,7 @@ internal static class ControlPanelOwnership
             var timer = new DispatcherTimer(TimeSpan.FromMilliseconds(500), DispatcherPriority.Background, (_, _) =>
             {
                 Select();
+                if (model != null) NameSync.Follow(model);
                 if (gridPanel.IsVisible)
                 {
                     long now = Core.MpClock.NowMs();

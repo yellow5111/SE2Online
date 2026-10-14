@@ -19,9 +19,16 @@ public sealed partial class HostSession : IStorySink
 		Synced
 	}
 
+	private static readonly HashSet<uint> NothingStreamedOut = new();
+
 	private sealed class RemoteClient
 	{
 		public PeerId Peer;
+
+		/// <summary>Root NetIds this joiner does not have (out of its streaming radius); replaced whole, never mutated.</summary>
+		public volatile HashSet<uint> StreamedOut = NothingStreamedOut;
+
+		public bool Wants(uint root) => root == 0 || !StreamedOut.Contains(root);
 
 		public string Name = "?";
 
@@ -340,6 +347,11 @@ public sealed partial class HostSession : IStorySink
 			case SyncMsg.ChatSend:
 			case SyncMsg.AdminRequest:
 			case SyncMsg.GpsShare:
+			case SyncMsg.Punch:
+			case SyncMsg.ServerInfo:
+			case SyncMsg.VoiceUp:
+			case SyncMsg.TradeRequest:
+			case SyncMsg.TradeAction:
 				HandleUpstream(peer, ch, data);
 				break;
 			case SyncMsg.ClientStatus:
@@ -622,6 +634,19 @@ public sealed partial class HostSession : IStorySink
 			break;
 		case SyncMsg.GpsShare:
 			HandleGpsShare(client, data);
+			break;
+		case SyncMsg.Punch:
+			if (client.Status == ClientStatus.Synced && data.Length <= 64) _world.OnPunch(client.Player.ClientId, SocialMessage.Decode<PunchRequest>(data).Target);
+			break;
+		case SyncMsg.VoiceUp:
+			HandleVoice(client, data);
+			break;
+		case SyncMsg.TradeRequest:
+		case SyncMsg.TradeAction:
+			HandleTrade(client, data);
+			break;
+		case SyncMsg.ServerInfo:
+			HandleServerInfo(client);
 			break;
 		case SyncMsg.SocialRequest:
 			if (client.Status == ClientStatus.Synced && client.Player.IdentityId != 0)
@@ -998,6 +1023,7 @@ public sealed partial class HostSession : IStorySink
 						ClientId = player.ClientId,
 						CharacterNetId = player.CharacterNetId
 					};
+					Core.LatencyTrace.Mark(Core.LatencyTrace.HostApplied, (byte)SyncMsg.ClientCommands, client.LastCommandSeq, client.InputCommands.Count);
 					batch.Commands.AddRange(client.InputCommands);
 					client.InputCommands.Clear();
 				}
@@ -1046,7 +1072,10 @@ public sealed partial class HostSession : IStorySink
 		}
 	}
 
-	public void PublishSignals(uint hostTick, IReadOnlyList<WireCommand> commands)
+	public void PublishSignals(uint hostTick, IReadOnlyList<WireCommand> commands) => PublishSignals(hostTick, commands, null);
+
+	/// <summary><paramref name="roots"/>, when given, holds per command the root NetIds it refers to; a joiner that has streamed one of them out skips the command.</summary>
+	public void PublishSignals(uint hostTick, IReadOnlyList<WireCommand> commands, IReadOnlyList<uint[]>? roots)
 	{
 		if (commands.Count == 0 || _syncedCount == 0)
 		{
@@ -1075,17 +1104,42 @@ public sealed partial class HostSession : IStorySink
 				}
 			}
 		}
-		PublishLifecycle(batch);
 		lock (_sync)
 		{
 			foreach (RemoteClient client in _clients.Values)
 			{
-				if (client.Status == ClientStatus.Synced)
+				if (client.Status != ClientStatus.Synced)
 				{
-					client.P2.SignalBatches++;
-					client.P2.SignalsOut += commands.Count;
-					client.P2.SignalBytesOut += batch.Length;
+					continue;
 				}
+				byte[] mine = batch;
+				int count = commands.Count;
+				var streamedOut = client.StreamedOut;
+				if (roots != null && streamedOut.Count > 0)
+				{
+					var kept = new List<WireCommand>(commands.Count);
+					for (int i = 0; i < commands.Count; i++)
+					{
+						if (!Array.Exists(roots[i], streamedOut.Contains)) kept.Add(commands[i]);
+					}
+					if (kept.Count == 0)
+					{
+						continue;
+					}
+					if (kept.Count != commands.Count)
+					{
+						mine = SignalBatchMessage.Encode(0u, hostTick, kept);
+						count = kept.Count;
+					}
+				}
+				byte[] copy = mine == batch ? (byte[])batch.Clone() : mine;
+				EntityBundleMessage.SetLifeSeq(copy, client.NextLifeSeq++);
+				_t.Send(client.Peer, copy.Length > 8192 ? Channel.Bulk : Channel.Control, copy);
+				client.LifecycleMessages++;
+				client.LifecycleBytes += copy.Length;
+				client.P2.SignalBatches++;
+				client.P2.SignalsOut += count;
+				client.P2.SignalBytesOut += copy.Length;
 			}
 		}
 	}
@@ -1199,6 +1253,7 @@ public sealed partial class HostSession : IStorySink
 			name = client.Name;
 		}
 		Announce($"{name} joined the server.");
+		SendMotd(peer, name);
 		return true;
 	}
 
@@ -1252,7 +1307,8 @@ public sealed partial class HostSession : IStorySink
 			Settings = _o.Settings,
 			IdentityId = client.Player?.IdentityId ?? 0,
 			PlayerId = client.Player?.PlayerId ?? 0,
-			Players = PlayerTable()
+			Players = PlayerTable(),
+			Mods = _world.Mods.ToList()
 		};
 		_t.Send(peer, Channel.Control, accept.Encode());
 		List<TypeKeyDef> typeKeys = Keys.All();
@@ -1380,14 +1436,16 @@ public sealed partial class HostSession : IStorySink
 		Reject(peer, "the host could not capture its world: " + reason);
 	}
 
-	public int PublishLifecycle(byte[] encoded)
+	public int PublishLifecycle(byte[] encoded) => PublishLifecycle(encoded, null);
+
+	public int PublishLifecycle(byte[] encoded, Func<PeerId, bool>? include)
 	{
 		int sent = 0;
 		lock (_sync)
 		{
 			foreach (RemoteClient client in _clients.Values)
 			{
-				if (client.Status == ClientStatus.Synced)
+				if (client.Status == ClientStatus.Synced && (include == null || include(client.Peer)))
 				{
 					byte[] copy = (byte[])encoded.Clone();
 					EntityBundleMessage.SetLifeSeq(copy, client.NextLifeSeq++);
@@ -1421,17 +1479,113 @@ public sealed partial class HostSession : IStorySink
 		}
 	}
 
-	public void PublishDespawn(IReadOnlyList<uint> netIds, byte mode = 0)
+	public void PublishDespawn(IReadOnlyList<uint> netIds, byte mode = 0) => PublishDespawn(netIds, mode, null);
+
+	/// <summary><paramref name="roots"/>, when given, holds each id's root NetId; joiners that streamed that root out never had the entity.</summary>
+	public void PublishDespawn(IReadOnlyList<uint> netIds, byte mode, IReadOnlyList<uint>? roots)
 	{
 		if (netIds.Count == 0 || _syncedCount == 0)
 		{
 			return;
 		}
-		PublishLifecycle(DespawnMessage.Encode(0u, mode, netIds));
+		byte[] all = DespawnMessage.Encode(0u, mode, netIds);
+		lock (_sync)
+		{
+			foreach (RemoteClient client in _clients.Values)
+			{
+				if (client.Status != ClientStatus.Synced)
+				{
+					continue;
+				}
+				var streamedOut = client.StreamedOut;
+				byte[] msg = all;
+				if (roots != null && streamedOut.Count > 0)
+				{
+					var kept = new List<uint>(netIds.Count);
+					for (int i = 0; i < netIds.Count; i++)
+					{
+						if (!streamedOut.Contains(roots[i])) kept.Add(netIds[i]);
+					}
+					if (kept.Count == 0)
+					{
+						continue;
+					}
+					if (kept.Count != netIds.Count)
+					{
+						msg = DespawnMessage.Encode(0u, mode, kept);
+					}
+				}
+				SendLifecycle(client, msg == all ? (byte[])all.Clone() : msg);
+			}
+		}
 		foreach (uint netId in netIds)
 		{
 			_despawnedIn.Enqueue(netId);
 		}
+	}
+
+	/// <summary>Removes entities from one joiner only (streamed out of its radius): closed, then forgotten, like a destroyed entity.</summary>
+	public void PublishStreamOut(PeerId peer, IReadOnlyList<uint> netIds)
+	{
+		if (netIds.Count == 0)
+		{
+			return;
+		}
+		lock (_sync)
+		{
+			if (!_clients.TryGetValue(peer, out RemoteClient client) || client.Status != ClientStatus.Synced)
+			{
+				return;
+			}
+			SendLifecycle(client, DespawnMessage.Encode(0u, 0, netIds));
+			SendLifecycle(client, DespawnMessage.Encode(0u, 1, netIds));
+			foreach (uint netId in netIds)
+			{
+				client.State.Remove(netId);
+			}
+		}
+	}
+
+	/// <summary>A stream-in bundle (or anything else) for one joiner; false if it is not synced.</summary>
+	public bool PublishLifecycleOnlyTo(PeerId peer, byte[] encoded)
+	{
+		lock (_sync)
+		{
+			if (!_clients.TryGetValue(peer, out RemoteClient client) || client.Status != ClientStatus.Synced)
+			{
+				return false;
+			}
+			SendLifecycle(client, encoded);
+			return true;
+		}
+	}
+
+	private void SendLifecycle(RemoteClient client, byte[] msg)
+	{
+		EntityBundleMessage.SetLifeSeq(msg, client.NextLifeSeq++);
+		_t.Send(client.Peer, msg.Length > 8192 ? Channel.Bulk : Channel.Control, msg);
+		client.LifecycleMessages++;
+		client.LifecycleBytes += msg.Length;
+	}
+
+	public void SetStreamedOut(PeerId peer, HashSet<uint> roots)
+	{
+		lock (_sync)
+		{
+			if (_clients.TryGetValue(peer, out RemoteClient client)) client.StreamedOut = roots.Count == 0 ? NothingStreamedOut : roots;
+		}
+	}
+
+	public double StreamingRadiusMeters { get => _o.StreamingRadiusMeters; set => _o.StreamingRadiusMeters = value; }
+
+	public int PublishBlobsTo(PeerId peer, IReadOnlyDictionary<Guid, byte[]?> data)
+	{
+		RemoteClient client;
+		lock (_sync)
+		{
+			if (!_clients.TryGetValue(peer, out client) || client.Status != ClientStatus.Synced) return 0;
+		}
+		return SendBlobs(client, data.Keys.ToList(), data).Count;
 	}
 
 	public void PublishDataRemove(IReadOnlyList<(uint NetId, ushort Key)> items)
@@ -1505,7 +1659,7 @@ public sealed partial class HostSession : IStorySink
 		{
 			foreach (RemoteClient client in synced)
 			{
-				client.State.Put(in entry, now);
+				if (client.Wants(entry.Root)) client.State.Put(in entry, now);
 			}
 		}
 		List<TypeKeyDef> newKeys = Keys.TakeUnannounced();

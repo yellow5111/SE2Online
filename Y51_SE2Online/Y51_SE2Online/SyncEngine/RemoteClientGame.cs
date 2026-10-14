@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using Keen.Game2;
 using Keen.Game2.Client.GameComponents;
@@ -18,7 +19,7 @@ namespace Y51_SE2Online.SyncEngine;
 
 internal static class RemoteClientGame
 {
-	public static async Task LoadAsync(Keen.Game2.GameAppComponent app, bool hostHasMissions, IMpLog log, Action<ClientPhase, string> report, Action<bool> started, Action<Exception> failed)
+	public static async Task LoadAsync(Keen.Game2.GameAppComponent app, bool hostHasMissions, IReadOnlyList<WorldMod> mods, System.Threading.Tasks.Task<string> modsReady, IMpLog log, Action<ClientPhase, string> report, Action<bool> started, Action<Exception> failed)
 	{
 		await Task.SetLifetime(app.Scene);
 		if (!app._isTransitioning.Set())
@@ -31,7 +32,7 @@ internal static class RemoteClientGame
 		Exception failure = null;
 		try
 		{
-			await BuildAndRunAsync(app, hostHasMissions, log);
+			await BuildAndRunAsync(app, hostHasMissions, mods, modsReady, log);
 		}
 		catch (Exception ex)
 		{
@@ -98,9 +99,14 @@ internal static class RemoteClientGame
 		return e.GetType().Name + ": " + e.Message;
 	}
 
-	private static async Task BuildAndRunAsync(Keen.Game2.GameAppComponent app, bool hostHasMissions, IMpLog log)
+	private static async Task BuildAndRunAsync(Keen.Game2.GameAppComponent app, bool hostHasMissions, IReadOnlyList<WorldMod> mods, System.Threading.Tasks.Task<string> modsReady, IMpLog log)
 	{
 		await Task.SetLifetime(app.Scene);
+		string modsError = modsReady == null ? null : await modsReady;
+		if (modsError != null) throw new InvalidOperationException(modsError);
+		// Without this the client keeps whatever mods the last single-player world loaded.
+		app.GameData.SetRequiredProjects(WorkshopMods.ToModList(mods));
+		if (mods?.Count > 0) log.Info("client: loading the host's mods: " + WorldMods.Summary(mods));
 		GameCoreScene coreScene = app.Scene;
 		EntityBuilder builder = coreScene.Dynamic();
 		builder.WithComponent<NetworkGameClientComponent>(default(StringId));

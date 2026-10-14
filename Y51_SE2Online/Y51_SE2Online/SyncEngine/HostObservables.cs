@@ -59,7 +59,9 @@ internal sealed class HostObservables
 
 	private readonly ObjectSpace _encode;
 
-	private PeerId? _origin;
+	// The peer whose edit is being applied, and which member: only that member is not echoed back to it. Changes the
+	// edit causes elsewhere (other members, the same player's other views of a model) still reach it.
+	private (PeerId Peer, uint Oid, string Name)? _origin;
 
 	private int _nextOid;
 
@@ -286,7 +288,8 @@ internal sealed class HostObservables
 				if (_relevance.AnyHas(e.Oid) && ObservableRules.TryReplicating(e.Info, propertyName, out var member))
 				{
 					var value = EncodeValue(member.Get(e.Replica), member.Type, e.Info.Type.Name + "." + propertyName);
-					_relevance.OnChange(ObservableOp.Member(e.Oid, propertyName, value), _origin.GetValueOrDefault(), _origin.HasValue);
+					bool echo = _origin is { } origin && origin.Oid == e.Oid && origin.Name == propertyName;
+					_relevance.OnChange(ObservableOp.Member(e.Oid, propertyName, value), _origin.GetValueOrDefault().Peer, echo);
 					ChangesSent++;
 				}
 			}
@@ -524,6 +527,7 @@ internal sealed class HostObservables
 		(PeerId Peer, ushort ClientId, IReadOnlyList<MemberEdit> Edits) batch;
 		while (_edits.TryDequeue(out batch))
 		{
+			Core.LatencyTrace.Next(Core.LatencyTrace.HostApplied, 59);
 			foreach (var edit in batch.Edits)
 			{
 				string? refused = null;
@@ -561,7 +565,7 @@ internal sealed class HostObservables
 						}
 						else
 						{
-							_origin = batch.Peer;
+							_origin = (batch.Peer, edit.Oid, edit.Name);
 							try
 							{
 								member.Set(entry.Replica, value);

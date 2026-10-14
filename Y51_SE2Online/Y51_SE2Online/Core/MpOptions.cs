@@ -35,6 +35,11 @@ public sealed class MpOptions
 
 	public int? PcuLimit { get; internal set; }
 
+	public double StreamingRadiusMeters { get; internal set; }
+	public bool WaterSync { get; internal set; }
+	public double VoiceRadiusMeters { get; internal set; }
+	public Y51_SE2Online.Sync.ResourceMultipliers UsageMultipliers { get; internal set; } = Y51_SE2Online.Sync.ResourceMultipliers.Default;
+
 	public bool? SunRotation { get; internal set; }
 
 	public double? SunPeriodMinutes { get; internal set; }

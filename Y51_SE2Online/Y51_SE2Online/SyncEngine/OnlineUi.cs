@@ -6,6 +6,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Styling;
 using Keen.VRage.Library.Localization;
+using Keen.VRage.Library.Utils;
 using Keen.VRage.UI.AvaloniaInterface.Utilities;
 using Keen.VRage.UI.Screens;
 using Keen.VRage.UI.Shared.Controls.BeveledBorder;
@@ -55,8 +56,32 @@ internal static class OnlineUi
 
     public static string Localize(string key, string fallback)
     {
-        try { var value = LocKey.FromString(key).EvaluateText(); return string.IsNullOrWhiteSpace(value) || value == key ? fallback : value; }
+        try { var value = Raw(key).EvaluateText(); return string.IsNullOrWhiteSpace(value) || value == key ? fallback : value; }
         catch { return fallback; }
+    }
+
+    // SE2 logs every missing localization key as a warning, and at exit turns the first warning into a crash report.
+    // The plugin's texts are not keys, so they are registered here and looked up without that warning.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<StringId, bool> RawTexts = new();
+
+    /// <summary>A plugin text shown through SE2's localized UI as it is.</summary>
+    public static LocKey Raw(string text)
+    {
+        // ponytail: progress texts change every frame; dropping all at the cap only risks one warning per text shown again.
+        if (RawTexts.Count > 20000) RawTexts.Clear();
+        RawTexts.TryAdd(text, true);
+        return LocKey.FromString(text);
+    }
+
+    internal static void InstallRawTexts(HarmonyLib.Harmony harmony) => harmony.Patch(
+        HarmonyLib.AccessTools.Method(typeof(LocalizationPackage), nameof(LocalizationPackage.GetText), new[] { typeof(StringId) }),
+        prefix: new HarmonyLib.HarmonyMethod(typeof(OnlineUi), nameof(RawTextPrefix)));
+
+    private static bool RawTextPrefix(LocalizationPackage __instance, StringId id, ref string __result)
+    {
+        if (!RawTexts.ContainsKey(id) || __instance.HasText(id)) return true;
+        __result = id.ToString();
+        return false;
     }
 
     public static StackPanel Stack(params Control[] controls)
@@ -134,7 +159,7 @@ internal static class OnlineUi
         var footer = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"), MinHeight = 68, Margin = new Thickness(72, 0, 72, 20) };
         var back = Back(screen, () => (screen.DataContext as OnlineScreenViewModel)?.Close());
         if (screen is PlayersScreen) back = Back(screen, () => (screen.DataContext as PlayersScreenViewModel)?.Close());
-        if (screen is FactionsScreen || screen is GridOwnershipScreen || screen is GpsShareScreen) back = Back(screen, () => (screen.DataContext as SocialScreenViewModel)?.Close());
+        if (screen is FactionsScreen || screen is GridOwnershipScreen || screen is GpsShareScreen || screen is TradeScreen || screen is PlayerOptionsScreen) back = Back(screen, () => (screen.DataContext as SocialScreenViewModel)?.Close());
         if (screen is AdminScreen) back = Back(screen, () => (screen.DataContext as AdminScreenViewModel)?.Close());
         if (screen is RespawnScreen) back.IsVisible = false;
         footer.Children.Add(back); Grid.SetColumn(actions, 2); footer.Children.Add(actions);
@@ -168,10 +193,27 @@ internal static class OnlineUi
     public static Control Field(string label, Control input, string help = null)
     {
         input.MinHeight = 48;
-        Control caption = help == null ? Text(label, "SubTitle") : Stack(Text(label, "SubTitle"), Text(help, "SubtleNotice", 21));
+        // The hint is a small line right under the setting's name, not a separate block below it.
+        var caption = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
+        caption.Children.Add(Text(label, "SubTitle"));
+        // SE2's SubtleNotice style centres the text; a hint sits left-aligned under its setting's name.
+        if (help != null) { var hint = Text(help, "SubtleNotice", 17); hint.HorizontalAlignment = HorizontalAlignment.Left; hint.TextAlignment = TextAlignment.Left; caption.Children.Add(hint); }
         var field = new Grid { ColumnDefinitions = new ColumnDefinitions("*,24,480"), Margin = new Thickness(0, 6) };
+        input.VerticalAlignment = VerticalAlignment.Center;
         field.Children.Add(caption); Grid.SetColumn(input, 2); field.Children.Add(input);
         return field;
+    }
+
+    /// <summary>A snapping slider with its current value shown beside it.</summary>
+    public static (Slider Slider, Control Row) Slider(double min, double max, double step, Func<int, string> format, double width = 340)
+    {
+        var slider = new Slider { Minimum = min, Maximum = max, TickFrequency = step, IsSnapToTickEnabled = true, Width = width, VerticalAlignment = VerticalAlignment.Center };
+        var value = Text(format((int)Math.Round(min)), size: 22);
+        value.MinWidth = 100; value.Margin = new Thickness(16, 0, 0, 0);
+        slider.PropertyChanged += (_, e) => { if (e.Property == Avalonia.Controls.Primitives.RangeBase.ValueProperty) value.Text = format((int)Math.Round(slider.Value)); };
+        var row = new StackPanel { Orientation = Orientation.Horizontal };
+        row.Children.Add(slider); row.Children.Add(value);
+        return (slider, row);
     }
 
     public static Control Section(string title, params Control[] fields)

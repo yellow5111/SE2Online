@@ -253,6 +253,7 @@ internal sealed class HostStories
 		while (_in.TryDequeue(out queued))
 		{
 			(PeerId Peer, ushort ClientId, StoryMove Move) it = queued;
+			Core.LatencyTrace.Next(Core.LatencyTrace.HostApplied, 41, it.Peer.Value);
 			ushort source = SourceFor?.Invoke(it.ClientId) ?? 1;
 			if (serverOnly)
 			{

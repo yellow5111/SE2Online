@@ -96,6 +96,10 @@ internal sealed class ClientWorld
 
 	private readonly IMpLog _log;
 
+	private JoinAccept _modsFor;
+
+	private System.Threading.Tasks.Task<string> _modsReady;
+
 	private readonly MpOptions _o;
 
 	private readonly ProxyMap _proxies = new ProxyMap();
@@ -328,6 +332,7 @@ internal sealed class ClientWorld
 
 	private long _gameTimeSyncs;
 
+	// Positive: this game clock is ahead of the host's and runs slow; negative: behind, and runs fast.
 	private TimeSpan _clockSlewBack;
 
 	private readonly List<(Delegate Move, InProcessReplicationSessionComponent Comp)> _earlyStories = new List<(Delegate, InProcessReplicationSessionComponent)>();
@@ -402,6 +407,9 @@ internal sealed class ClientWorld
 
 	private MovePredictor? _move;
 
+	/// <summary>Test hook (latency rig): each frame's newest host position of the own body and the lead added to it.</summary>
+	internal static Action<long, double, double, double, System.Numerics.Vector3, double>? OwnLeadProbe;
+
 	private Keen.VRage.Physics.Components.CharacterPhysicsComponent? _movePhys;
 
 	private (float X, float Z, bool Sprint, bool Crouch) _moveInput;
@@ -441,6 +449,18 @@ internal sealed class ClientWorld
 	private uint _deckRootId;
 
 	private bool _deckFrame;
+
+	// Look snaps in the deck's frame (the host's orientation 120-170 deg off, sample after sample) switched look
+	// prediction off for good in a 245 ms session; the deck frame is dropped for a while instead.
+	private long _deckFrameOffUntil;
+
+	private long _deckSnapsSeen;
+
+	private long _deckSnapWindowMs;
+
+	private long _deckSnaps;
+
+	private int _jetLogged;
 
 	private System.Numerics.Quaternion _deckQ = System.Numerics.Quaternion.Identity;
 
@@ -770,6 +790,15 @@ internal sealed class ClientWorld
 
 	public void NetTick(long now)
 	{
+		// Workshop mods download while the world streams in; the client game waits for them before it loads.
+		if (_session?.Accept is { } accept && !ReferenceEquals(accept, _modsFor))
+		{
+			_modsFor = accept;
+			if (accept.Mods.Count > 0) _log.Info("client: the host's world runs mods: " + WorldMods.Summary(accept.Mods));
+			_modsReady = accept.ModsError != null ? System.Threading.Tasks.Task.FromResult(accept.ModsError)
+				: accept.Mods.Count == 0 ? System.Threading.Tasks.Task.FromResult<string>(null)
+				: System.Threading.Tasks.Task.Run(() => WorkshopMods.DownloadAsync(accept.Mods, _log, Progress.SetMods, CancellationToken.None));
+		}
 		if (_startRequested && !_startIssued && !_mainThreadSeen && now - _startRequestedMs > 10000 && _startRequestedMs > 0)
 		{
 			_startRequestedMs = 0L;
@@ -914,7 +943,10 @@ internal sealed class ClientWorld
 				Report(ClientPhase.ClientGameStarting, $"attempt {_startAttempts}, missions {(missions ? "on" : "off")}");
 				Progress.SetInGame(inGame: false);
 				Progress.Set(JoinStage.Loading, MpClock.NowMs());
-				RemoteClientGame.LoadAsync(app, missions, _log, Report, ok =>
+				WaterMirror.Reset();
+				WaterGridsMessage.Enabled = _session?.Accept?.Settings.WaterSync == true;
+				if (WaterGridsMessage.Enabled) _log.Info("client: the host streams water (experimental water sync); this client session gets the water renderer");
+				RemoteClientGame.LoadAsync(app, missions, _modsFor?.Mods, _modsReady, _log, Report, ok =>
 				{
 					if (!ok)
 					{
@@ -966,6 +998,7 @@ internal sealed class ClientWorld
 			return true;
 		}
 		_configuredBuilder = sb;
+		PassengerSeats.Apply();
 		var bindings = Singleton<DefinitionManager>.Instance.GetDefinitionsOfType<PrefabBindingDefinition>().ToImmutableArray();
 		var replication = new InProcessReplication(bindings);
 		sb.ExternalServices.Add((IGameClient)client);
@@ -1538,6 +1571,7 @@ internal sealed class ClientWorld
 		InProcessReplicationSessionComponent.ReturnCB(outgoing);
 		BuildInbound(comp);
 		UpdateNametags(comp);
+		if (WaterGridsMessage.Enabled) WaterMirror.Apply(ClientEntity);
 		long now = MpClock.NowMs();
 		if (now - _lastStatusMs < LogFormat.StatusIntervalMs)
 		{
@@ -1700,7 +1734,7 @@ internal sealed class ClientWorld
 		// CommitFrame is [DoNotPause]: host ticks include the host's own paused frames (video screens), which show here as a lead.
 		long sinceMs = Math.Clamp(MpClock.NowMs() - mark.AtMs, 0L, 1000L);
 		TimeSpan drift = hostTime0 + Keen.Game2.Simulation.UpdateTime.TIME_PER_FRAME * (mark.Tick - _hostTick0) + TimeSpan.FromMilliseconds(sinceMs) - gameTime.FrameTime;
-		if (drift > TimeSpan.FromSeconds(1.0))
+		if (drift > TimeSpan.FromSeconds(2.0))
 		{
 			gameTime._elapsedTimeOffset += drift;
 			_clockSlewBack = TimeSpan.Zero;
@@ -1708,6 +1742,16 @@ internal sealed class ClientWorld
 			{
 				_log.Info($"client: game clock moved {drift.TotalSeconds:+0.0} s to the host's ({_gameTimeSyncs} corrections; weather and other timed events follow the host)");
 			}
+		}
+		else if (drift > TimeSpan.FromSeconds(0.25) || (drift > TimeSpan.FromSeconds(0.05) && _clockSlewBack < TimeSpan.Zero))
+		{
+			// A client whose frames hitch loses game time steadily (about 1 s a minute on a loaded PC); stepping it forward every
+			// minute made weather fades and animations jump, so it runs slightly fast until it catches up instead.
+			if (_clockSlewBack >= TimeSpan.Zero && (++_gameTimeSyncs <= 5 || _gameTimeSyncs % 60 == 0))
+			{
+				_log.Info($"client: game clock {drift.TotalSeconds:0.00} s behind the host's; running it at {1.0 + ClockSlewRate:P0} until it matches ({_gameTimeSyncs} corrections)");
+			}
+			_clockSlewBack = -drift;
 		}
 		else if (drift < TimeSpan.FromSeconds(-1.0) || (drift < TimeSpan.FromSeconds(-0.1) && _clockSlewBack > TimeSpan.Zero))
 		{
@@ -1734,7 +1778,7 @@ internal sealed class ClientWorld
 			_clockSlewBack = TimeSpan.Zero;
 			return;
 		}
-		TimeSpan step = TimeSpan.FromTicks(Math.Min(_clockSlewBack.Ticks, (long)(gameTime.DeltaTime.Ticks * ClockSlewRate)));
+		TimeSpan step = TimeSpan.FromTicks(Math.Sign(_clockSlewBack.Ticks) * Math.Min(Math.Abs(_clockSlewBack.Ticks), (long)(gameTime.DeltaTime.Ticks * ClockSlewRate)));
 		gameTime._elapsedTimeOffset -= step;
 		_clockSlewBack -= step;
 	}
@@ -1894,7 +1938,7 @@ internal sealed class ClientWorld
 		}
 	}
 
-	private uint? NetIdOf(Entity? e)
+	internal uint? NetIdOf(Entity? e)
 	{
 		if (e == null || _comp == null)
 		{
@@ -2256,6 +2300,67 @@ internal sealed class ClientWorld
 		}
 	}
 
+	// Signals resolve their entities when written, so after a bundle is queued in this frame a batch may still go now
+	// if everything it names already exists here; one that names the bundle's new entities waits for the next frame.
+	private bool TargetsLive(List<WireCommand>? signals)
+	{
+		if (signals == null) return true;
+		foreach (var cmd in signals)
+		{
+			foreach (var r in cmd.Refs)
+			{
+				if (r.Kind == WireKind.Entity && !_proxies.IsLive(r.Id)) return false;
+			}
+		}
+		return true;
+	}
+
+	private const long ConnectionHoldMs = 3000;
+	private uint _connectionHoldSeq;
+	private long _connectionHoldSince;
+	private long _connectionHoldsReleased;
+
+	private static bool IsConnectionSignal(string name) =>
+		name.Contains("CubeGridComponent+GridsConnectionChangedSignal", StringComparison.Ordinal)
+		|| name.Contains("MechanicalBlockComponent+ConnectionCreatedSignal", StringComparison.Ordinal)
+		|| name.Contains("MechanicalBlockComponent+ConnectionBrokenSignal", StringComparison.Ordinal)
+		|| name.Contains("MechanicalBlockComponent+IsConnectedChangedSignal", StringComparison.Ordinal)
+		|| name.Contains("MechanicalBlockComponent+UpdateConnectionWithCounterpartSignal", StringComparison.Ordinal)
+		|| name.Contains("ConveyorSystemComponent+SystemConnectionsChangedSignal", StringComparison.Ordinal)
+		|| name.Contains("ConveyorSystemComponent+LinkToConveyorSystemSignal", StringComparison.Ordinal);
+
+	// Connecting two grids before both exist here leaves the connector/conveyor graph half-linked ("already an active
+	// connection", "Node already has link attached") and later throws in ConveyorSystemComponent.TraverseSystems. Such a
+	// batch waits until every grid it names (the partner included, via component refs) is built and in the scene, for
+	// up to ConnectionHoldMs; a partner that never arrives must not stall everything after it.
+	private bool ConnectionTargetsLive(ClientSession session, uint seq, List<WireCommand>? signals, long now)
+	{
+		if (signals == null) return true;
+		bool waiting = false;
+		foreach (var cmd in signals)
+		{
+			if (!session.RemoteSignals.TryGet(cmd.Key, out SignalKeyDef def) || !IsConnectionSignal(def.Name)) continue;
+			foreach (var r in cmd.Refs)
+			{
+				if (r.Kind is WireKind.Entity or WireKind.Component && !_proxies.IsLive(r.Id)) { waiting = true; break; }
+			}
+			if (waiting) break;
+		}
+		if (!waiting) return true;
+		if (_connectionHoldSeq != seq)
+		{
+			_connectionHoldSeq = seq;
+			_connectionHoldSince = now;
+			return false;
+		}
+		if (now - _connectionHoldSince < ConnectionHoldMs) return false;
+		if (++_connectionHoldsReleased <= 5)
+		{
+			_log.Warn($"client: a grid connection signal (lifecycle #{seq}) still names a grid that is not here after {ConnectionHoldMs} ms; applying it anyway");
+		}
+		return true;
+	}
+
 	private void BuildInbound(InProcessReplicationSessionComponent comp)
 	{
 		var session = _session;
@@ -2272,7 +2377,7 @@ internal sealed class ClientWorld
 		long now = MpClock.NowMs();
 		uint seq;
 		LifecycleItem item;
-		if (_clockSlewBack > TimeSpan.Zero)
+		if (_clockSlewBack != TimeSpan.Zero)
 		{
 			w.Write_Keen_VRage_Multiplayer_Replications_InProcess_InProcessReplicationSessionComponent_PostInvokeInternalSignal(baseIndex, _sessionProxy, (Action<SceneContext>)(_ => SlewGameTime()));
 			cmds++;
@@ -2293,10 +2398,11 @@ internal sealed class ClientWorld
 		}
 		while (taken < 64 && session.Lifecycle.TryPeek(out seq, out item))
 		{
-			if ((item.Type == SyncMsg.EntityBundle && item.Bundle.RequiredBlobs.Count > 0 && !BlobsReady(session, seq, item.Bundle, now)) || (item.Type == SyncMsg.SignalBatch && applies > 0) || !session.Lifecycle.TryTake(out uint _, out LifecycleItem next))
+			if ((item.Type == SyncMsg.EntityBundle && item.Bundle.RequiredBlobs.Count > 0 && !BlobsReady(session, seq, item.Bundle, now)) || (item.Type == SyncMsg.SignalBatch && ((applies > 0 && !TargetsLive(item.Signals)) || !ConnectionTargetsLive(session, seq, item.Signals, now))) || !session.Lifecycle.TryTake(out uint takenSeq, out LifecycleItem next))
 			{
 				break;
 			}
+			Core.LatencyTrace.Mark(Core.LatencyTrace.Taken, (byte)next.Type, takenSeq);
 			if (next.Type == SyncMsg.StringTable)
 			{
 				RegisterHostStrings(next.Strings);
@@ -2322,6 +2428,7 @@ internal sealed class ClientWorld
 				try
 				{
 					WriteSignals(session, cb, next.Signals);
+					Core.LatencyTrace.Mark(Core.LatencyTrace.Applied, (byte)SyncMsg.SignalBatch, takenSeq);
 				}
 				catch (Exception ex)
 				{
@@ -2336,7 +2443,8 @@ internal sealed class ClientWorld
 				var it = next;
 				w.Write_Keen_VRage_Multiplayer_Replications_InProcess_InProcessReplicationSessionComponent_PostInvokeInternalSignal(baseIndex, _sessionProxy, (Action<SceneContext>)(_ => Apply(it)));
 				cmds++;
-				applies++;
+				// Only a bundle creates entities later signals may target; despawns and data removals hold nothing back.
+				if (it.Type == SyncMsg.EntityBundle) applies++;
 				taken++;
 				if (it.Type == SyncMsg.EntityBundle && it.Bundle.Entities.Count >= 200)
 				{
@@ -2440,6 +2548,7 @@ internal sealed class ClientWorld
 			{
 			case SyncMsg.EntityBundle:
 				ReplicateBundle(item.Bundle);
+				Core.LatencyTrace.Mark(Core.LatencyTrace.Applied, (byte)SyncMsg.EntityBundle, item.Bundle.LifeSeq);
 				break;
 			case SyncMsg.Despawn:
 				Despawn(item.NetIds, item.DespawnMode);
@@ -2537,6 +2646,7 @@ internal sealed class ClientWorld
 			_gateSinceMs = now;
 			session.Blobs.Touch(now);
 			_log.Info($"client: holding bundle #{seq} until {absent} of its {b.RequiredBlobs.Count} offloaded blob(s) arrive");
+			Core.LatencyTrace.Mark(Core.LatencyTrace.Held, (byte)SyncMsg.EntityBundle, seq, absent);
 			return false;
 		}
 		if (gate == ClientBlobStore.Gate.Stalled)
@@ -3268,7 +3378,22 @@ internal sealed class ClientWorld
 			bool onDeck = mode == LookMode.Ground && OnMovingGrid(ownCharacter, session, now);
 			bool fastFlight = _o.FastSmooth && mode == LookMode.Jetpack && FastOwnFlight(ownCharacter, now);
 			bool smoothed = seated || onDeck || fastFlight;
-			bool deckFrame = onDeck && session.Smoother.Enabled && _o.DeckFrame;
+			if (look.Snapped != _deckSnapsSeen)
+			{
+				if (_deckFrame)
+				{
+					if (now - _deckSnapWindowMs > 3000) { _deckSnapWindowMs = now; _deckSnaps = 0; }
+					_deckSnaps += look.Snapped - _deckSnapsSeen;
+					if (_deckSnaps >= 2)
+					{
+						_deckFrameOffUntil = now + 30000;
+						_deckSnaps = 0;
+						_log.Info("client: look prediction keeps snapping in the deck's frame; predicting in the world frame for 30 s");
+					}
+				}
+				_deckSnapsSeen = look.Snapped;
+			}
+			bool deckFrame = onDeck && session.Smoother.Enabled && _o.DeckFrame && now >= _deckFrameOffUntil;
 			if (deckFrame != _deckFrame)
 			{
 				_deckFrame = deckFrame;
@@ -3345,9 +3470,20 @@ internal sealed class ClientWorld
 			return;
 		}
 		var hostVel = _ownVel.GetValueOrDefault();
+		if (mode == LookMode.Jetpack && JetInputs(own, look.Shown) is var (thrust, brake, limit))
+		{
+			if (_jetLogged < 3 && thrust.LengthSquared() > 0.01f)
+			{
+				_jetLogged++;
+				own.Data.TryGet<ControlData>(out var jc);
+				_log.Info($"client: jetpack lead models the inputs: thrust {thrust.Length():0.00} m/s^2 for input {jc.Movement.X:0.##},{jc.Movement.Y:0.##},{jc.Movement.Z:0.##}, dampener braking {brake:0.0} m/s^2, speed limit {limit:0} m/s");
+			}
+			move.StepJet(now, hostVel, thrust, brake, limit);
+			return;
+		}
 		if (mode != LookMode.Ground || !own.Data.TryGet<ControlData>(out var control) || !own.Data.TryGet<CharacterMovementComponent.GroundModeData>(out var ground))
 		{
-			move.Step(now, System.Numerics.Vector3.Zero, hostVel, inputChanged: false);
+			move.StepFree(now, hostVel);
 			return;
 		}
 		var phys = _movePhys ??= own.Components.OfType<Keen.VRage.Physics.Components.CharacterPhysicsComponent>().FirstOrDefault();
@@ -3372,6 +3508,25 @@ internal sealed class ClientWorld
 		(float, float, bool, bool) input = (control.Movement.X, control.Movement.Z, sprint, crouch);
 		move.StepGround(now, target, hostVel - hostVertical, hostVertical, phys?.CharacterPhysicsDefinition.MaxAcceleration ?? 200f, input != _moveInput);
 		_moveInput = input;
+	}
+
+	// This frame's jetpack input as an acceleration (the character's own regular thrust per direction over its mass),
+	// the dampeners' braking deceleration (0 when off) and the soft speed limit.
+	private static (System.Numerics.Vector3 Thrust, float Brake, float Limit)? JetInputs(Entity own, System.Numerics.Quaternion shown)
+	{
+		if (!own.Data.TryGet<ControlData>(out var control) || !own.Data.TryGet<Keen.Game2.Simulation.WorldObjects.Shared.Movement.MaxThrustData>(out var thrust)
+			|| !own.Data.TryGet<RigidBodyMassProperties>(out var mass) || !(mass.Mass > 0f))
+		{
+			return null;
+		}
+		var m = control.Movement;
+		var regular = thrust.Regular;
+		float Axis(float input, float positive, float negative) => input >= 0f ? input * positive : input * negative;
+		var local = new System.Numerics.Vector3(Axis(m.X, regular.Positive.X, regular.Negative.X), Axis(m.Y, regular.Positive.Y, regular.Negative.Y), Axis(m.Z, regular.Positive.Z, regular.Negative.Z)) / mass.Mass;
+		var braking = thrust.Braking;
+		float brake = own.Data.TryGet<DampeningData>(out _) ? (braking.Positive.X + braking.Positive.Y + braking.Positive.Z + braking.Negative.X + braking.Negative.Y + braking.Negative.Z) / 6f / mass.Mass : 0f;
+		float limit = own.Data.TryGet<SoftSpeedLimitData>(out var soft) ? soft.Speed : 0f;
+		return (System.Numerics.Vector3.Transform(local, shown), brake, limit);
 	}
 
 	private bool FastOwnFlight(Entity own, long now)
@@ -3501,6 +3656,13 @@ internal sealed class ClientWorld
 		if (movement == null)
 		{
 			detail = "the character has no CharacterMovementComponent here";
+			return LookMode.Off;
+		}
+		// The secondary actor of a two-character emote is parented to the other character by the host; predicting it
+		// locally would pull it out of the scene.
+		if (FightLock.Active || own.Data.TryGet<Keen.VRage.Core.Game.Components.EntityParentData>(out _))
+		{
+			detail = "in a two-character emote";
 			return LookMode.Off;
 		}
 		var controller = _controller;
@@ -3663,6 +3825,7 @@ internal sealed class ClientWorld
 					long leadNow = MpClock.NowMs();
 					if (_ownHostLocalMs is double sampleAt && leadNow - sampleAt > StallLeadMs) leadNow = (long)(sampleAt + StallLeadMs);
 					var lead = move.Lead(leadNow, look.LagMs);
+					OwnLeadProbe?.Invoke(leadNow, x, y, z, lead, look.LagMs);
 					leadShown = lead;
 					if (_ownHostLocalMs is double sampleLocal) ageShown = MpClock.NowMs() - sampleLocal;
 					x += lead.X;
@@ -3736,7 +3899,7 @@ internal sealed class ClientWorld
 			{
 				if (_look != null)
 				{
-					return $"{_look.Describe()}, host transforms taken {_lookIntercepted}, totals sent {_session?.LookSent ?? 0}, movement lead {(_move != null && _move.Active ? $"on (wall gain {_move.Gain:0.00})" : "off")}, input round trip {_session?.InputAck.RoundTripMs ?? 0} ms (worst of 5 s {_session?.InputAckWorstMs ?? 0} ms)" + (_body != null ? $"; {_body.Describe()}; second writer on the own body {_otherWriterCount}x (largest {_otherWriterMaxM:0.00} m)" : "");
+					return $"{_look.Describe()}, host transforms taken {_lookIntercepted}, totals sent {_session?.LookSent ?? 0}, movement lead {(_move != null && _move.Active ? $"on (wall gain {_move.Gain:0.00}, dampener braking x{_move.BrakeScale:0.00})" : "off")}, input round trip {_session?.InputAck.RoundTripMs ?? 0} ms (worst of 5 s {_session?.InputAckWorstMs ?? 0} ms)" + (_body != null ? $"; {_body.Describe()}; second writer on the own body {_otherWriterCount}x (largest {_otherWriterMaxM:0.00} m)" : "");
 				}
 				return "look prediction: no character yet";
 			}

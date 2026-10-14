@@ -15,6 +15,8 @@ internal sealed class BlockAccessView
     private readonly ComboBox _player = new() { MinHeight = 44, FontSize = 20, MinWidth = 280, PlaceholderText = "Choose a player" };
     private readonly TextBlock _status = OnlineUi.Text("", "SubtleNotice", 18);
     private readonly Button _whitelist, _blacklist, _remove;
+    private readonly OnlineToggle _showTag = new("Show the owner's faction tag on this antenna's signal");
+    private bool _syncingTag;
     private Guid _block;
     private string _signature;
     private long _askedMs;
@@ -46,6 +48,9 @@ internal sealed class BlockAccessView
         stack.Children.Add(OnlineUi.Text("Whitelisted players may use this block even when the grid is not shared with them. Blacklisted players may not use it, whatever the grid's sharing.", "SubtleNotice", 18));
         stack.Children.Add(lists);
         stack.Children.Add(OnlineUi.Row(_player, _whitelist, _blacklist, _remove));
+        _showTag.IsVisible = false;
+        _showTag.IsCheckedChanged += (_, _) => { if (!_syncingTag && _block != Guid.Empty) SocialUi.Send(new SocialRequest(SocialAction.AntennaTag, Offset: _showTag.IsChecked ? 1 : 0, Secure: _block)); };
+        stack.Children.Add(_showTag);
         stack.Children.Add(_status);
         Panel = OnlineUi.Panel(stack, new Thickness(20));
     }
@@ -69,6 +74,10 @@ internal sealed class BlockAccessView
     {
         var snapshot = SocialUi.Snapshot;
         var focus = snapshot.FocusBlock is { } f && f.Secure == _block && _block != Guid.Empty ? f : null;
+        _showTag.IsVisible = focus?.Antenna == true;
+        if (focus != null && _showTag.IsChecked != focus.ShowTag) { _syncingTag = true; _showTag.IsChecked = focus.ShowTag; _syncingTag = false; }
+        var ownFaction = snapshot.Factions.FirstOrDefault(x => x.Members.Contains(snapshot.Actor));
+        _showTag.IsEnabled = focus != null && snapshot.Actor != 0 && (focus.Owner == snapshot.Actor || ownFaction != null && ownFaction.Members.Contains(focus.Owner) && ownFaction.RoleOf(snapshot.Actor) >= FactionRole.Admin);
         // The host drops requests closer than 200 ms apart, so a lost ask is repeated until the block's lists arrive.
         long now = Core.MpClock.NowMs();
         if (focus == null && _block != Guid.Empty && now - _askedMs > 1000)

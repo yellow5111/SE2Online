@@ -26,13 +26,15 @@ namespace Y51_SE2Online.SyncEngine;
 
 internal sealed partial class HostWorld
 {
-    private sealed record SpawnTarget(SpawnOption Option, Entity? Point);
+    private sealed record SpawnTarget(SpawnOption Option, Entity? Point, RespawnShip? Ship = null);
 
-    // The unarmed Pathfinder cargo encounter: a small flyable hauler that every 2.4 world has.
-    private static readonly Guid RespawnShipPrefab = new("57c9cf6b-d639-4352-820e-63cbb574eb0e");
-    private const long ShipCooldownMs = 10 * 60_000;
     private const long ShipSpawnTimeoutMs = 30_000;
     private readonly ConcurrentDictionary<long, long> _shipReadyAt = new();
+    private readonly ConcurrentDictionary<ushort, RespawnShip> _shipChosen = new();
+
+    private static OnlineSettings? ShipSettings => Dedicated.DedicatedRuntime.Config?.Network ?? (Dedicated.DedicatedRuntime.Headless ? null : MpMenu.Settings);
+
+    private static long ShipCooldownMs => (ShipSettings?.RespawnShipCooldownMinutes ?? 10) * 60_000L;
 
     /// <summary>
     /// Spawns the joiner where they chose, or sends them the choices first. False when nothing spawned yet
@@ -64,9 +66,9 @@ internal sealed partial class HostWorld
             character = CreateAt(component, identity, respawn.WorldSpawn);
             how = "the world spawn in a suit";
             break;
-        case SpawnKind.Ship:
-            if (!StartShip(session, j, respawn)) { SendSpawnMenu(session, host, j, identity, hostCharacter, "The respawn ship could not be spawned. Choose another spawn."); return false; }
-            _log.Info($"host world sync: spawning a respawn ship for ClientId {j.ClientId} '{j.Name}'");
+        case SpawnKind.Ship when target.Ship != null:
+            if (!StartShip(session, j, respawn, target.Ship)) { SendSpawnMenu(session, host, j, identity, hostCharacter, $"The {target.Ship.Name} could not be spawned. Choose another spawn."); return false; }
+            _log.Info($"host world sync: spawning a respawn ship ({target.Ship.Name}) for ClientId {j.ClientId} '{j.Name}'");
             return false;
         default:
             var point = target.Point;
@@ -133,8 +135,12 @@ internal sealed partial class HostWorld
         targets.AddRange(medbays.OrderByDescending(m => m.Home).ThenBy(m => m.Target.Option.Kind).ThenBy(m => m.Distance).Take(40).Select(m => m.Target));
         targets.Add(new(new SpawnOption(SpawnKind.Suit, "Space suit", "Spawn in your suit at the world spawn", true), null));
         long wait = _shipReadyAt.TryGetValue(me, out long ready) ? ready - MpClock.NowMs() : 0;
-        bool hasShip = Singleton<DefinitionManager>.Instance.TryGetDefinition(RespawnShipPrefab, out PrefabDefinition _);
-        targets.Add(new(new SpawnOption(SpawnKind.Ship, "Respawn ship", !hasShip ? "Not available in this game version" : wait > 0 ? $"Available again in {(wait + 59_999) / 60_000} min" : "A Pathfinder prospector ship with a medbay, yours to keep", hasShip && wait <= 0), null));
+        foreach (var ship in RespawnShips.Offered(ShipSettings?.RespawnShips))
+        {
+            bool hasShip = Singleton<DefinitionManager>.Instance.TryGetDefinition(ship.Prefab, out PrefabDefinition _);
+            string detail = !hasShip ? "Not available in this game version" : wait > 0 ? $"Available again in {(wait + 59_999) / 60_000} min" : ship.Detail + ", fuelled and yours to keep";
+            targets.Add(new(new SpawnOption(SpawnKind.Ship, "Respawn ship: " + ship.Name, detail, hasShip && wait <= 0), null, ship));
+        }
         j.Menu = targets;
         host.SendSpawnMenu(j.Peer, new SpawnMenu(targets.Select(t => t.Option).ToArray(), j.Respawn, message));
         _log.Info($"host world sync: sent ClientId {j.ClientId} '{j.Name}' {targets.Count} spawn choices ({medbays.Count} medbays){(message.Length > 0 ? ": " + message : "")}");
@@ -151,10 +157,11 @@ internal sealed partial class HostWorld
         return string.IsNullOrWhiteSpace(grid) ? name : name + " on " + grid;
     }
 
-    private bool StartShip(Session session, Joiner j, IRespawn respawn)
+    private bool StartShip(Session session, Joiner j, IRespawn respawn, RespawnShip ship)
     {
         var encounters = session.SessionComponents.TryGet<EncounterSessionComponent>();
-        if (encounters == null || !Singleton<DefinitionManager>.Instance.TryGetDefinition(RespawnShipPrefab, out PrefabDefinition prefab)) return false;
+        if (encounters == null || !Singleton<DefinitionManager>.Instance.TryGetDefinition(ship.Prefab, out PrefabDefinition prefab)) return false;
+        _shipChosen[j.ClientId] = ship;
         var spawn = respawn.WorldSpawn;
         var up = WorldTransform.TransformDirection(new Vector3D(0, 1, 0), spawn);
         var side = WorldTransform.TransformDirection(new Vector3D(Random.Shared.NextDouble() - 0.5, 0, Random.Shared.NextDouble() - 0.5), spawn);
@@ -167,21 +174,62 @@ internal sealed partial class HostWorld
         return true;
     }
 
-    // The game's own encounter spawn (EncounterSessionComponent.DebugSpawnEncounter without the admin story).
     private async void SpawnShip(Session session, EncounterSessionComponent encounters, PrefabDefinition prefab, WorldTransform at, Joiner j)
     {
-        try
-        {
-            var context = new EncounterBuildContext(prefab) { Random = new Random(), PostProcessor = encounters._encounters, Anchor = at };
-            await encounters.GenerateEncounter(context);
-            var generated = context.Build();
-            await session.Scene.MoveToDCS<EncounterUpdate.SpawnEncounters>();
-            j.ShipRoots = await encounters.SpawnEncounter(generated);
-        }
+        try { j.ShipRoots = await SpawnEncounter(session, encounters, prefab, at); }
         catch (Exception ex)
         {
             _log.Warn("host world sync: spawning the respawn ship failed: " + ex.Message);
             j.ShipRoots = Array.Empty<Entity>();
+        }
+    }
+
+    // The game's own encounter spawn (EncounterSessionComponent.DebugSpawnEncounter without the admin story).
+    private static async Keen.VRage.Library.Threading.Task<Entity[]> SpawnEncounter(Session session, EncounterSessionComponent encounters, PrefabDefinition prefab, WorldTransform at)
+    {
+        await Keen.VRage.Library.Threading.Task.SetLifetime(encounters);
+        var context = new EncounterBuildContext(prefab) { Random = new Random(), PostProcessor = encounters._encounters, Anchor = at };
+        await encounters.GenerateEncounter(context);
+        var generated = context.Build();
+        await session.Scene.MoveToDCS<EncounterUpdate.SpawnEncounters>();
+        return await encounters.SpawnEncounter(generated);
+    }
+
+    /// <summary>
+    /// What the game does to keep an encounter (EncounterHelper.TurnManual): the spawners let go of the grids and they stop
+    /// being procedural; deleting the encounter root then removes only the cargo route, not the ship.
+    /// </summary>
+    private static List<Entity> ReleaseEncounter(Session session, Entity[] roots)
+    {
+        var ship = new List<Entity>();
+        foreach (var spawner in EncounterHelper.EnumerateEntities<EncounterSpawnerComponent>(roots, null).ToList())
+            foreach (var e in spawner.SpawnedEntities.ToList()) { spawner.SpawnedEntities.Remove(e); e.Data.TryRemove<ProcedurallyGeneratedTag>(); ship.Add(e); }
+        foreach (var root in roots) if (!EngineCodec.IsDead(root)) session.Get<IEntitySpawner>().DeleteEntity(root);
+        return ship;
+    }
+
+    /// <summary>Rig probe: spawns every candidate ship in a row 30 km from the world spawn for <see cref="ShipCheck"/> to inspect.</summary>
+    internal static async void ProbeShips(Session session)
+    {
+        var encounters = session.SessionComponents.TryGet<EncounterSessionComponent>();
+        var origin = (session.TryGet<IRespawn>()?.WorldSpawn.Position ?? default) + new Vector3D(30000, 0, 0);
+        ShipCheck.Probed.Clear();
+        for (int i = 0; i < RespawnShips.Candidates.Length; i++)
+        {
+            var ship = RespawnShips.Candidates[i];
+            try
+            {
+                if (encounters == null || !Singleton<DefinitionManager>.Instance.TryGetDefinition(ship.Prefab, out PrefabDefinition prefab)) { ShipCheck.Probed[ship.Key] = new(); continue; }
+                var roots = await SpawnEncounter(session, encounters, prefab, new WorldTransform(origin + new Vector3D(i * 3000, 0, 0), Quaternion.Identity));
+                var grids = ReleaseEncounter(session, roots).Where(e => e.TryGet<CubeGridComponent>() != null).ToList();
+                Settle(grids);
+                ShipCheck.Probed[ship.Key] = grids;
+            }
+            catch (Exception ex)
+            {
+                GameLog.Instance.Warn("ship probe: " + ship.Key + " failed: " + ex.Message);
+                ShipCheck.Probed[ship.Key] = new();
+            }
         }
     }
 
@@ -197,7 +245,7 @@ internal sealed partial class HostWorld
     /// Undoes the cargo route (dampeners off, thrusters held at a target speed) so the ship holds still for its new owner.
     /// The route starts asynchronously after the spawn, so this runs for a few seconds after the takeover.
     /// </summary>
-    private static void Settle(IEnumerable<Entity> grids)
+    internal static void Settle(IEnumerable<Entity> grids)
     {
         foreach (var grid in grids)
         {
@@ -233,16 +281,12 @@ internal sealed partial class HostWorld
         {
             if (roots != null)
             {
-                // What the game does to keep an encounter (EncounterHelper.TurnManual): the spawners let go of the grids and
-                // they stop being procedural; deleting the encounter root then removes only the cargo route, not the ship.
-                foreach (var spawner in EncounterHelper.EnumerateEntities<EncounterSpawnerComponent>(roots, null).ToList())
-                    foreach (var e in spawner.SpawnedEntities.ToList()) { spawner.SpawnedEntities.Remove(e); e.Data.TryRemove<ProcedurallyGeneratedTag>(); ship.Add(e); }
+                ship = ReleaseEncounter(session, roots);
                 foreach (var grid in ship.Where(e => e.TryGet<CubeGridComponent>() != null && e.TryGet<OwnershipComponent>() != null))
                 {
                     WorldSocial.SetOwner(grid, (long)identity);
                     WorldSocial.SetSharing(grid, GridSharing.Private);
                 }
-                foreach (var root in roots) if (!EngineCodec.IsDead(root)) session.Get<IEntitySpawner>().DeleteEntity(root);
             }
         }
         catch (Exception ex) { _log.Warn("host world sync: taking over the respawn ship failed: " + ex); }
@@ -255,6 +299,14 @@ internal sealed partial class HostWorld
         }
         var grids = ship.Where(e => e.TryGet<CubeGridComponent>() != null).ToList();
         Settle(grids);
+        _shipChosen.TryRemove(j.ClientId, out var chosen);
+        try
+        {
+            var topped = ShipCheck.TopUp(grids);
+            var failed = ShipCheck.Inspect(grids).Where(c => !c.Pass).Select(c => c.Name + " (" + c.Detail + ")").ToList();
+            _log.Info($"host world sync: respawn ship {chosen?.Name} for ClientId {j.ClientId}: {topped.Count} refuels{(failed.Count == 0 ? ", survival checklist passed" : "; checklist FAILED: " + string.Join("; ", failed))}");
+        }
+        catch (Exception ex) { _log.Warn("host world sync: checking the respawn ship failed: " + ex.Message); }
         j.ShipSettle = grids;
         j.ShipSettleUntil = MpClock.NowMs() + 8000;
         var at = main.Data.GetWorldTransform();

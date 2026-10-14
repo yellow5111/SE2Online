@@ -37,5 +37,16 @@ public enum SyncMsg : byte
 	AdminState = 70,
 	SpawnMenu = 71,
 	InputAck = 72,
-	GpsShare = 73
+	GpsShare = 73,
+	VoiceUp = 76,
+	VoiceDown = 77,
+	Motd = 78,
+	ServerInfo = 79,
+	TradeRequest = 80,
+	TradeAction = 81,
+	TradeInvite = 82,
+	TradeState = 83,
+	Punch = 86,
+	FightLock = 87,
+	WaterGrids = 88
 }

@@ -18,7 +18,8 @@ using Y51_SE2Online.Core;
 namespace Y51_SE2Online.SyncEngine;
 
 /// <summary>
-/// Server-side damage rules for multiplayer: with PvP off, players cannot hurt each other's characters or grids;
+/// Server-side damage rules for multiplayer: with PvP off, players cannot hurt each other's characters or grids; with
+/// PvP on, only players whose factions have no treaty or are at war can (<see cref="Sync.RelationTable.MayFight"/>);
 /// characters of players who are offline cannot die at all, except to another player's weapons when PvP is on.
 /// With PvP on, other players' weapons hurt characters even in a creative world.
 /// </summary>
@@ -54,7 +55,7 @@ internal static class PvpRules
         _handleValue = _simulatedSource.FieldType.GetProperty("Value");
         HarmonyMethod Own(string name) => new(typeof(PvpRules), name);
         harmony.Patch(AccessTools.Method(projectiles, "SpawnHitscanProjectile"), prefix: Own(nameof(HitscanPrefix)), finalizer: Own(nameof(ClearFinalizer)));
-        harmony.Patch(AccessTools.Method(projectiles, "ProcessHit"), prefix: Own(nameof(SimulatedPrefix)), finalizer: Own(nameof(ClearFinalizer)));
+        harmony.Patch(AccessTools.Method(projectiles, "ProcessHit"), prefix: Own(nameof(SimulatedPrefix)), finalizer: Own(nameof(ProcessHitFinalizer)));
         harmony.Patch(AccessTools.Method(projectiles, "ExplodeProjectile"), prefix: Own(nameof(ExplodePrefix)));
         foreach (var receiver in new[] { typeof(CharacterHitReceiverComponent), typeof(GridHitReceiverComponent) })
         {
@@ -97,7 +98,7 @@ internal static class PvpRules
 
     /// <summary>Whether damage from <paramref name="attacker"/> to something owned by <paramref name="victim"/> is allowed.</summary>
     public static bool Allowed(long attacker, long victim, bool pvp, Func<long, bool> isPlayer)
-        => pvp || !isPlayer(attacker) || !isPlayer(victim) || attacker == victim;
+        => !isPlayer(attacker) || !isPlayer(victim) || attacker == victim || Sync.RelationTable.MayFight(TurretRelations.Table.Of(attacker, victim), pvp);
 
     private static void HitscanPrefix(object[] __args)
     {
@@ -177,6 +178,45 @@ internal static class PvpRules
         return true;
     }
 
+    /// <summary>Whether damage from one player identity to another would be allowed right now.</summary>
+    public static bool MayHurt(long attacker, long victim) => !Active || Allowed(attacker, victim, Pvp, IsPlayer);
+
+    private static readonly Guid ImpactDamage = new("c28c6d5f-44a0-4543-ba28-a7f1b2233e10");
+
+    /// <summary>
+    /// A punch, applied as damage from <paramref name="attacker"/> so every rule here decides it (PvP, faction and
+    /// alliance relations, offline protection, creative). True when the victim actually lost health.
+    /// </summary>
+    public static bool Punch(Entity victim, long attacker, float damage)
+    {
+        var life = victim.TryGet<CharacterLifeComponent>();
+        if (life == null || !Keen.VRage.Library.Utils.Singleton<Keen.VRage.Library.Definitions.DefinitionManager>.Instance.TryGetDefinition(ImpactDamage, out DamageSourceDefinition source)) return false;
+        float before = life.Health;
+        t_attacker = attacker;
+        try { life.DoDamage(damage, source); }
+        finally { t_attacker = 0; }
+        return life.Health < before;
+    }
+
+    private static bool _staleHitLogged;
+
+    // ProcessHit dereferences the projectile's source entity and the hit body's entity. In multiplayer either can
+    // be gone mid-flight (a joiner's gun swapped or despawned, a grid despawned), and the NullReferenceException
+    // on the in-process server thread takes the host's whole game down. The stray projectile is dropped instead.
+    private static Exception ProcessHitFinalizer(Exception __exception, ref Vector3D? __result, ref bool isProjectileAlive)
+    {
+        t_attacker = 0;
+        if (__exception is not NullReferenceException) return __exception;
+        __result = null;
+        isProjectileAlive = false;
+        if (!_staleHitLogged)
+        {
+            _staleHitLogged = true;
+            GameLog.Instance.Warn("pvp: a projectile hit an entity that no longer exists (shooter or target removed mid-flight); the projectile was dropped: " + __exception.Message);
+        }
+        return null;
+    }
+
     private static Exception ClearFinalizer(Exception __exception)
     {
         t_attacker = 0;
@@ -191,7 +231,7 @@ internal static class PvpRules
         long owner = TeamPermissions.OwnerOf(__instance.Entity);
         if (!IsPlayer(owner)) return true;
         bool byPlayer = IsPlayer(t_attacker) && t_attacker != owner;
-        if (byPlayer && !Pvp)
+        if (byPlayer && !Sync.RelationTable.MayFight(TurretRelations.Table.Of(t_attacker, owner), Pvp))
         {
             System.Threading.Interlocked.Increment(ref Blocked);
             return false;
@@ -209,10 +249,12 @@ internal static class PvpRules
     }
 
     // A creative world locks character health; PvP damage from another player still lands there, unless the victim
-    // is in per-player creative (an admin), which stays invulnerable.
+    // is in per-player creative (an admin), which stays invulnerable. Healing (medbay, survival kit, regen, medkits) must
+    // get through the same lock, or that damage could never be undone.
     private static bool TrySetValuePrefix(StatCollectionComponent __instance, StatDefinition stat, float value, ref bool __result)
     {
-        if (!t_pvpDamage || stat.ModifiableInCreative || _statGameMode.GetValue(__instance) is not GameModeSessionComponent mode || !mode.CreativeGlobal) return true;
+        if (stat.ModifiableInCreative || _statGameMode.GetValue(__instance) is not GameModeSessionComponent mode || !mode.CreativeGlobal) return true;
+        if (!t_pvpDamage && !(stat.Clamp(value) > __instance.GetValue(stat))) return true;
         _updateStat.Invoke(__instance, new object[] { stat, stat.Clamp(value) });
         __result = true;
         return false;

@@ -20,7 +20,7 @@ public static class SyncProtocol
 	{
 		if (data.Length > 0 && data[0] >= 32)
 		{
-			return data[0] <= 79;
+			return data[0] <= 95;
 		}
 		return false;
 	}

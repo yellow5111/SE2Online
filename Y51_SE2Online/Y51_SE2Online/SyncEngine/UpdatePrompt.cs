@@ -19,6 +19,21 @@ internal static class UpdatePrompt
     private static bool _checked;
     private static volatile string _available;
 
+    /// <summary>The newest release the site reported this game start; null until the check answers (or with checks off).</summary>
+    public static volatile string Latest;
+
+    /// <summary>The installed version, and what the site offers once it has answered.</summary>
+    public static string VersionLine()
+    {
+        string line = "SE2 Online version " + MpPlugin.Version;
+        string latest = Latest;
+        if (!MpMenu.Settings.CheckForUpdates) return line;
+        if (latest == null) return line + " - checking se2-online.yellow51.dev...";
+        return VersionMismatch.IsNewer(latest, MpPlugin.Version)
+            ? line + " - version " + latest + " is available on se2-online.yellow51.dev"
+            : line + " - up to date (latest " + latest + ")";
+    }
+
     public static async Task<string> LatestAsync()
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
@@ -38,6 +53,7 @@ internal static class UpdatePrompt
                 try
                 {
                     string latest = await LatestAsync();
+                    Latest = latest;
                     GameLog.Instance.Info($"update check: newest release {latest ?? "unknown"}, this game runs {MpPlugin.Version}");
                     if (VersionMismatch.IsNewer(latest, MpPlugin.Version) && latest != MpMenu.Settings.SkippedUpdate) _available = latest;
                 }
@@ -51,20 +67,20 @@ internal static class UpdatePrompt
         {
             shared.ShowDialog(new TwoOptionsDialogViewModel(new TwoOptionsDialogDefinition
             {
-                Title = LocKey.FromString("Update available"),
-                Content = LocKey.FromString($"Y51_SE2Online {available} is available. You have {MpPlugin.Version}.\n\nServers only admit players on their exact version. " + PulsarUpdateHint),
-                ConfirmOption = LocKey.FromString("OK"),
-                CancelOption = LocKey.FromString("Skip this version")
+                Title = OnlineUi.Raw("Update available"),
+                Content = OnlineUi.Raw($"Y51_SE2Online {available} is available. You have {MpPlugin.Version}.\n\nServers only admit players on their exact version. " + PulsarUpdateHint),
+                ConfirmOption = OnlineUi.Raw("OK"),
+                CancelOption = OnlineUi.Raw("Skip this version")
             }) { CancelAction = () => MpMenu.RememberSkippedUpdate(available) });
             return;
         }
         shared.ShowDialog(new ThreeOptionsDialogViewModel(new ThreeOptionsDialogDefinition
         {
-            Title = LocKey.FromString("Update available"),
-            Content = LocKey.FromString($"Y51_SE2Online {available} is available. You have {MpPlugin.Version}.\n\nServers only admit players on their exact version. Update now?"),
-            ConfirmOption = LocKey.FromString("Update"),
-            DefaultOption = LocKey.FromString("Skip this version"),
-            CancelOption = LocKey.FromString("Later")
+            Title = OnlineUi.Raw("Update available"),
+            Content = OnlineUi.Raw($"Y51_SE2Online {available} is available. You have {MpPlugin.Version}.\n\nServers only admit players on their exact version. Update now?"),
+            ConfirmOption = OnlineUi.Raw("Update"),
+            DefaultOption = OnlineUi.Raw("Skip this version"),
+            CancelOption = OnlineUi.Raw("Later")
         })
         {
             ConfirmAction = OpenDownloadPage,
@@ -82,14 +98,14 @@ internal static class UpdatePrompt
         {
             shared.ShowDialog(new TwoOptionsDialogViewModel(new TwoOptionsDialogDefinition
             {
-                Title = LocKey.FromString("Different version"), Content = LocKey.FromString(text),
-                ConfirmOption = LocKey.FromString("Get update"), CancelOption = LocKey.FromString("OK")
+                Title = OnlineUi.Raw("Different version"), Content = OnlineUi.Raw(text),
+                ConfirmOption = OnlineUi.Raw("Get update"), CancelOption = OnlineUi.Raw("OK")
             }) { ConfirmAction = OpenDownloadPage });
             return;
         }
         shared.ShowDialog(new OneOptionDialogViewModel(new OneOptionDialogDefinition
         {
-            Title = LocKey.FromString("Different version"), Content = LocKey.FromString(text), ConfirmOption = LocKey.FromString("OK")
+            Title = OnlineUi.Raw("Different version"), Content = OnlineUi.Raw(text), ConfirmOption = OnlineUi.Raw("OK")
         }));
     }
 

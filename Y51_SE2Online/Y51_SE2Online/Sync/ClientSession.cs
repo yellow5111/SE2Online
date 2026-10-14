@@ -105,6 +105,35 @@ public sealed class ClientSession
 			_t.Send(Host.Value, Channel.Control, SocialMessage.Encode(SyncMsg.ChatSend, new ChatSend(text)));
 	}
 
+	/// <summary>The host's last Server info answer; Version counts answers so a screen can wait for the next one.</summary>
+	public (ServerInfoRow[] Rows, int Version) ServerInfo { get; private set; } = (System.Array.Empty<ServerInfoRow>(), 0);
+
+	public void RequestServerInfo()
+	{
+		if (Host.HasValue && CurrentPhase == Phase.Accepted)
+			_t.Send(Host.Value, Channel.Control, SocialMessage.Encode(SyncMsg.ServerInfo, new ServerInfoRequest()));
+	}
+
+	private uint _voiceSeq;
+
+	public void SendVoice(byte[] frame)
+	{
+		if (Host.HasValue && CurrentPhase == Phase.Accepted && frame.Length <= VoiceMessage.MaxFrameBytes)
+			_t.Send(Host.Value, Channel.State, VoiceMessage.EncodeUp(++_voiceSeq, frame));
+	}
+
+	public void SendTrade(byte[] data)
+	{
+		if (Host.HasValue && CurrentPhase == Phase.Accepted)
+			_t.Send(Host.Value, Channel.Control, data);
+	}
+
+	public void SendPunch(ushort target)
+	{
+		if (Host.HasValue && CurrentPhase == Phase.Accepted)
+			_t.Send(Host.Value, Channel.Control, SocialMessage.Encode(SyncMsg.Punch, new PunchRequest(target)));
+	}
+
 	public void SendGpsShare(GpsShare share)
 	{
 		if (Host.HasValue && CurrentPhase == Phase.Accepted)
@@ -461,6 +490,9 @@ public sealed class ClientSession
 			ChatLog.Add(line with { From = SocialState.Clean(line.From, 80), Text = SocialState.Clean(line.Text, ChatLog.MaxText) }, now);
 			break;
 		}
+		case SyncMsg.VoiceDown:
+			if (VoiceMessage.TryDecodeDown(data, out ushort speaker, out Vec3D at, out byte[] frame)) VoiceMessage.Received?.Invoke(speaker, at, frame);
+			break;
 		case SyncMsg.InputAck:
 		{
 			var (ackSeq, appliedHostMs) = InputAckMessage.Decode(data);
@@ -469,12 +501,38 @@ public sealed class ClientSession
 			{
 				long rtt = now - sent.LocalMs;
 				InputAck = (ackSeq, sent.LocalMs, appliedHostMs, rtt);
-				if (rtt >= 0 && rtt < 2000) InputRttMs = InputRttMs < 0 ? rtt : InputRttMs + 0.1 * (rtt - InputRttMs);
+				if (rtt >= 0 && rtt < 2000)
+				{
+					_rttWindow[_rttCount++ % _rttWindow.Length] = rtt;
+					InputRttMs = MedianRtt();
+				}
 				if (now - _ackWorstSinceMs > 5000) { _ackWorstSinceMs = now; InputAckWorstMs = 0; }
 				if (rtt > InputAckWorstMs) InputAckWorstMs = rtt;
 			}
 			break;
 		}
+		case SyncMsg.TradeInvite:
+		case SyncMsg.TradeState:
+			if (data.Length <= 65536) TradeInbox.Raise((SyncMsg)data[0], data);
+			break;
+		case SyncMsg.ServerInfo:
+		{
+			var info = SocialMessage.Decode<ServerInfoMessage>(data);
+			ServerInfo = ((info.Rows ?? System.Array.Empty<ServerInfoRow>()).Where(r => r != null).Take(Sync.ServerInfo.MaxRows).ToArray(), ServerInfo.Version + 1);
+			break;
+		}
+		case SyncMsg.Motd:
+		{
+			var motd = SocialMessage.Decode<MotdMessage>(data);
+			Motd = new MotdMessage(SocialState.Clean(motd.Title ?? "", Core.Motd.MaxTitle), JoinProgress.Sanitize(motd.Text, Core.Motd.MaxText));
+			break;
+		}
+		case SyncMsg.WaterGrids:
+			WaterGridsMessage.Receive(data);
+			break;
+		case SyncMsg.FightLock:
+			if (data.Length <= 64) FightLockState.Set(SocialMessage.Decode<FightLockMessage>(data).Locked);
+			break;
 		case SyncMsg.SpawnMenu:
 		{
 			var menu = SocialMessage.Decode<SpawnMenu>(data);
@@ -673,6 +731,9 @@ public sealed class ClientSession
 	/// <summary>The host's spawn choices while we wait for a character; null once chosen.</summary>
 	public SpawnMenu? SpawnMenu { get; private set; }
 
+	/// <summary>The host's message of the day, until it has been shown.</summary>
+	public MotdMessage? Motd { get; set; }
+
 	public void ChooseSpawn(int index)
 	{
 		var menu = SpawnMenu;
@@ -737,8 +798,26 @@ public sealed class ClientSession
 
 	public long InputAckWorstMs { get; private set; }
 
-	/// <summary>Smoothed time from sending an input to the host's ack of it; -1 until the first ack.</summary>
+	/// <summary>Median time from sending an input to the host's ack of it over the last acks; -1 until the first ack.</summary>
 	public double InputRttMs { get; private set; } = -1;
+
+	// Inputs go out only when they change, so acks are sparse: a 0.1 moving average took ~20 acks (often many
+	// seconds) to follow a ping change, and a lag estimate that short dragged the predicted look and lead back.
+	private readonly long[] _rttWindow = new long[9];
+
+	private int _rttCount;
+
+	private long _pongsSeen;
+
+	private long _rttCheckMs;
+
+	private double MedianRtt()
+	{
+		int n = Math.Min(_rttCount, _rttWindow.Length);
+		var sorted = _rttWindow.AsSpan(0, n).ToArray();
+		Array.Sort(sorted);
+		return n % 2 == 1 ? sorted[n / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0;
+	}
 
 	private long _ackWorstSinceMs;
 
@@ -783,9 +862,19 @@ public sealed class ClientSession
 		{
 			return;
 		}
-		if (_o.Progress != null && Accept != null && _phase == Phase.Accepted && _t.TryGetStats(Host.Value, out PeerStats stats))
+		bool progress = _o.Progress != null && Accept != null && _phase == Phase.Accepted;
+		long nowMs = _clock();
+		if ((progress || nowMs - _rttCheckMs >= 250) && _t.TryGetStats(Host.Value, out PeerStats stats))
 		{
-			_o.Progress.BulkBytes(stats.Channels[1].BytesReceived);
+			_rttCheckMs = nowMs;
+			if (progress) _o.Progress.BulkBytes(stats.Channels[1].BytesReceived);
+			// The transport's 1 s pings keep the round trip current while no input changes (and so nothing is acked).
+			if (stats.PongsReceived != _pongsSeen && stats.LastRttMs >= 0 && stats.LastRttMs < 2000 && InputRttMs >= 0)
+			{
+				_pongsSeen = stats.PongsReceived;
+				_rttWindow[_rttCount++ % _rttWindow.Length] = (long)Math.Round(stats.LastRttMs);
+				InputRttMs = MedianRtt();
+			}
 		}
 		(ClientPhase Phase, string Text) report;
 		while (_reports.TryDequeue(out report))

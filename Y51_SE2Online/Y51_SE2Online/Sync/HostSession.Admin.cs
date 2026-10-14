@@ -56,7 +56,7 @@ public sealed partial class HostSession
 	private string Decorate(string name, long identity)
 	{
 		string tag = identity == 0 ? null : _o.FactionTagOf?.Invoke(identity);
-		return string.IsNullOrEmpty(tag) ? name : "[" + tag + "] " + name;
+		return FactionTag.Prefix(tag, name);
 	}
 
 	/// <summary>Returns a reject reason for a join that passed version checks, or null to admit it.</summary>
@@ -136,7 +136,8 @@ public sealed partial class HostSession
 
 	private void HandleAdmin(RemoteClient c, byte[] data)
 	{
-		if (c.Status != ClientStatus.Synced || data.Length > 1024) return;
+		// Room for a 1000-character message of the day after JSON escaping.
+		if (c.Status != ClientStatus.Synced || data.Length > 8192) return;
 		var request = SocialMessage.Decode<AdminRequest>(data);
 		string message;
 		if (request.Action == AdminAction.Refresh) message = "";
@@ -154,7 +155,7 @@ public sealed partial class HostSession
 	{
 		long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 		if (!Enum.IsDefined(r.Action)) return "Unknown action.";
-		if (r.Action >= AdminAction.Creative && r.Action is not (AdminAction.Pvp or AdminAction.OfflineRaidProtection or AdminAction.PcuLimit or AdminAction.SunRotation or AdminAction.SunPeriod or AdminAction.SunNudge))
+		if (r.Action >= AdminAction.Creative && r.Action is not (AdminAction.Pvp or AdminAction.OfflineRaidProtection or AdminAction.PcuLimit or AdminAction.SunRotation or AdminAction.SunPeriod or AdminAction.SunNudge or AdminAction.Motd))
 		{
 			_world.OnAdminRequest(actorPeer, actorClientId, r);
 			return "";
@@ -212,6 +213,9 @@ public sealed partial class HostSession
 			if (!(Math.Abs(r.Size) <= 360)) return "Move the sun by at most 360 degrees.";
 			lock (_sync) _sunNudgeDeg += r.Size;
 			result = "Sun moved " + r.Size.ToString("+0.#;-0.#", System.Globalization.CultureInfo.InvariantCulture) + " degrees.";
+			break;
+		case AdminAction.Motd:
+			result = _o.Access.SetMotd(r.Name);
 			break;
 		case AdminAction.OfflineRaidProtection:
 			result = _o.Access.SetOfflineRaid(r.Value);
@@ -318,7 +322,7 @@ public sealed partial class HostSession
 		return new AdminState
 		{
 			Role = role, ServerName = _o.SessionName, Dedicated = !_o.HostCountsAsPlayer, Message = message, MaxPlayers = _o.MaxPlayers,
-			WhitelistOnly = _o.Access.WhitelistOnly, Pvp = Pvp, OfflineRaidProtection = OfflineRaidProtection, PcuLimit = _o.PcuInForce, SunRotation = _o.SunInForce.Rotation, SunPeriodMinutes = _o.SunInForce.PeriodMinutes, HasPassword = !string.IsNullOrEmpty(_o.Password), Revision = _o.Access.Revision,
+			WhitelistOnly = _o.Access.WhitelistOnly, Pvp = Pvp, OfflineRaidProtection = OfflineRaidProtection, PcuLimit = _o.PcuInForce, SunRotation = _o.SunInForce.Rotation, SunPeriodMinutes = _o.SunInForce.PeriodMinutes, Motd = admin ? MotdTemplate : "", VoiceRadius = _o.VoiceRadiusMeters, HasPassword = !string.IsNullOrEmpty(_o.Password), Revision = _o.Access.Revision,
 			Players = admin ? players : players.Select(p => p with { SteamId = 0 }).ToArray(),
 			Bans = admin ? bans : Array.Empty<BanEntry>(), Whitelist = admin ? whitelist : Array.Empty<AccessEntry>(),
 			SafeZones = admin ? _o.SafeZones?.Invoke() ?? Array.Empty<SafeZoneInfo>() : Array.Empty<SafeZoneInfo>()
@@ -335,4 +339,16 @@ public sealed partial class HostSession
 	}
 
 	public string LocalAdminMessage { get; set; } = "";
+
+	/// <summary>The message of the day in force: the runtime choice, else the server configuration.</summary>
+	public string MotdTemplate => _o.Access.Motd ?? _o.Motd ?? "";
+
+	// Sent once at join; the joiner shows it (dialog and chat) after it has spawned.
+	private void SendMotd(PeerId peer, string name)
+	{
+		string text = Core.Motd.Expand(MotdTemplate, name, _o.SessionName, PlayerTable().Count(p => p.Connected), _o.MaxPlayers);
+		if (text.Length == 0) return;
+		string title = string.IsNullOrWhiteSpace(_o.MotdTitle) ? _o.SessionName : _o.MotdTitle;
+		_t.Send(peer, Channel.Control, SocialMessage.Encode(SyncMsg.Motd, new MotdMessage(title ?? "", text)));
+	}
 }

@@ -12,10 +12,12 @@ public enum AdminAction
 {
     Refresh, Kick, Ban, Unban, Promote, Demote, WhitelistAdd, WhitelistRemove, WhitelistOnly,
     Creative, SpawnPrefab, SpawnItem, CreateSafeZone, DeleteSafeZone, TeleportTo, Bring, Pvp, OfflineRaidProtection, PcuLimit,
-    SunRotation, SunPeriod, SunNudge
+    SunRotation, SunPeriod, SunNudge, Motd
 }
 
 public sealed record ChatSend(string Text);
+/// <summary>Message of the day for one joiner, placeholders already filled in.</summary>
+public sealed record MotdMessage(string Title, string Text);
 public sealed record ChatLine(string From, ulong FromId, string Text, ChatKind Kind, long UnixMs);
 public sealed record AdminRequest(AdminAction Action, ulong Target = 0, string Reason = "", int Minutes = 0,
     string Name = "", bool Value = false, double Size = 0);
@@ -62,6 +64,9 @@ public sealed class AdminState
     public bool SunRotation { get; set; }
     /// <summary>Minutes for one full day.</summary>
     public double SunPeriodMinutes { get; set; }
+    public string Motd { get; set; } = "";
+    /// <summary>Proximity voice range on this server; 0 when voice is off.</summary>
+    public double VoiceRadius { get; set; } = 50;
     public int MaxPlayers { get; set; }
     public string Message { get; set; } = "";
     public long Revision { get; set; }
@@ -86,6 +91,8 @@ public sealed class AccessList
     /// <summary>Runtime sun choices; override the server config. The world save keeps whatever is in force.</summary>
     public bool? SunRotation { get; set; }
     public double? SunPeriodMinutes { get; set; }
+    /// <summary>Runtime message of the day; overrides the server config. Empty clears it, null uses the config.</summary>
+    public string Motd { get; set; }
     public List<AccessEntry> Admins { get; set; } = new();
     public List<BanEntry> Bans { get; set; } = new();
     public List<AccessEntry> Whitelist { get; set; } = new();
@@ -102,6 +109,14 @@ public sealed class AccessList
         list.Admins ??= new(); list.Bans ??= new(); list.Whitelist ??= new();
         list._path = path;
         return list;
+    }
+
+    /// <summary>Writes a new list at <paramref name="path"/> holding only this list's bans.</summary>
+    public void BansOnlyCopy(string path)
+    {
+        List<BanEntry> bans;
+        lock (_sync) bans = Bans.ToList();
+        new AccessList { Bans = bans, _path = path }.Save();
     }
 
     private void Save()
@@ -210,6 +225,14 @@ public sealed class AccessList
     {
         lock (_sync) { PcuLimit = limit; Save(); }
         return limit == 0 ? "PCU limit removed: players can build without a PCU cap." : limit < 0 ? "PCU limit back to the world's own setting." : $"PCU limit is now {limit:N0} per player.";
+    }
+
+    public string SetMotd(string text)
+    {
+        text = (text ?? "").Replace("\r\n", "\n").Trim();
+        if (text.Length > Core.Motd.MaxText) return $"The message of the day can be at most {Core.Motd.MaxText} characters.";
+        lock (_sync) { Motd = text; Save(); }
+        return text.Length == 0 ? "Message of the day cleared." : "Message of the day set.";
     }
 
     public string SetSunRotation(bool on)

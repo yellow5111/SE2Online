@@ -31,6 +31,7 @@ internal sealed class OnlineDirectoryView : UserControl
     private readonly Button _join;
     private readonly Button _favorite;
     private readonly Button _refresh;
+    private readonly Button _serverInfo;
     private DirectoryListing[] _last;
     private string _filter;
     private const string Columns = "*,330,126,214";
@@ -67,7 +68,8 @@ internal sealed class OnlineDirectoryView : UserControl
         _endpoint.IsReadOnly = true;
         _join = OnlineUi.Button("Join selected", Join, servers ? "JoinServer" : "JoinSession", true);
         _favorite = OnlineUi.Button("Add favorite", () => { if (_list.SelectedItem is DirectoryListing e) { MpMenu.ToggleFavorite(e); Refresh(true); Detail(); } }, servers ? "FavoriteServer" : "FavoriteSession");
-        var detail = OnlineUi.Stack(_title, _world, _description, _info, _build, _endpoint, _reason, _join, _favorite);
+        _serverInfo = OnlineUi.Button("Server info", () => { if (_list.SelectedItem is DirectoryListing e) ServerInfoUi.Show(e.Name, ServerInfoUi.FromListing(e)); }, servers ? "ServerInfoListing" : "SessionInfoListing");
+        var detail = OnlineUi.Stack(_title, _world, _description, _info, _build, _endpoint, _reason, _join, _favorite, _serverInfo);
         Content = OnlineUi.Columns(OnlineUi.Panel(listings), OnlineUi.Panel(OnlineUi.Scroll(detail)), "*,24,500");
         Detail();
     }
@@ -102,6 +104,7 @@ internal sealed class OnlineDirectoryView : UserControl
         var entry = _list.SelectedItem as DirectoryListing;
         _join.IsEnabled = !MpMenu.Busy && entry != null && Compatible(entry) && entry.Players < entry.MaxPlayers;
         _favorite.IsEnabled = entry != null;
+        _serverInfo.IsEnabled = entry != null;
         _title.Text = entry?.Name ?? (_servers ? "Select a server" : "Select a session");
         _world.Text = entry == null ? "World details and connection options appear here." : entry.WorldName;
         _description.Text = entry?.Description ?? "";

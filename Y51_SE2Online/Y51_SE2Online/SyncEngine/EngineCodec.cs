@@ -443,6 +443,11 @@ internal static class EngineCodec
 
 	public static bool IsClientInput(string name) => ClientInputNames.Contains(name);
 
+	/// <summary>The movement and body-turn inputs (not head look), which a fight scene zeroes.</summary>
+	public static bool IsMovementInput(int typeId) => typeId == Keen.VRage.DCS.Internal.RuntimeDataInfo.Of(typeof(Keen.Game2.Simulation.WorldObjects.Movement.ControlData)).TypeId
+		|| typeId == Keen.VRage.DCS.Internal.RuntimeDataInfo.Of(typeof(Keen.Game2.Simulation.WorldObjects.Movement.AngularControlData)).TypeId
+		|| typeId == Keen.VRage.DCS.Internal.RuntimeDataInfo.Of(typeof(Keen.Game2.Simulation.WorldObjects.Movement.TargetControlData)).TypeId;
+
 	public static bool IsClientInput(int typeId) => (_clientInputIds ??= new HashSet<int>(ClientInputTypes.Select(t => RuntimeDataInfo.Of(t).TypeId))).Contains(typeId);
 
 	public static (int TypeId, int Size)? ResolveType(string name)

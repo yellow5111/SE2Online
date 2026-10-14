@@ -149,15 +149,9 @@ internal sealed class SteamLink : IPacketLink, IDisposable
 				}
 				_log.Info($"listening for P2P connections on virtual port {_vport}");
 			}
-			if (_listenAddress != null)
+			if (_listenAddress != null && !TryListenIp() && _gameServer)
 			{
-				var address = NativeAddress(_listenAddress);
-				_ipListen = _api.CreateListenSocketIP(ref address, _options.Length, _options);
-				if (_ipListen == HSteamListenSocket.Invalid)
-				{
-					throw new InvalidOperationException("Could not listen on " + _listenAddress + ". Check that its UDP port is available.");
-				}
-				_log.Info("Steam Networking Sockets IP listener: " + _listenAddress);
+				throw new InvalidOperationException("Could not listen on " + _listenAddress + ". Check that its UDP port is available.");
 			}
 		}
 	}
@@ -275,8 +269,31 @@ internal sealed class SteamLink : IPacketLink, IDisposable
 
 	private void OnStatusChanged(SteamNetConnectionStatusChangedCallback_t s) => _status.Enqueue(s);
 
+	private long _ipRetryAt = -1;
+
+	// A game that crashed or is still closing can hold the UDP port for a while; P2P keeps working and the IP
+	// listener (direct IP joins, and same-account joins over loopback) comes up once the port is free.
+	private bool TryListenIp()
+	{
+		var address = NativeAddress(_listenAddress);
+		_ipListen = _api.CreateListenSocketIP(ref address, _options.Length, _options);
+		if (_ipListen != HSteamListenSocket.Invalid)
+		{
+			_ipRetryAt = -1;
+			_log.Info("Steam Networking Sockets IP listener: " + _listenAddress);
+			return true;
+		}
+		if (!_gameServer)
+		{
+			if (_ipRetryAt < 0) _log.Info("could not listen on " + _listenAddress + " (UDP port in use, often by another SE2 instance that is still closing); Steam P2P joins work, direct IP and same-account joins wait until the port is free. Retrying every 5 s.");
+			_ipRetryAt = Environment.TickCount64 + 5000;
+		}
+		return false;
+	}
+
 	public unsafe void Pump(List<LinkEvent> events, List<LinkMessage> messages)
 	{
+		if (_ipRetryAt >= 0 && Environment.TickCount64 >= _ipRetryAt) TryListenIp();
 		if (_disposed)
 		{
 			return;

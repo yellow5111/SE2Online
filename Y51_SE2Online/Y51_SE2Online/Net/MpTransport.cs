@@ -177,8 +177,13 @@ public sealed class MpTransport : ITransport, IDisposable
 			_log.WarnOnce("oversize-bulk", $"bulk message of {payload.Length} B exceeds {_o.MaxBulkMessageBytes} B");
 			return 0;
 		}
+		if (channel == Channel.Bulk && BulkCompression.Pack(payload.Span) is { } packed)
+		{
+			payload = packed;
+		}
 		ulong token = (ulong)Interlocked.Increment(ref _nextToken);
 		_out.Enqueue(new OutRequest(peer, channel, payload, token));
+		Core.LatencyTrace.Mark(Core.LatencyTrace.Queued, payload.Span, (int)channel, peer.Value);
 		return token;
 	}
 
@@ -355,6 +360,7 @@ public sealed class MpTransport : ITransport, IDisposable
 				p.Bulk.Dequeue();
 				p.BulkQueuedBytes -= bulk.Data.Length;
 				stats.MessagesSent++;
+				Core.LatencyTrace.Mark(Core.LatencyTrace.Sent, bulk.Data.Span, (int)Channel.Bulk, p.Id.Value);
 			}
 		}
 	}
@@ -384,10 +390,12 @@ public sealed class MpTransport : ITransport, IDisposable
 		case Channel.Control:
 			SendFrame(p, Channel.Control, FrameKind.Data, req.Payload.Span, reliable: true);
 			p.Stats.Channels[(int)Channel.Control].MessagesSent++;
+			Core.LatencyTrace.Mark(Core.LatencyTrace.Sent, req.Payload.Span, (int)Channel.Control, p.Id.Value);
 			break;
 		case Channel.State:
 			SendStateFrame(p, FrameKind.Data, req.Payload.Span, req.Token, now);
 			p.Stats.Channels[(int)Channel.State].MessagesSent++;
+			Core.LatencyTrace.Mark(Core.LatencyTrace.Sent, req.Payload.Span, (int)Channel.State, p.Id.Value);
 			break;
 		case Channel.Bulk:
 			p.Bulk.Enqueue(new BulkOut
@@ -397,6 +405,7 @@ public sealed class MpTransport : ITransport, IDisposable
 				Count = Fragmenter.CountFor((uint)req.Payload.Length, (uint)_o.FragmentPayload)
 			});
 			p.BulkQueuedBytes += req.Payload.Length;
+			Core.LatencyTrace.Mark(Core.LatencyTrace.BulkQueued, req.Payload.Span, (int)Channel.Bulk, p.Id.Value);
 			break;
 		}
 	}
@@ -875,8 +884,24 @@ public sealed class MpTransport : ITransport, IDisposable
 
 	private void Raise(PeerState p, Channel ch, byte[] data)
 	{
+		if (data.Length > 0 && data[0] == BulkCompression.Marker)
+		{
+			int declared = BulkCompression.DeclaredLength(data);
+			if (ch != Channel.Bulk || (declared > _o.MaxBulkBytesBeforeAdmit && BulkGate is { } gate && !gate(p.Id)))
+			{
+				ProtocolError(p, "compressed message where none is allowed");
+				return;
+			}
+			if (BulkCompression.Unpack(data, _o.MaxBulkMessageBytes) is not { } message)
+			{
+				ProtocolError(p, "malformed compressed message");
+				return;
+			}
+			data = message;
+		}
 		try
 		{
+			Core.LatencyTrace.Mark(Core.LatencyTrace.Received, data, (int)ch, p.Id.Value);
 			MessageReceived?.Invoke(p.Id, ch, data);
 		}
 		catch (Exception ex)

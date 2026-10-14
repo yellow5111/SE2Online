@@ -153,8 +153,12 @@ internal sealed class NametagOverlay
 		Range = o.NametagRange;
 	}
 
+	/// <summary>The other players this client last saw (for the look-at player options), with their session.</summary>
+	internal static (Session Session, IReadOnlyList<(ushort ClientId, string Name, Entity? Target)> Players) Last;
+
 	public void Update(Session session, Entity sessionEntity, IReadOnlyList<(ushort ClientId, string Name, Entity? Target)> players)
 	{
+		Last = (session, players);
 		if (_failed || !Enabled)
 		{
 			return;

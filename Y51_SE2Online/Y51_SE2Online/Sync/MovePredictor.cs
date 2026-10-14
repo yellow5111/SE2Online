@@ -38,6 +38,39 @@ public sealed class MovePredictor
 
 	private bool _ground;
 
+	// Free flight (jetpack, drift): the host's velocity is all there is, so its measured deceleration is tracked too.
+	private bool _free;
+
+	private Vector3 _freeVel;
+
+	private Vector3 _accFrom;
+
+	private long _accAt = long.MinValue;
+
+	private long _newestHostT = long.MinValue;
+
+	private Vector3 _acc;
+	// Jetpack: per-frame thrust inputs are simulated across the lead window (StepJet).
+	private bool _jet;
+
+	// Scale on DampenerDecel, learned from real stops (the distance the host needed once a release had reached it):
+	// other movement definitions, modded thrust, a different mass than the model's.
+	public float BrakeScale { get; private set; } = 1f;
+
+	private bool _jetInput;
+
+	private long _releaseAt = long.MinValue;
+
+	private double _lastLagMs;
+
+	private long _stopHostT = long.MinValue;
+
+	private bool _stopping;
+
+	private float _stopV0;
+
+	private double _stopDist;
+
 	public int MaxLeadMs { get; set; } = 500;
 
 	public float Gain { get; private set; } = 1f;
@@ -51,6 +84,14 @@ public sealed class MovePredictor
 		_count = 0;
 		_anchor = double.NaN;
 		_ground = false;
+		_free = false;
+		_jet = false;
+		_jetInput = false;
+		_stopping = false;
+		_releaseAt = long.MinValue;
+		_stopHostT = long.MinValue;
+		_accAt = long.MinValue;
+		_newestHostT = long.MinValue;
 		Gain = 1f;
 		Velocity = default;
 	}
@@ -59,6 +100,8 @@ public sealed class MovePredictor
 	// from the host's horizontal velocity whenever walking (re)starts.
 	public void StepGround(long now, Vector3 target, Vector3 hostHorizontal, Vector3 rest, float maxAcceleration, bool inputChanged)
 	{
+		_free = false;
+		_jet = false;
 		if (!_ground || _count == 0)
 		{
 			_model = hostHorizontal;
@@ -69,6 +112,151 @@ public sealed class MovePredictor
 		}
 		Step(now, _model, rest, inputChanged);
 		_ground = true;
+	}
+
+	// Free flight: no input model, the body carries the host's velocity across the lead window. A dampener stop
+	// decelerates the host while its samples are a lag old; leading by that velocity overshot the stop by up to
+	// speed x lag, and the body slid back onto it (the bump-back on releasing keys). See Lead.
+	public void StepFree(long now, Vector3 hostVel)
+	{
+		_jet = false;
+		// Measured on the host's own stamps: arrival jitter on the client's clock made the estimate wobble.
+		long hostT = _newestHostT;
+		if (_accAt == long.MinValue || hostT - _accAt > 500 || hostT < _accAt)
+		{
+			_accAt = hostT;
+			_accFrom = hostVel;
+			_acc = Vector3.Zero;
+		}
+		else if (hostT - _accAt >= 16)
+		{
+			// Blended in over ~100 ms of host time: a sudden full estimate moved the lead by a = 12 m/s^2 x lag^2 / 2 in
+			// one frame, a visible hitch when braking starts.
+			_acc += Math.Min(1f, (hostT - _accAt) / 100f) * ((hostVel - _accFrom) / ((hostT - _accAt) / 1000f) - _acc);
+			_accAt = hostT;
+			_accFrom = hostVel;
+		}
+		Step(now, Vector3.Zero, hostVel, inputChanged: false);
+		_free = true;
+		_freeVel = hostVel;
+	}
+
+	// Jetpack: the inputs the host has not applied yet decide where the body goes next, not the host's last velocity:
+	// carrying that velocity alone showed every thrust start and stop a round trip late. thrustAccel is this frame's
+	// input acceleration (world), brakeDecel the dampeners' (0 when off), speedLimit the soft limit (0 = none).
+	public void StepJet(long now, Vector3 hostVel, Vector3 thrustAccel, float brakeDecel, float speedLimit)
+	{
+		StepFree(now, hostVel);
+		_hist[(_head - 1 + _hist.Length) % _hist.Length] = (now, thrustAccel, new Vector3(brakeDecel, speedLimit, 0f));
+		_jet = true;
+		bool input = thrustAccel != Vector3.Zero;
+		if (_jetInput && !input) _releaseAt = now;
+		_jetInput = input;
+		LearnBraking(hostVel, input, brakeDecel);
+	}
+
+	private void LearnBraking(Vector3 hostVel, bool input, float brakeDecel)
+	{
+		if (_newestHostT == _stopHostT || double.IsNaN(_anchor)) return;
+		long dtHost = _stopHostT == long.MinValue ? 0 : _newestHostT - _stopHostT;
+		_stopHostT = _newestHostT;
+		float speed = hostVel.Length();
+		if (input || brakeDecel <= 0f || dtHost > 200)
+		{
+			_stopping = false;
+			return;
+		}
+		if (!_stopping)
+		{
+			// The newest host sample reflects the inputs up to InputTime: once that passes the release, the host brakes.
+			if (_releaseAt != long.MinValue && InputTime(_lastLagMs) >= _releaseAt && speed > 3f)
+			{
+				_stopping = true;
+				_stopV0 = speed;
+				_stopDist = 0;
+				_releaseAt = long.MinValue;
+			}
+			return;
+		}
+		_stopDist += speed * dtHost / 1000.0;
+		if (speed > 0.3f) return;
+		_stopping = false;
+		if (_stopDist < 0.2) return;
+		float learned = (float)(StopDistance(_stopV0, brakeDecel) / _stopDist);
+		BrakeScale = Math.Clamp(BrakeScale + 0.5f * (learned - BrakeScale), 0.5f, 3f);
+	}
+
+	// The host's newest velocity carried from the start of the lead window to now under each frame's inputs.
+	private Vector3 JetLead(double from, double now, float measuredDecel)
+	{
+		int n = 0;
+		while (n < _count && _hist[(_head - 1 - n + _hist.Length) % _hist.Length].T > from) n++;
+		n = Math.Min(n + 1, _count);
+		Vector3 v = _freeVel;
+		Vector3 lead = Vector3.Zero;
+		for (int i = n - 1; i >= 0; i--)
+		{
+			var (t, a, o) = _hist[(_head - 1 - i + _hist.Length) % _hist.Length];
+			double start = Math.Max(t, from);
+			double end = i == 0 ? now : _hist[(_head - i + _hist.Length) % _hist.Length].T;
+			if (end <= start) continue;
+			float dt = (float)((end - start) / 1000.0);
+			if (a != Vector3.Zero)
+			{
+				v += a * SpeedLimitFalloff(a, v, o.Y) * dt;
+				if (o.Y > 0f && v.Length() > o.Y) v = Vector3.Normalize(v) * o.Y;
+			}
+			else if (o.X > 0f || measuredDecel > 0.5f)
+			{
+				// The dampeners' braking law; the host's measured braking only without one. Measured braking lags
+				// (it blends in over ~100 ms of host time), and the low figure it shows right after a release
+				// under-braked the lead: the body overshot the stop and slid ~1 m back.
+				float speed = v.Length();
+				float step = (o.X > 0f ? DampenerDecel(speed, o.X) * BrakeScale : measuredDecel) * dt;
+				v = speed <= step || speed < DampenerMinSpeed ? Vector3.Zero : v * ((speed - step) / speed);
+			}
+			lead += v * dt;
+		}
+		// The body filter carries the shown body along this between samples: the host's velocity (still full speed for
+		// a round trip after a release) held the body ~speed x 80 ms ahead of the braking lead, the overshoot and
+		// pull-back seen at 300 ms.
+		Velocity = v;
+		return lead;
+	}
+
+	// ThrustComponent.ComputeInertiaDampening with Character_MovementDefinition (2.4.0.95: ThrusterDampenerMaxSpeedFactor 65,
+	// MinSpeedFactor 4, CurveMinSpeed 0.25), capped at the braking thrust x ThrusterBrakingPowerMultiplierMin 2.5: hard at mid
+	// speeds (33 m/s^2 at 9 m/s), soft near the stop (6 m/s^2 at 1.4 m/s), the profile the host shows.
+	const float DampenerMinSpeed = 0.25f;
+
+	public static float DampenerDecel(float speed, float brakingThrust) => Math.Min(brakingThrust * 2.5f, 0.003f * 65f * (speed + 4f) * (speed + 4f));
+
+	// ThrustComponent.GetSpeedLimitedInputThrust (ThrusterAccelerationBias 0.25, SpeedLimitFalloff 3,
+	// MinThrusterAccelerationRatio 0.25): thrust fades as the velocity nears the soft limit along the input. At 16 of
+	// 20 m/s the host accelerated at ~8 m/s^2, not the full 12.5; the full figure over-led a 300 ms window.
+	public static float SpeedLimitFalloff(Vector3 thrust, Vector3 velocity, float limit)
+	{
+		if (limit <= 0f) return 1f;
+		float closeness = 1f - Vector3.Distance(Vector3.Normalize(thrust) * limit, velocity) / limit;
+		return closeness > 0.25f ? 1f - MathF.Pow((closeness - 0.25f) / 0.75f, 3f) * 0.75f : 1f;
+	}
+
+	static double StopDistance(float speed, float brakingThrust)
+	{
+		double distance = 0;
+		for (int i = 0; i < 6000 && speed >= DampenerMinSpeed; i++)
+		{
+			speed = Math.Max(0f, speed - DampenerDecel(speed, brakingThrust) / 60f);
+			distance += speed / 60.0;
+		}
+		return distance;
+	}
+
+	// Distance a body at speed slowing at decel covers in seconds, stopping for good when it reaches zero.
+	public static float StoppingLead(float speed, float decel, double seconds)
+	{
+		if (seconds <= 0) return 0f;
+		return speed >= decel * seconds ? (float)(speed * seconds - decel * seconds * seconds / 2) : speed * speed / (2f * decel);
 	}
 
 	// model: the input-driven part (scaled by Gain); rest: taken from the host as is (gravity, jetpack drift).
@@ -99,6 +287,7 @@ public sealed class MovePredictor
 			return;
 		}
 		long hostT = Unwrap(hostMs);
+		_newestHostT = Math.Max(_newestHostT, hostT);
 		long transit = now - hostT;
 		_offset = _offsetWindow.Add(now, transit);
 		_late += 0.05 * ((double)(transit - _offset) - _late);
@@ -129,11 +318,24 @@ public sealed class MovePredictor
 
 	public Vector3 Lead(long now, double lagMs)
 	{
+		_lastLagMs = lagMs;
 		if (!Active)
 		{
 			return Vector3.Zero;
 		}
 		double from = Math.Max(InputTime(lagMs), now - MaxLeadMs);
+		if (_free)
+		{
+			// Current velocity across the window (integrating older frames left their speed in the lead after a
+			// stop); while the host is slowing, only as far as it will still travel.
+			double seconds = Math.Max(0.0, now - from) / 1000.0;
+			float speed = _freeVel.Length();
+			float decel = speed < 1e-3f ? 0f : -Vector3.Dot(_acc, _freeVel) / speed;
+			if (_jet) return JetLead(from, now, decel);
+			if (speed < 1e-3f) return Vector3.Zero;
+			if (decel > 0.5f) Velocity = _freeVel / speed * Math.Max(0f, speed - decel * (float)seconds);
+			return decel > 0.5f ? _freeVel / speed * StoppingLead(speed, decel, seconds) : _freeVel * (float)seconds;
+		}
 		Vector3 model = Vector3.Zero;
 		Vector3 rest = Vector3.Zero;
 		double end = now;

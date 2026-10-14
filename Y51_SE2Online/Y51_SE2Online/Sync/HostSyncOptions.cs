@@ -37,6 +37,11 @@ public sealed class HostSyncOptions
 
 	public string SessionName = "";
 
+	/// <summary>Configured message of the day; the access list's runtime choice overrides it.</summary>
+	public string Motd = "";
+
+	public string MotdTitle = "";
+
 	public bool Dedicated;
 
 	public ulong HostSteamId;
@@ -53,6 +58,12 @@ public sealed class HostSyncOptions
 
 	/// <summary>Per-player PCU limit: null keeps the world's value, 0 is unlimited.</summary>
 	public int? PcuLimit;
+
+	/// <summary>Joiners only receive what is within this many metres of them; 0 sends the whole world.</summary>
+	public double StreamingRadiusMeters;
+
+	/// <summary>Players hear each other within this many metres; 0 turns voice off.</summary>
+	public double VoiceRadiusMeters;
 
 	public int PcuInForce;
 

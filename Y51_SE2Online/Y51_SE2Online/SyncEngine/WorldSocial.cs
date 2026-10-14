@@ -8,6 +8,7 @@ using Keen.Game2.Game.SessionComponents;
 using Keen.Game2.Game.GameComponents;
 using Keen.Game2.Simulation.RuntimeSystems.Saves;
 using Keen.Game2.Simulation.RuntimeSystems.Serialization;
+using Keen.Game2.Simulation.GameSystems.Antennas;
 using Keen.Game2.Simulation.GameSystems.Ownership;
 using Keen.Game2.Simulation.GameSystems.Permissions;
 using Keen.Game2.Simulation.WorldObjects.CubeBlocks;
@@ -171,9 +172,15 @@ internal sealed class WorldSocial
         long owner = TeamPermissions.OwnerOf(grid);
         // Unowned, NPC and "everyone may use" blocks keep the game's own rules (anyone can claim an unowned grid anyway).
         if (!PlayerIdentities.IsHuman(owner) || EveryoneMayUse(target)) return null;
+        if (ClientWorld.Current is { BoundSession: { } client } world)
+        {
+            var seen = client.Social;
+            uint? id = seen.Actor == actor && BlockOf(target) is { } block ? world.NetIdOf(block) : null;
+            if (id is uint open && seen.OpenBlocks.Contains(open)) return null;
+            var listed = id is uint n ? new BlockAcl(seen.AllowedBlocks.Contains(n) ? new[] { actor } : Array.Empty<long>(), seen.DeniedBlocks.Contains(n) ? new[] { actor } : Array.Empty<long>()) : BlockAcl.Empty;
+            return BlockAcl.CanUse(owner, actor, SharingOf(grid), seen.Factions, listed);
+        }
         var acl = AclOf(target);
-        if (ClientWorld.Current?.BoundSession is { } client)
-            return BlockAcl.CanUse(owner, actor, SharingOf(grid), client.Social.Factions, acl);
         var social = HostWorld.Current?.Social;
         if (social == null) return null;
         lock (social.Sync) return BlockAcl.CanUse(owner, actor, SharingOf(grid), social.State.Factions, acl);
@@ -181,8 +188,9 @@ internal sealed class WorldSocial
 
     internal string Apply(long actor, SocialRequest request, Func<uint, Entity> resolve)
     {
-        if (request.Action < SocialAction.ClaimGrid) return State.Apply(actor, request);
+        if (request.Action < SocialAction.ClaimGrid || request.Action is >= SocialAction.SetRole and <= SocialAction.RejectProposal or SocialAction.DeclineInvitation) return State.Apply(actor, request);
         if (request.Action is SocialAction.BlockAllow or SocialAction.BlockDeny) return ApplyBlock(actor, request, resolve);
+        if (request.Action == SocialAction.AntennaTag) return ApplyAntennaTag(actor, request, resolve);
         var grid = resolve(request.Grid);
         if (grid == null || GridOf(grid) != grid || grid.TryGet<OwnershipComponent>() == null || grid.TryGet<GridPermissionsComponent>() == null) return "That grid is no longer available.";
         long owner = TeamPermissions.OwnerOf(grid);
@@ -229,12 +237,65 @@ internal sealed class WorldSocial
         return add ? (deny ? "Player blacklisted on this block." : "Player whitelisted on this block.") : "Player removed from the block's list.";
     }
 
+    private string ApplyAntennaTag(long actor, SocialRequest request, Func<uint, Entity> resolve)
+    {
+        var block = resolve(request.Grid);
+        var permissions = block?.TryGet<BlockPermissionsComponent>();
+        var grid = block == null ? null : GridOf(block);
+        if (permissions == null || grid == null || BlockOf(block) != block || block.TryGet<AntennaComponent>() == null) return "That antenna is no longer available.";
+        if (!State.MayTag(TeamPermissions.OwnerOf(grid), actor)) return "Only the antenna's owner, or their faction's leader or admins, can change this.";
+        var acl = AclOf(block) with { ShowTag = request.Offset == 1 };
+        permissions.AccessGroup = acl.IsEmpty ? Singleton<DefinitionManager>.Instance.GetConfiguration<PermissionsConfiguration>().OwnerAccess : StringId.Get(acl.ToString());
+        State.Revision++;
+        return acl.ShowTag ? "This antenna's signal now shows its owner's faction tag." : "This antenna's signal no longer shows a faction tag.";
+    }
+
+    /// <summary>
+    /// Server: antenna HUD markers get "[TAG] " when the antenna asks for it. SE2 rebuilds the marker name itself on
+    /// renames, so the tag is put back on the next pass.
+    /// </summary>
+    // ponytail: a 1 Hz pass over every antenna marker; after a rename the untagged name shows for up to a second.
+    internal static void TagAntennas(Session session, Func<long, string> tagOf)
+    {
+        var markers = session.SessionComponents.TryGet<AntennaMarkersSessionComponent>()?._markers;
+        if (markers == null) return;
+        foreach (var (antenna, marker) in markers.AntennaToMarker)
+        {
+            if (antenna?.Entity == null || EngineCodec.IsDead(antenna.Entity)) continue;
+            string name = ((antenna.BroadcastCustomMessage ? null : marker.Grid?.DisplayName) ?? antenna.CustomMessage).EvaluateText() ?? "";
+            string tag = AclOf(antenna.Entity).ShowTag ? tagOf(TeamPermissions.OwnerOf(antenna.Entity)) : null;
+            string wanted = FactionTag.Prefix(tag, name);
+            if (marker.Name != wanted) marker.Name = wanted;
+        }
+    }
+
+    private readonly Dictionary<ushort, string> _motdSeen = new();
+
+    /// <summary>Faction messages of the day not yet shown to each connected member (once per connection and per change).</summary>
+    internal List<(ushort ClientId, string Text)> DueFactionMotds(IEnumerable<PlayerInfo> roster)
+    {
+        var due = new List<(ushort, string)>();
+        var online = new HashSet<ushort>();
+        foreach (var player in roster)
+        {
+            if (!player.Connected) continue;
+            online.Add(player.ClientId);
+            var faction = State.FactionOf(player.Identity);
+            string key = faction == null || faction.Motd.Length == 0 ? "" : faction.Id + "\n" + faction.Motd;
+            if (_motdSeen.TryGetValue(player.ClientId, out string seen) && seen == key) continue;
+            _motdSeen[player.ClientId] = key;
+            if (key.Length > 0) due.Add((player.ClientId, "Faction System [" + faction.Tag + "]: " + faction.Motd));
+        }
+        foreach (ushort gone in _motdSeen.Keys.Where(id => !online.Contains(id)).ToList()) _motdSeen.Remove(gone);
+        return due;
+    }
+
     internal SocialSnapshot Snapshot(long actor, SocialGrid[] grids, SocialRequest view, string message)
     {
         var copy = SocialState.Deserialize(State.Serialize());
         var filtered = grids.Where(g => string.IsNullOrWhiteSpace(view.Name) || g.Name.Contains(view.Name, StringComparison.OrdinalIgnoreCase)).OrderBy(g => g.Name).ThenBy(g => g.NetId).ToArray();
         int offset = Math.Clamp(view.Offset, 0, Math.Max(0, ((filtered.Length - 1) / 100) * 100));
-        var snapshot = new SocialSnapshot { Actor = actor, Revision = State.Revision, Message = message, Players = copy.Players.ToArray(), Factions = copy.Factions.ToArray(), TotalGrids = filtered.Length, Offset = offset, Grids = filtered.Skip(offset).Take(100).ToArray(), Focus = view.Grid == 0 ? null : grids.FirstOrDefault(g => g.NetId == view.Grid) };
+        var snapshot = new SocialSnapshot { Actor = actor, Revision = State.Revision, Message = message, Players = copy.Players.ToArray(), Factions = copy.Factions.ToArray(), TotalGrids = filtered.Length, Offset = offset, Grids = filtered.Skip(offset).Take(100).ToArray(), Focus = view.Grid == 0 ? null : grids.FirstOrDefault(g => g.NetId == view.Grid), Pacts = copy.Pacts.ToArray(), Proposals = copy.Proposals.ToArray() };
         if (actor == PlayerIdentities.HotfixIdentity) Local = snapshot;
         return snapshot;
     }

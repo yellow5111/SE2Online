@@ -16,7 +16,7 @@ public readonly record struct KeyBinding(int Vk, bool Ctrl, bool Shift, bool Alt
         var keys = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {
             ["Enter"] = 0x0D, ["Return"] = 0x0D, ["Tab"] = 0x09, ["Space"] = 0x20, ["Backspace"] = 0x08, ["Back"] = 0x08,
-            ["Insert"] = 0x2D, ["Delete"] = 0x2E, ["Home"] = 0x24, ["End"] = 0x23, ["PageUp"] = 0x21, ["Prior"] = 0x21,
+            ["CapsLock"] = 0x14, ["Capital"] = 0x14, ["Insert"] = 0x2D, ["Delete"] = 0x2E, ["Home"] = 0x24, ["End"] = 0x23, ["PageUp"] = 0x21, ["Prior"] = 0x21,
             ["PageDown"] = 0x22, ["Next"] = 0x22, ["Pause"] = 0x13, ["Tilde"] = 0xC0, ["OemTilde"] = 0xC0, ["Oem3"] = 0xC0,
             ["Apostrophe"] = 0xDE, ["OemQuotes"] = 0xDE, ["Slash"] = 0xBF, ["OemQuestion"] = 0xBF, ["Oem2"] = 0xBF,
             ["Backslash"] = 0xDC, ["OemPipe"] = 0xDC, ["Oem5"] = 0xDC, ["Semicolon"] = 0xBA, ["OemSemicolon"] = 0xBA, ["Oem1"] = 0xBA,

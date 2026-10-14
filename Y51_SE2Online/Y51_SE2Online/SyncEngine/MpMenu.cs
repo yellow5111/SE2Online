@@ -95,7 +95,7 @@ internal static class MpMenu
         var button = ____buttonsPanel.Children.OfType<Button>().FirstOrDefault(b => b.Name == "MenuMultiplayer");
         if (button == null)
         {
-            button = __instance.CreateButton(LocKey.FromString("MenuMultiplayer"), (Action)Open);
+            button = __instance.CreateButton(OnlineUi.Raw("MenuMultiplayer"), (Action)Open);
             button.Name = "MenuMultiplayer";
             ____buttonsPanel.Children.Insert(1, button);
         }
@@ -103,7 +103,7 @@ internal static class MpMenu
         button.Command = SimpleCommand.Create((Action)Open);
         if (__instance.DataContext is InGameMenuScreenViewModel && !____buttonsPanel.Children.OfType<Button>().Any(b => b.Name == "OnlinePlayers"))
         {
-            var players = __instance.CreateButton(LocKey.FromString("Players"), (Action)OpenPlayers);
+            var players = __instance.CreateButton(OnlineUi.Raw("Players"), (Action)OpenPlayers);
             players.Name = "OnlinePlayers";
             ____buttonsPanel.Children.Insert(2, players);
         }
@@ -126,7 +126,7 @@ internal static class MpMenu
         void Add(string name, string label, Action action)
         {
             if (____buttonsPanel.Children.OfType<Button>().Any(b => b.Name == name)) return;
-            var extra = __instance.CreateButton(LocKey.FromString(label), action); extra.Name = name;
+            var extra = __instance.CreateButton(OnlineUi.Raw(label), action); extra.Name = name;
             ____buttonsPanel.Children.Insert(Math.Min(3, ____buttonsPanel.Children.Count), extra);
         }
     }
@@ -212,6 +212,7 @@ internal static class MpMenu
 
     public static void Tick(Keen.Game2.GameAppComponent app)
     {
+        KeyboardTextInput.Tick();
         while (Commands.TryDequeue(out var action))
         {
             try { action(); }
@@ -220,6 +221,11 @@ internal static class MpMenu
         Hotkeys(app);
         BlockSizeFilter.Sync(Joined);
         RespawnScreen.Tick();
+        TradeUi.Tick();
+        MotdUi.Tick();
+        PlayerInteraction.Tick();
+        PassengerSeats.Tick();
+        FactionPopups.Tick();
         JoinPresence.Tick(Joined && ClientWorld.Progress.Stage == Sync.JoinStage.Playing);
         if (MpPlugin.SteamAvailable && _finder == null) { _finder = new FriendFinder(GameLog.Instance); _finder.Start(); }
         if (_finder != null)
@@ -274,9 +280,13 @@ internal static class MpMenu
         bool inWorld = app.Client != null && !app._isTransitioning.IsSet && shared != null;
         ChatUi.TickHud(shared, inWorld && AdminAccess.InSession);
         AdminAccess.Tick(shared);
+        BrokenMods.Tick(app, shared);
         UpdatePrompt.Tick(shared, _mainMenu != null && app.Client == null && app.Server == null && !app._isTransitioning.IsSet);
+        VoiceChat.Tick(inWorld && AdminAccess.InSession, inWorld && shared.TryGetTopScreenNeedingInput() == null);
         if (!inWorld) return;
         bool free = shared.TryGetTopScreenNeedingInput() == null;
+        FightLock.Tick();
+        EmoteMenu.Tick(AdminAccess.InSession && !ChatUi.InputOpen && (free || EmoteMenu.IsOpen));
         if (chat && free && AdminAccess.InSession && !ChatUi.InputOpen) ChatUi.OpenInput(shared);
         if (AdminAccess.InSession) SuitBroadcast(app, broadcast && free && !ChatUi.InputOpen);
         if (players)
@@ -315,7 +325,7 @@ internal static class MpMenu
             try
             {
                 app.ClientSession?.SessionComponents.TryGet<Keen.Game2.Client.UI.InGame.SessionInGameUISessionComponent>()?.ShowNotification(
-                    Keen.Game2.Client.UI.HUD.Notification.HudNotification.CreateTextNotification(default, LocKey.FromString(settings.SuitBroadcast ? "Broadcast on: name visible" : "Broadcast off: name hidden")));
+                    Keen.Game2.Client.UI.HUD.Notification.HudNotification.CreateTextNotification(default, OnlineUi.Raw(settings.SuitBroadcast ? "Broadcast on: name visible" : "Broadcast off: name hidden")));
             }
             catch (Exception ex) { GameLog.Instance.WarnOnce("suit-broadcast-toast", "suit broadcast: the HUD notice failed: " + ex.Message); }
             _nextBroadcastSend = 0;
@@ -339,10 +349,10 @@ internal static class MpMenu
                 _shared = JoinStatusUi.FindShared(MpPlugin.App);
                 _shared.ShowDialog(new TwoOptionsDialogViewModel(new TwoOptionsDialogDefinition
                 {
-                    Title = LocKey.FromString("Join multiplayer"),
-                    Content = LocKey.FromString("Joining leaves the current world and returns to the main menu first. Save your world before continuing."),
-                    ConfirmOption = LocKey.FromString("Leave and join"),
-                    CancelOption = LocKey.FromString("Cancel")
+                    Title = OnlineUi.Raw("Join multiplayer"),
+                    Content = OnlineUi.Raw("Joining leaves the current world and returns to the main menu first. Save your world before continuing."),
+                    ConfirmOption = OnlineUi.Raw("Leave and join"),
+                    CancelOption = OnlineUi.Raw("Cancel")
                 }) { ConfirmAction = () => Queue(() => Request(options)) });
                 return;
             }
@@ -392,10 +402,23 @@ internal static class MpMenu
             var temporary = SettingsPath + ".tmp";
             File.WriteAllText(temporary, JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true }));
             File.Move(temporary, SettingsPath, true);
+            var current = MpPlugin.Controller.Current;
+            var before = Settings;
             Settings = settings;
             Message = "Settings saved.";
-            if (MpPlugin.Controller.Current?.Host == true && !MpPlugin.Controller.Current.Dedicated && !Busy)
-                Request(settings.HostOptions(MpPlugin.Controller.Current.HostIp != null));
+            if (current?.Host != true || current.Dedicated || Busy) return;
+            // Restarting hosting drops every player (0.14.4 restarted on every save, which players saw as the world dying);
+            // only a change to the listen socket needs it, and the host is asked first.
+            var change = HostSettingsChange.Compare(before, settings);
+            NetSession.Current?.ApplyHostSettings(before, settings, change.Live);
+            if (change.NextSession.Count > 0) Message = "Settings saved. " + string.Join(", ", change.NextSession) + " apply the next time you start hosting.";
+            if (change.Restart)
+            {
+                bool local = current.HostIp != null;
+                SocialUi.Confirm("Restart hosting", "Changing the listen address, port or direct IP connections restarts hosting. Connected players reconnect automatically. Restart now?",
+                    () => { if (MpPlugin.Controller.Current?.Host == true && !Busy) Request(Settings.HostOptions(local)); });
+                Message = "Settings saved. The listen address and port change when hosting restarts.";
+            }
         });
     }
 

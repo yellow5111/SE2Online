@@ -88,7 +88,10 @@ public sealed class ChatHudScreen : ScreenView
     public ChatHudScreen()
     {
         IsHitTestVisible = false;
-        Content = ChatUi.Frame(_lines);
+        var hud = new Grid { IsHitTestVisible = false };
+        hud.Children.Add(ChatUi.Frame(_lines));
+        hud.Children.Add(PlayerAimView.Layer());
+        Content = hud;
         OnDisposing += _ => { _closed = true; if (_model != null) _model.Refresh -= QueueRefresh; };
     }
 
@@ -123,11 +126,13 @@ public sealed class ChatHudScreen : ScreenView
         long now = MpClock.NowMs();
         ShowBroadcast(now);
         var visible = ChatUi.InputOpen ? Array.Empty<(ChatLine Line, long ReceivedMs)>() : ChatLog.Recent(6).Where(l => !ChatUi.HudExpired(l.ReceivedMs, now)).ToArray();
-        string signature = ChatLog.Version + ":" + string.Join(",", visible.Select(l => (int)(ChatUi.HudOpacity(l.ReceivedMs, now) * 8)));
+        string talking = VoiceChat.Talking.Count == 0 ? "" : "Talking: " + string.Join(", ", VoiceChat.Talking);
+        string signature = ChatLog.Version + ":" + talking + ":" + string.Join(",", visible.Select(l => (int)(ChatUi.HudOpacity(l.ReceivedMs, now) * 8)));
         if (signature == _signature) return;
         _signature = signature;
         _lines.Children.Clear();
         foreach (var (line, received) in visible) _lines.Children.Add(ChatUi.Line(line, ChatUi.HudOpacity(received, now)));
+        if (talking.Length > 0) _lines.Children.Add(ChatUi.Line(new ChatLine("Voice", 0, talking, ChatKind.System, 0), 1));
     }
 }
 

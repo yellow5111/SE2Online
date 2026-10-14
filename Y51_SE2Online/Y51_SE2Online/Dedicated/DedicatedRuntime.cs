@@ -41,6 +41,16 @@ internal static class DedicatedRuntime
     private static bool _allowExit;
     private static bool _forceSaveOnExit;
     private static long _shutdownRequests;
+    private static long _shutdownAtMs;
+    private static int _shutdownAnnounced;
+    private static readonly DateTime StartedLocal = DateTime.Now;
+    private static DateTime? _restartAt;
+    /// <summary>Next scheduled restart in server local time, if any.</summary>
+    public static DateTime? NextRestart => _restartAt;
+    private static int _restartWarned = int.MaxValue;
+    // Set when this stop is a restart: the runner relaunches the server once the final save is done.
+    private static bool _restartRequested;
+    private static bool _lastSaveFailed;
     private static DateTime? _lastSaveUtc;
     private static long _nextSave;
     // SE2's own autosave restarts its timer after every server save; this is the other half, so the two never run back to back.
@@ -78,6 +88,7 @@ internal static class DedicatedRuntime
                         postfix: new HarmonyMethod(typeof(HostIdentities), nameof(HostIdentities.InitPostfix)));
                 }
             }
+            if (Headless) DedicatedMods.Install(harmony);
             NativeSessionSettings.Install(harmony);
             NativeDefinitionSettings.Install(harmony);
             harmony.Patch(AccessTools.Method(typeof(GameApp), "StartPlayerExperienceAsync"),
@@ -125,6 +136,8 @@ internal static class DedicatedRuntime
         {
             try { CheckCommand(app); }
             catch (Exception ex) { GameLog.Instance.Error("dedicated: command failed: " + ex); }
+            if (_shutdownAtMs != 0 && !_exiting) TickCountdown(app);
+            else if (_loaded && !_exiting) TickRestart(app);
         }
         if (!Active || _exiting) return;
         try
@@ -208,24 +221,42 @@ internal static class DedicatedRuntime
             if (!resumed && !string.IsNullOrWhiteSpace(Config.StartContent))
                 save = app.Scene.Single<DefaultWorldsComponent>().TryFindDefaultWorldContainerId(Config.StartContent)
                     ?? new ContainerId(SaveHelper.GetContentContainerIdString(Config.StartContent));
+            ModList mods = Config.OverrideModList.HasValue
+                ? SerializationHelper.DeserializeFromJson<ModList>(Config.OverrideModList.Value.GetRawText()) : null;
+            if (Headless)
+            {
+                Status = "Downloading Workshop mods";
+                mods = await DedicatedMods.PrepareAsync(app, Config, save, mods);
+            }
+            else if (Config.WorkshopIds.Length > 0)
+                GameLog.Instance.Info("dedicated: Mods applies to headless servers; this server's own Steam client loads the world's mods");
             var load = new WorldLoadArgs
             {
                 SaveId = save, OverrideDisplayName = Config.WorldName, EnableAutosave = Config.EnableAutosave,
                 PlayMission = Config.PlayMission, SkipDebugMenuWarning = true, SkipNewerSaveWarning = true,
-                OverrideModList = Config.OverrideModList.HasValue
-                    ? SerializationHelper.DeserializeFromJson<ModList>(Config.OverrideModList.Value.GetRawText()) : null
+                OverrideModList = mods
             };
             if (Headless) await HeadlessWorldLoading.Load(app, load);
             else await app.LoadGameAsync(load);
             var world = app.Server.Entity.Get<WorldSessionComponent>();
             NativeSessionSettings.Finish();
             NativeDefinitionSettings.Finish();
-            await Save(world, false);
+            // Content has to be saved into the profile once. A profile save is already durable, and saving it straight back
+            // can deadlock SE2: the commit holds the save collection, a world area spawning its blocking bundle on the main
+            // thread waits for a voxel blob from that collection, and the commit's continuation needs the main thread.
+            bool inProfile = save.HasValue && (resumed || string.IsNullOrWhiteSpace(Config.StartContent));
+            if (inProfile)
+            {
+                _savedId = (world.SaveContainerId ?? save.Value).ToString();
+                _nextSave = MpClock.NowMs() + Config.SaveIntervalSeconds * 1000L;
+            }
+            else await Save(world, false);
             if (Error == null)
             {
                 _loaded = true;
                 Status = "World loaded";
-                GameLog.Instance.Info("dedicated: ordinary native world loaded and saved; ContainerId " + world.SaveContainerId);
+                PlanRestart(DateTime.Now);
+                GameLog.Instance.Info("dedicated: ordinary native world loaded" + (inProfile ? "" : " and saved") + "; ContainerId " + world.SaveContainerId);
             }
         }
         catch (Exception ex) { Fail("world load", ex); }
@@ -252,6 +283,7 @@ internal static class DedicatedRuntime
             File.Move(temp, Config.ResumePath, true);
             _savedId = state.SaveId;
             _lastSaveUtc = DateTime.UtcNow;
+            _lastSaveFailed = false;
             _nextSave = MpClock.NowMs() + Config.SaveIntervalSeconds * 1000L;
             GameLog.Instance.Info("dedicated: durable native save completed " + world.SaveContainerId);
             if (Error?.StartsWith("final save:", StringComparison.Ordinal) == true || Error?.StartsWith("saving:", StringComparison.Ordinal) == true)
@@ -275,6 +307,7 @@ internal static class DedicatedRuntime
             {
                 // A failed periodic save must not stop the server's tick (and every later save) like a load failure does.
                 _nextSave = MpClock.NowMs() + 60_000;
+                _lastSaveFailed = true;
                 GameLog.Instance.Error("dedicated: periodic save failed, retrying in 60 s: " + ex);
             }
             else Fail("saving", ex);
@@ -290,18 +323,122 @@ internal static class DedicatedRuntime
         File.Delete(Config.CommandPath);
         if (command.Equals("stop", StringComparison.OrdinalIgnoreCase))
         {
-            _shutdownRequests++;
-            _forceSaveOnExit = true;
-            app.ExitGame();
+            _restartRequested = false;
+            if (!StartCountdown()) StopNow(app);
         }
+        else if (command.Equals("stop now", StringComparison.OrdinalIgnoreCase)) { _restartRequested = false; StopNow(app); }
+        else if (command.Equals("restart", StringComparison.OrdinalIgnoreCase)) BeginRestart(app, "console");
+        else if (command.Equals("restart now", StringComparison.OrdinalIgnoreCase)) { _restartRequested = true; GameLog.Instance.Info("dedicated: restarting now (console)"); StopNow(app); }
+        else if (command.Equals("restart cancel", StringComparison.OrdinalIgnoreCase)) CancelRestart();
+        else if (command.StartsWith("motd", StringComparison.OrdinalIgnoreCase) && (command.Length == 4 || command[4] == ' ')) SetMotd(command.Substring(4).Trim());
         else if (command.Equals("save", StringComparison.OrdinalIgnoreCase))
         {
             var world = app.Server?.Entity.Get<WorldSessionComponent>();
             if (world == null) throw new InvalidOperationException("World has not loaded yet.");
             Save(world, false).SkipWait();
         }
+        else if (command.Equals("mods", StringComparison.OrdinalIgnoreCase)) GameLog.Instance.Info("console: " + DedicatedMods.Describe() + (SyncEngine.BrokenMods.Skipped is { Count: > 0 } skipped ? "; skipped as broken: " + string.Join(", ", skipped) : ""));
         else if (AdminCommand(command)) { }
         else throw new ArgumentException("Unknown dedicated command: " + command);
+    }
+
+    private static int OnlinePlayers() => NetSession.Current?.Host?.PlayerTable().Count(p => p.Connected) ?? 0;
+
+    private static void Say(string text) => NetSession.Current?.Host?.LocalChat(text, true);
+
+    // Players online get chat warnings first; with nobody online (or the countdown set to 0) the server stops at once.
+    private static bool StartCountdown()
+    {
+        if (_shutdownAtMs != 0) return true;
+        int seconds = Config.ShutdownCountdownSeconds;
+        if (seconds <= 0 || OnlinePlayers() == 0) return false;
+        _shutdownAtMs = MpClock.NowMs() + seconds * 1000L;
+        _shutdownAnnounced = seconds;
+        Say(ShutdownNotice.Text(seconds, _restartRequested));
+        Status = _restartRequested ? $"Restarting in {seconds} s: players were warned in chat (restart now skips the wait, restart cancel stops it)"
+            : $"Stopping in {seconds} s: players were warned in chat (stop now skips the wait)";
+        WriteStatus(true);
+        return true;
+    }
+
+    private static void TickCountdown(GameAppComponent app)
+    {
+        int left = (int)Math.Ceiling((_shutdownAtMs - MpClock.NowMs()) / 1000.0);
+        if (left <= 0 || OnlinePlayers() == 0) { StopNow(app); return; }
+        if (!ShutdownNotice.Due(_shutdownAnnounced, left)) return;
+        _shutdownAnnounced = left;
+        Say(ShutdownNotice.Text(left, _restartRequested));
+    }
+
+    /// <summary>Picks the next scheduled restart after <paramref name="after"/>; none when the schedule is off.</summary>
+    private static void PlanRestart(DateTime after)
+    {
+        var settings = Config.AutoRestart;
+        _restartAt = settings.Scheduled ? RestartSchedule.Next(after, StartedLocal, settings.Times, settings.EveryHours, settings.MinUptimeMinutes) : null;
+        _restartWarned = int.MaxValue;
+        if (_restartAt is DateTime at) GameLog.Instance.Info("dedicated: next scheduled restart " + at.ToString("yyyy-MM-dd HH:mm") + " (server local time)");
+    }
+
+    // Warnings at the configured lead times while players are online; the stop countdown then ends on the scheduled time.
+    private static void TickRestart(GameAppComponent app)
+    {
+        if (_restartRequested || _restartAt is not DateTime at) return;
+        double left = (at - DateTime.Now).TotalSeconds;
+        bool online = OnlinePlayers() > 0;
+        int countdown = online ? Config.ShutdownCountdownSeconds : 0;
+        if (left > countdown)
+        {
+            int warn = online ? RestartSchedule.WarnDue(Config.AutoRestart.WarnMinutes, _restartWarned, left) : 0;
+            if (warn > 0 && warn * 60 > countdown) { _restartWarned = warn; Say(RestartSchedule.WarnText(warn)); }
+            return;
+        }
+        if (_lastSaveFailed || _saving)
+        {
+            // A restart drops whatever the last good save missed; wait for a save to succeed instead of looping.
+            _restartAt = DateTime.Now.AddMinutes(_saving ? 1 : 10);
+            GameLog.Instance.Warn("dedicated: scheduled restart postponed to " + _restartAt.Value.ToString("HH:mm") + (_saving ? ": a save is running" : ": the last save failed"));
+            return;
+        }
+        BeginRestart(app, "scheduled");
+    }
+
+    private static void BeginRestart(GameAppComponent app, string why)
+    {
+        if (_restartRequested && _shutdownAtMs != 0) return;
+        _restartRequested = true;
+        GameLog.Instance.Info("dedicated: restarting (" + why + ")");
+        if (!StartCountdown()) StopNow(app);
+        WriteStatus(true);
+    }
+
+    private static void CancelRestart()
+    {
+        bool counting = _restartRequested && _shutdownAtMs != 0;
+        _restartRequested = false;
+        _shutdownAtMs = 0;
+        if (counting) Say("Server restart cancelled.");
+        // Skips the restart that was due (or counting down) and plans the one after it.
+        PlanRestart((_restartAt ?? DateTime.Now).AddMinutes(1));
+        Status = "Restart cancelled";
+        GameLog.Instance.Info("console: restart cancelled" + (_restartAt is DateTime at ? "; next scheduled " + at.ToString("yyyy-MM-dd HH:mm") : ""));
+        WriteStatus(true);
+    }
+
+    private static void SetMotd(string text)
+    {
+        var host = NetSession.Current?.Host ?? throw new InvalidOperationException("Multiplayer is not running yet.");
+        string result = text.Length == 0 ? "Message of the day: " + (host.MotdTemplate.Length == 0 ? "(none)" : host.MotdTemplate) + ". Use motd <text> or motd clear."
+            : host.LocalAdmin(new AdminRequest(AdminAction.Motd, Name: text.Equals("clear", StringComparison.OrdinalIgnoreCase) ? "" : text));
+        GameLog.Instance.Info("console: " + result);
+    }
+
+    private static void StopNow(GameAppComponent app)
+    {
+        _shutdownAtMs = 0;
+        if (OnlinePlayers() > 0) Say(_restartRequested ? ShutdownNotice.RestartNow : ShutdownNotice.Now);
+        _shutdownRequests++;
+        _forceSaveOnExit = true;
+        app.ExitGame();
     }
 
     /// <summary>Console moderation: say, kick, ban, unban, bans, admin, deadmin, admins, whitelist.</summary>
@@ -312,7 +449,7 @@ internal static class DedicatedRuntime
         var network = NetSession.Current;
         var host = network?.Host;
         string verb = words[0].ToLowerInvariant();
-        if (verb is not ("say" or "kick" or "ban" or "unban" or "bans" or "admin" or "deadmin" or "admins" or "whitelist" or "pvp" or "raid" or "pcu" or "sun")) return false;
+        if (verb is not ("say" or "kick" or "ban" or "unban" or "bans" or "admin" or "deadmin" or "admins" or "whitelist" or "pvp" or "raid" or "pcu" or "sun" or "usage")) return false;
         if (host == null) throw new InvalidOperationException("Multiplayer is not running yet.");
         string Rest(int from) => string.Join(' ', words.Skip(from));
         ulong Id(int index) => words.Length > index && ulong.TryParse(words[index], out ulong id) && id != 0 ? id : throw new ArgumentException("Give a SteamID64 (see players).");
@@ -335,6 +472,11 @@ internal static class DedicatedRuntime
                     : words.Length > 2 && words[1] == "day" && double.TryParse(words[2], System.Globalization.NumberStyles.Float, invariant, out double day) ? host.LocalAdmin(new AdminRequest(AdminAction.SunPeriod, Size: day))
                     : words.Length > 2 && words[1] == "move" && double.TryParse(words[2], System.Globalization.NumberStyles.Float, invariant, out double deg) ? host.LocalAdmin(new AdminRequest(AdminAction.SunNudge, Size: deg))
                     : "Sun rotation is " + (host.SunInForce.Rotation ? "on" : "off") + ", one full day every " + AccessList.DayLength(host.SunInForce.PeriodMinutes) + ". Use sun on|off, sun day <minutes>, sun move <degrees>.";
+                break;
+            case "usage":
+                string usageError = "";
+                if (words.Length > 2 && ResourceMultipliers.Current.TryWith(words[1], words[2], out var usage, out usageError)) { ResourceMultipliers.Current = usage; result = "Resource usage now " + usage.Describe() + " (until restart; set Network.EnergyUsageMultiplier etc. in server.json to keep it)."; }
+                else result = (words.Length > 2 ? usageError + " " : "") + "Resource usage: " + ResourceMultipliers.Current.Describe() + ". Use usage energy|hydrogen|oxygen <0-10>.";
                 break;
             case "raid":
                 result = words.Length > 1 && words[1] is "on" or "off" ? host.LocalAdmin(new AdminRequest(AdminAction.OfflineRaidProtection, Value: words[1] == "on")) : "Offline raid protection is " + (host.OfflineRaidProtection ? "on" : "off") + ". Use raid on|off.";
@@ -438,6 +580,7 @@ internal static class DedicatedRuntime
                 UpdatedUtc = DateTime.UtcNow, ProcessId = Environment.ProcessId, Status, Error, ErrorDetail,
                 SaveId = _savedId, WorldLoaded = _loaded, SaveInProgress = _saving, Exiting = _exiting,
                 LastSaveUtc = _lastSaveUtc, ShutdownRequests = _shutdownRequests, FinalSaveCompleted = _allowExit,
+                RestartRequested = _restartRequested, NextRestartUtc = _restartAt?.ToUniversalTime(),
                 Players = network?.Players.Where(p => p.Peer.HasValue).Select(p => new
                 {
                     SteamId = p.Peer.Value.Value, p.Name, State = p.CharacterNetId > 0 ? "Playing" : "Joining"

@@ -200,6 +200,8 @@ internal sealed class HostIdentities
 		ppd.GetPerPlayerData<BlockPlacerPerPlayerData>(identity);
 		ppd.GetPerPlayerData<VoxelHandData>(identity);
 		ppd.GetPerPlayerData<PlayerCreditsData>(identity);
+		// The joiner's own client reads it when its character dies (death analytics); the host only creates it on respawn.
+		ppd.GetPerPlayerData<LastDeathPerPlayerData>(identity);
 		// Anything else the host has (mod or DLC data) is created for the joiner too, through the generic getter.
 		if (((CollectionDictionary<IdentityId, List<object>, object>)(object)ppd._perPlayerData).TryGet(Hotfix, out List<object> hostData))
 		{

@@ -50,8 +50,8 @@ internal static class SocialUi
         var shared = JoinStatusUi.FindShared(MpPlugin.App); if (shared == null) return;
         shared.ShowDialog(new TwoOptionsDialogViewModel(new TwoOptionsDialogDefinition
         {
-            Title = LocKey.FromString(title), Content = LocKey.FromString(message),
-            ConfirmOption = LocKey.FromString("Confirm"), CancelOption = LocKey.FromString("Cancel")
+            Title = OnlineUi.Raw(title), Content = OnlineUi.Raw(message),
+            ConfirmOption = OnlineUi.Raw("Confirm"), CancelOption = OnlineUi.Raw("Cancel")
         }) { ConfirmAction = () => MpMenu.Queue(action) });
     });
     private sealed record TerminalTab(bool Factions);
@@ -67,13 +67,13 @@ internal static class SocialUi
         var categories = __instance.Categories.ToList();
         var grid = categories.FirstOrDefault(c => c.Id == TerminalCategoryId.From(TerminalScreenMode.Grid));
         if (grid == null) return;
-        var factions = new TerminalCategoryTab(FactionsCategory, LocKey.FromString("Factions"), isVisible: true);
+        var factions = new TerminalCategoryTab(FactionsCategory, OnlineUi.Raw("Factions"), isVisible: true);
         int map = categories.FindIndex(c => c.Id == TerminalCategoryId.From(TerminalScreenMode.Map));
         categories.Insert(map < 0 ? categories.Count : map + 1, factions);
         var subScreens = __instance.SubScreens.ToList();
         int lastGrid = subScreens.FindLastIndex(s => s.Category == grid && s.IsVisible);
-        subScreens.Insert(lastGrid + 1, new TerminalSubScreen(grid, new TerminalScreenId(grid.Id.Value + "/Ownership"), LocKey.FromString("Ownership"), isVisible: true, typeof(TerminalTab), _ => new TerminalTab(false)));
-        subScreens.Add(new TerminalSubScreen(factions, new TerminalScreenId(FactionsCategory.Value + "/Factions"), LocKey.FromString("Factions"), isVisible: true, typeof(TerminalTab), _ => new TerminalTab(true)));
+        subScreens.Insert(lastGrid + 1, new TerminalSubScreen(grid, new TerminalScreenId(grid.Id.Value + "/Ownership"), OnlineUi.Raw("Ownership"), isVisible: true, typeof(TerminalTab), _ => new TerminalTab(false)));
+        subScreens.Add(new TerminalSubScreen(factions, new TerminalScreenId(FactionsCategory.Value + "/Factions"), OnlineUi.Raw("Factions"), isVisible: true, typeof(TerminalTab), _ => new TerminalTab(true)));
         __instance.Categories = categories;
         __instance.SubScreens = subScreens;
     }

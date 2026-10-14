@@ -41,6 +41,10 @@ internal sealed class JoinStatusUi
 
 	private string? _dialogText;
 
+	private LoadingDialogViewModel? _download;
+
+	private static readonly System.Reflection.MethodInfo NotifyChanged = HarmonyLib.AccessTools.Method(typeof(LoadingDialogViewModel), "OnPropertyChanged", new[] { typeof(string) });
+
 	private string? _noticeKey;
 
 	public long LoadingUpdates;
@@ -154,14 +158,19 @@ internal sealed class JoinStatusUi
 		}
 		_lastDetail = detail;
 		screen.Name = new LocalizableText(JoinProgress.Sanitize(title, 60));
-		screen.FrontText = LocKey.FromString(JoinProgress.Sanitize(detail, 400));
-		screen.LoadingText = LocKey.FromString(JoinProgress.Sanitize(status, 20));
+		screen.FrontText = OnlineUi.Raw(JoinProgress.Sanitize(detail, 400));
+		screen.LoadingText = OnlineUi.Raw(JoinProgress.Sanitize(status, 20));
 		LoadingUpdates++;
 		return true;
 	}
 
 	private void UpdateDialog(SharedUIComponent shared, (JoinProgress.DialogKind Kind, string Title, string Text, string Key) view)
 	{
+		if (view.Kind == JoinProgress.DialogKind.Download)
+		{
+			ShowDownload(shared, view.Title, view.Text);
+			return;
+		}
 		if (view.Kind != JoinProgress.DialogKind.Progress)
 		{
 			CloseDialog();
@@ -175,10 +184,10 @@ internal sealed class JoinStatusUi
 			_noticeKey = view.Key;
 			shared.ShowDialog(new Keen.Game2.Client.UI.Library.Dialogs.TwoOptionsDialog.TwoOptionsDialogViewModel(new Keen.Game2.Client.UI.Library.Dialogs.TwoOptionsDialog.TwoOptionsDialogDefinition
 			{
-				Title = LocKey.FromString(view.Title),
-				Content = LocKey.FromString(JoinProgress.Sanitize(view.Text, 400)),
-				ConfirmOption = LocKey.FromString("Retry"),
-				CancelOption = LocKey.FromString("Close")
+				Title = OnlineUi.Raw(view.Title),
+				Content = OnlineUi.Raw(JoinProgress.Sanitize(view.Text, 400)),
+				ConfirmOption = OnlineUi.Raw("Retry"),
+				CancelOption = OnlineUi.Raw("Close")
 			}) { ConfirmAction = MpMenu.Retry });
 			DialogsShown++;
 		}
@@ -191,9 +200,9 @@ internal sealed class JoinStatusUi
 			_noticeKey = view.Key;
 			shared.ShowDialog(new OneOptionDialogViewModel(new OneOptionDialogDefinition
 			{
-				Title = LocKey.FromString(view.Title),
-				Content = LocKey.FromString(JoinProgress.Sanitize(view.Text, 400)),
-				ConfirmOption = LocKey.FromString("OK")
+				Title = OnlineUi.Raw(view.Title),
+				Content = OnlineUi.Raw(JoinProgress.Sanitize(view.Text, 400)),
+				ConfirmOption = OnlineUi.Raw("OK")
 			}));
 			DialogsShown++;
 		}
@@ -208,10 +217,10 @@ internal sealed class JoinStatusUi
 			_dialogText = text;
 			_dialog = shared.ShowDialog(new LoadingDialogViewModel(new LoadingDialogDefinition
 			{
-				Title = LocKey.FromString(view.Title),
-				Content = LocKey.FromString(JoinProgress.Sanitize(view.Text, 400)),
+				Title = OnlineUi.Raw(view.Title),
+				Content = OnlineUi.Raw(JoinProgress.Sanitize(view.Text, 400)),
 				AllowAbort = true,
-				AbortOption = LocKey.FromString("Cancel")
+				AbortOption = OnlineUi.Raw("Cancel")
 			})
 			{
 				AbortAction = MpMenu.Leave
@@ -228,11 +237,48 @@ internal sealed class JoinStatusUi
 		}
 	}
 
+	/// <summary>
+	/// The world download at the menu: a native modal dialog with no cancel button, so nothing else can be clicked
+	/// until the loading screen takes over. Its text changes in place instead of the dialog being reopened.
+	/// </summary>
+	private void ShowDownload(SharedUIComponent shared, string title, string text)
+	{
+		text = JoinProgress.Sanitize(text, 400);
+		if (_download != null && _dialog != null)
+		{
+			if (text == _dialogText) return;
+			_dialogText = text;
+			((LoadingDialogDefinition)_download.GetDefinition()).Content = OnlineUi.Raw(text);
+			NotifyChanged.Invoke(_download, new object[] { nameof(LoadingDialogViewModel.Content) });
+			return;
+		}
+		CloseDialog();
+		_dialogText = text;
+		_download = new LoadingDialogViewModel(new LoadingDialogDefinition
+		{
+			Title = OnlineUi.Raw(JoinProgress.Sanitize(title, 80)),
+			Content = OnlineUi.Raw(text),
+			AllowAbort = false
+		});
+		_dialog = shared.ShowDialog(_download);
+		IObservableDisposable dialog = _dialog;
+		dialog.OnDisposed += _ =>
+		{
+			if (_dialog == dialog)
+			{
+				_dialog = null;
+				_download = null;
+			}
+		};
+		DialogsShown++;
+	}
+
 	private void CloseDialog()
 	{
 		IObservableDisposable dialog = _dialog;
 		_dialog = null;
 		_dialogText = null;
+		_download = null;
 		try
 		{
 			dialog?.Dispose();

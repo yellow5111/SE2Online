@@ -26,11 +26,11 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Reference Include="Avalonia.Base;Avalonia.Controls;Avalonia.Markup;Avalonia.Markup.Xaml;Game2.Client;Game2.Game;Game2.Simulation;SpaceEngineers2;Steamworks.NET;VRage.Audio;VRage.Core;VRage.Core.Game;VRage.DCS;VRage.Game;VRage.Game.Client;VRage.Input;VRage.Library;VRage.Multiplayer;VRage.Physics;VRage.Render;VRage.UI;VRage.UI.Shared;VRage.Voxels">
+    <Reference Include="Avalonia.Base;Avalonia.Controls;Avalonia.Markup;Avalonia.Markup.Xaml;Game2.Client;Game2.Game;Game2.Simulation;SpaceEngineers2;Steamworks.NET;VRage.Animation;VRage.Audio;VRage.Core;VRage.Core.Game;VRage.DCS;VRage.Game;VRage.Game.Client;VRage.Input;VRage.Library;VRage.Multiplayer;VRage.Physics;VRage.Render;VRage.UI;VRage.UI.Shared;VRage.Voxels;VRage.Water;VRage.Water.Client">
       <HintPath>$(SE2Bin)\%(Identity).dll</HintPath>
       <Private>False</Private>
     </Reference>
-    <Publicize Include="Game2.Client;Game2.Simulation;SpaceEngineers2;VRage.Multiplayer" IncludeVirtualMembers="false" />
+    <Publicize Include="Game2.Client;Game2.Simulation;SpaceEngineers2;VRage.Multiplayer;VRage.Water" IncludeVirtualMembers="false" />
   </ItemGroup>
 
   <ItemGroup>

@@ -27,6 +27,10 @@ public static class DespawnMessage
 		uint lifeSeq = r.U32();
 		byte mode = r.U8();
 		int count = r.I32();
+		if (count < 0 || count > (d.Length - 10) / 4)
+		{
+			throw new ArgumentException("Despawn list longer than its message.");
+		}
 		List<uint> netIds = new List<uint>(count);
 		for (int i = 0; i < count; i++)
 		{

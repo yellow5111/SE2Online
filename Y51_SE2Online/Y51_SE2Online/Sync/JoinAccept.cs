@@ -36,6 +36,11 @@ public sealed class JoinAccept
 
 	public List<PlayerInfo> Players = new List<PlayerInfo>();
 
+	/// <summary>The mods the host's world runs; the joiner loads exactly these before entering.</summary>
+	public List<WorldMod> Mods = new List<WorldMod>();
+
+	public string ModsError;
+
 	public byte[] Encode()
 	{
 		WireWriter wireWriter = new WireWriter(96 + Players.Count * 40).U8(33).U16(SyncVersion).Str(WorldName)
@@ -52,6 +57,7 @@ public sealed class JoinAccept
 			.I64(IdentityId)
 			.I64(PlayerId);
 		PlayerTableMessage.Write(wireWriter, Players);
+		WorldMods.Write(wireWriter, Mods);
 		return wireWriter.ToArray();
 	}
 
@@ -78,6 +84,14 @@ public sealed class JoinAccept
 			joinAccept.IdentityId = r.I64();
 			joinAccept.PlayerId = r.I64();
 			joinAccept.Players = PlayerTableMessage.Read(ref r);
+			try
+			{
+				joinAccept.Mods = WorldMods.Read(ref r);
+			}
+			catch (Exception ex) when (ex is FormatException || ex is ArgumentOutOfRangeException)
+			{
+				joinAccept.ModsError = "the host's mod list could not be read: " + ex.Message;
+			}
 		}
 		return joinAccept;
 	}

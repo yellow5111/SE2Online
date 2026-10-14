@@ -238,11 +238,12 @@ public sealed class ClientBlobStore
 		}
 	}
 
+	/// <summary>A bundle starts waiting: it gets the full stall window from now, however long the blob stream was quiet before.</summary>
 	public void Touch(long now)
 	{
 		lock (_sync)
 		{
-			if (_lastProgressMs < now - StallMs)
+			if (_lastProgressMs < now)
 			{
 				_lastProgressMs = now;
 			}

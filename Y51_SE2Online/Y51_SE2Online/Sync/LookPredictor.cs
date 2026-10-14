@@ -115,6 +115,12 @@ public sealed class LookPredictor
 
 	public int QuietMs { get; set; } = 300;
 
+	// A burst of disagreement (a deck frame change, a seat hand-over) switched prediction off for the rest of the
+	// character's life, and every later turn waited a round trip. It comes back on after this long.
+	public int ReenableMs { get; set; } = 5000;
+
+	private long _disabledAt;
+
 	public uint NetId { get; private set; }
 
 	public ushort Epoch { get; private set; }
@@ -230,6 +236,14 @@ public sealed class LookPredictor
 	public bool OnHost(long now, double x, double y, double z, Quaternion o)
 	{
 		HostSamples++;
+		if (Disabled && NetId != 0 && now - _disabledAt >= ReenableMs)
+		{
+			Disabled = false;
+			_snaps.Clear();
+			_hasP = false;
+			_histCount = 0;
+			_log.Info($"client: look prediction back on for NetworkId {NetId} after {(now - _disabledAt) / 1000} s off");
+		}
 		_hx = x;
 		_hy = y;
 		_hz = z;
@@ -365,7 +379,8 @@ public sealed class LookPredictor
 		if (_snaps.Count > SnapLimit)
 		{
 			Disabled = true;
-			_log.Warn($"client: look prediction keeps disagreeing with the host ({_snaps.Count} snaps in {SnapWindowMs / 1000} s); switched off for NetworkId {NetId} until the next character, the host's orientation is applied as is; {Describe()}");
+			_disabledAt = now;
+			_log.Warn($"client: look prediction keeps disagreeing with the host ({_snaps.Count} snaps in {SnapWindowMs / 1000} s); switched off for NetworkId {NetId} for {ReenableMs / 1000} s, the host's orientation is applied as is; {Describe()}");
 		}
 	}
 

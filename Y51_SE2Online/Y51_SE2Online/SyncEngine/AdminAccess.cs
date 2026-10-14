@@ -62,8 +62,22 @@ internal static class AdminAccess
     public static void Chat(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return;
+        if (VoiceCommand(text.Trim()) || TradeUi.Command(text.Trim())) return;
         if (Hosting) Host.LocalChat(text, false);
         else Client?.SendChat(text);
+    }
+
+    // "/mute <player>" toggles hearing that player's voice; stays on this machine, never sent as chat.
+    private static bool VoiceCommand(string text)
+    {
+        if (!text.StartsWith("/mute", StringComparison.OrdinalIgnoreCase) && !text.StartsWith("/unmute", StringComparison.OrdinalIgnoreCase)) return false;
+        string name = text[(text.IndexOf(' ') is int space and > 0 ? space + 1 : text.Length)..].Trim();
+        bool? muted = name.Length == 0 ? null : VoiceChat.ToggleMute(name);
+        string reply = name.Length == 0 ? "Usage: /mute <player name> (again to unmute)."
+            : muted == null ? "No player named '" + name + "' is online."
+            : muted.Value ? "You no longer hear " + name + "'s voice." : "You hear " + name + "'s voice again.";
+        ChatLog.Add(new ChatLine("Voice", 0, reply, ChatKind.System, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), MpClock.NowMs());
+        return true;
     }
 
     public static void Install(Harmony harmony)
@@ -86,10 +100,10 @@ internal static class AdminAccess
         if (MpPlugin.Controller?.Current?.Join != true || menu._sharedUI == null) return false;
         menu._sharedUI.ShowDialog(new TwoOptionsDialogViewModel(new TwoOptionsDialogDefinition
         {
-            Title = LocKey.FromString("Leave server"),
-            Content = LocKey.FromString("Are you sure you want to leave " + ServerName + "?"),
-            ConfirmOption = LocKey.FromString(confirm),
-            CancelOption = LocKey.FromString("Cancel")
+            Title = OnlineUi.Raw("Leave server"),
+            Content = OnlineUi.Raw("Are you sure you want to leave " + ServerName + "?"),
+            ConfirmOption = OnlineUi.Raw(confirm),
+            CancelOption = OnlineUi.Raw("Cancel")
         }) { ConfirmAction = leave });
         return true;
     }
@@ -123,7 +137,7 @@ internal static class AdminAccess
     public static void Notice(SharedUIComponent shared, string title, string text)
         => shared.ShowDialog(new OneOptionDialogViewModel(new OneOptionDialogDefinition
         {
-            Title = LocKey.FromString(title), Content = LocKey.FromString(text), ConfirmOption = LocKey.FromString("OK")
+            Title = OnlineUi.Raw(title), Content = OnlineUi.Raw(text), ConfirmOption = OnlineUi.Raw("OK")
         }));
 
     private static void AskPassword(SharedUIComponent shared, string why)
@@ -132,8 +146,8 @@ internal static class AdminAccess
         if (options?.Join != true) return;
         shared.ShowDialog(new TextInputDialogViewModel(new TwoOptionsDialogDefinition
         {
-            Title = LocKey.FromString("Server password"), Content = LocKey.FromString(why + "\nEnter the password to join."),
-            ConfirmOption = LocKey.FromString("Join"), CancelOption = LocKey.FromString("Cancel")
+            Title = OnlineUi.Raw("Server password"), Content = OnlineUi.Raw(why + "\nEnter the password to join."),
+            ConfirmOption = OnlineUi.Raw("Join"), CancelOption = OnlineUi.Raw("Cancel")
         }, "", focusText: true)
         {
             InputValidator = text => text.Length > 64 ? "Passwords are at most 64 characters." : null,

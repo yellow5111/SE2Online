@@ -505,5 +505,8 @@ internal static class ReplicationProbe
 		_tap = null;
 		_commitActive = _measure = false;
 		RestoreReaders();
+		// The world outlives a network restart (e.g. a host settings change): forget its components so the next
+		// CommitFrame attaches and instruments them again; otherwise the replay guard stays off for that world.
+		_serverComp = _clientComp = null;
 	}
 }

@@ -1,10 +1,14 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using Keen.Game2.Simulation.GameSystems.Permissions;
 using Keen.Game2.Simulation.WorldObjects.CubeBlocks;
 using Keen.VRage.Core.Game.Systems;
 using Keen.VRage.DCS.Components;
+using Keen.VRage.Library.Definitions;
+using Keen.VRage.Library.Utils;
 using Keen.VRage.Multiplayer.SecureIds;
 using Y51_SE2Online.Sync;
 
@@ -33,8 +37,31 @@ internal sealed partial class HostWorld
             if (block != null) _focusBlocks[actor] = (block, request.Secure);
             else _focusBlocks.TryRemove(actor, out _);
         }
-        var target = request.Action is SocialAction.BlockAllow or SocialAction.BlockDeny ? block : entity == null ? null : WorldSocial.GridOf(entity);
+        var target = request.Action is SocialAction.BlockAllow or SocialAction.BlockDeny or SocialAction.AntennaTag ? block : entity == null ? null : WorldSocial.GridOf(entity);
         return request with { Grid = target == null ? 0 : _ids.GetOrAssign(target), Secure = Guid.Empty };
+    }
+
+    /// <summary>
+    /// Blocks with a whitelist or blacklist, and blocks open to everyone on a player's grid that is not shared with
+    /// everyone: the only blocks whose access a joiner cannot work out from the grid's owner and sharing.
+    /// </summary>
+    private (List<(uint Id, BlockAcl Acl)> Listed, uint[] Open) BlockLists(Session session)
+    {
+        var listed = new List<(uint, BlockAcl)>();
+        var open = new List<uint>();
+        var everyone = Singleton<DefinitionManager>.Instance.GetConfiguration<PermissionsConfiguration>().EveryoneAccess;
+        foreach (var block in session.GetEntitiesOfType<BlockPermissionsComponent>())
+        {
+            var group = block.Get<BlockPermissionsComponent>().AccessGroup;
+            if (BlockAcl.IsAcl(group.String))
+            {
+                var acl = WorldSocial.AclOf(block);
+                if (acl.Allow.Length + acl.Deny.Length > 0) listed.Add((_ids.GetOrAssign(block), acl));
+            }
+            else if (group == everyone && WorldSocial.GridOf(block) is { } grid && PlayerIdentities.IsHuman(TeamPermissions.OwnerOf(grid)) && WorldSocial.SharingOf(grid) != GridSharing.Everyone)
+                open.Add(_ids.GetOrAssign(block));
+        }
+        return (listed, open.ToArray());
     }
 
     private SocialBlock FocusBlockOf(long actor)
@@ -44,6 +71,7 @@ internal sealed partial class HostWorld
         if (EngineCodec.IsDead(block)) { _focusBlocks.TryRemove(actor, out _); return null; }
         var acl = WorldSocial.AclOf(block);
         string name = block.TryGet<CubeBlockComponent>()?.Definition?.DebugNameShort ?? "Block";
-        return new SocialBlock(_ids.GetOrAssign(block), SocialState.Clean(name, 100), TeamPermissions.OwnerOf(block), acl.Allow, acl.Deny, focus.Secure);
+        bool antenna = block.TryGet<Keen.Game2.Simulation.GameSystems.Antennas.AntennaComponent>() != null;
+        return new SocialBlock(_ids.GetOrAssign(block), SocialState.Clean(name, 100), TeamPermissions.OwnerOf(block), acl.Allow, acl.Deny, focus.Secure, antenna, acl.ShowTag);
     }
 }

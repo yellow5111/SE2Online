@@ -42,10 +42,14 @@ public sealed class AdminScreen : ScreenView
     private readonly TextBlock _pvp, _raid, _pcu, _sun;
     private readonly TextBox _dayInput = OnlineUi.Input("Day length (minutes)", 6);
     private readonly TextBox _pcuInput = OnlineUi.Input("PCU per player", 9);
+    private readonly TextBox _motdInput = new() { Watermark = "Message of the day ({player}, {server}, {online}, {max})", MaxLength = Core.Motd.MaxText, FontSize = 22, MinHeight = 120, AcceptsReturn = true, TextWrapping = Avalonia.Media.TextWrapping.Wrap };
+    private readonly TextBlock _motd = OnlineUi.Text("", "SubtleNotice", 22);
     private readonly ContentControl _page = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
     private readonly TextBox _prefabSearch = OnlineUi.Input("Search prefabs", 64), _itemSearch = OnlineUi.Input("Search items", 64);
-    private readonly TextBox _distance = OnlineUi.Input("25", 4), _amount = OnlineUi.Input("100", 6);
-    private readonly TextBox _zoneName = OnlineUi.Input("Safe zone name", 64), _zoneRadius = OnlineUi.Input("100", 4), _resize = OnlineUi.Input("Radius", 4);
+    private readonly TextBox _amount = OnlineUi.Input("100", 6);
+    private readonly (Slider S, Control Row) _distance = OnlineUi.Slider(5, 500, 5, v => v + " m", 260);
+    private readonly TextBox _zoneName = OnlineUi.Input("Safe zone name", 64);
+    private readonly (Slider S, Control Row) _zoneRadius = OnlineUi.Slider(10, 2000, 10, v => v + " m", 260), _resize = OnlineUi.Slider(10, 2000, 10, v => v + " m", 260);
     private readonly ListBox _prefabList = OnlineUi.List("AdminPrefabs"), _itemList = OnlineUi.List("AdminItems"), _zoneList = OnlineUi.List("AdminSafeZones"), _playerList = OnlineUi.List("AdminPlayers");
     private readonly Button[] _tabs;
     private readonly Control[] _pages;
@@ -87,6 +91,11 @@ public sealed class AdminScreen : ScreenView
                 OnlineUi.Button("No limit", () => Send(new AdminRequest(AdminAction.PcuLimit, Size: 0)), "AdminPcuOff", true),
                 OnlineUi.Button("World default", () => Send(new AdminRequest(AdminAction.PcuLimit, Size: -1)), "AdminPcuDefault", true)));
 
+        var motd = OnlineUi.Section("MESSAGE OF THE DAY",
+            OnlineUi.Text("Shown to every player once they spawn, as a popup and in chat. {player}, {server}, {online} and {max} are filled in.", null, 24),
+            _motd, _motdInput,
+            OnlineUi.Row(OnlineUi.Button("Set message", () => Send(new AdminRequest(AdminAction.Motd, Name: _motdInput.Text ?? "")), "AdminMotdSet", true),
+                OnlineUi.Button("Clear", () => Send(new AdminRequest(AdminAction.Motd, Name: "")), "AdminMotdClear", true)));
         _sun = OnlineUi.Text("", "SubTitle");
         _dayInput.Width = 260;
         var sun = OnlineUi.Section("SUN",
@@ -104,25 +113,26 @@ public sealed class AdminScreen : ScreenView
                 OnlineUi.Button("+180°", () => Send(new AdminRequest(AdminAction.SunNudge, Size: 180)), "AdminSunFlip")),
             OnlineUi.Text("Server console: sun on|off, sun day <minutes>, sun move <degrees>. server.json: SunRotation, SunPeriodMinutes.", "SubtleNotice", 22));
 
-        _spawn = OnlineUi.Button("Spawn in front of me", () => { if (_prefabList.SelectedItem is Entry e) Send(new AdminRequest(AdminAction.SpawnPrefab, Name: e.Id.ToString(), Size: Number(_distance, 25))); }, "AdminSpawnPrefab", true);
+        _spawn = OnlineUi.Button("Spawn in front of me", () => { if (_prefabList.SelectedItem is Entry e) Send(new AdminRequest(AdminAction.SpawnPrefab, Name: e.Id.ToString(), Size: _distance.S.Value)); }, "AdminSpawnPrefab", true);
         _prefabSearch.TextChanged += (_, _) => RefreshCatalogs();
-        var spawn = Page(_prefabSearch, _prefabList, OnlineUi.Row(OnlineUi.Text("Distance (m)", "SubTitle"), _distance, _spawn));
+        var spawn = Page(_prefabSearch, _prefabList, OnlineUi.Row(OnlineUi.Text("Distance", "SubTitle"), _distance.Row, _spawn));
 
         _give = OnlineUi.Button("Give to me", () => { if (_itemList.SelectedItem is Entry e) Send(new AdminRequest(AdminAction.SpawnItem, Name: e.Id.ToString(), Size: Number(_amount, 1))); }, "AdminGiveItem", true);
         _itemSearch.TextChanged += (_, _) => RefreshCatalogs();
         var items = Page(_itemSearch, _itemList, OnlineUi.Row(OnlineUi.Text("Amount", "SubTitle"), _amount, _give));
 
-        _createZone = OnlineUi.Button("Create at my position", () => Send(new AdminRequest(AdminAction.CreateSafeZone, Name: _zoneName.Text ?? "", Size: Number(_zoneRadius, 100))), "AdminCreateSafeZone", true);
-        _resizeZone = OnlineUi.Button("Resize", () => { if (_zoneList.SelectedItem is SafeZoneInfo z) Send(new AdminRequest(AdminAction.DeleteSafeZone, z.NetId, Size: Number(_resize, z.Radius))); }, "AdminResizeSafeZone");
+        _createZone = OnlineUi.Button("Create at my position", () => Send(new AdminRequest(AdminAction.CreateSafeZone, Name: _zoneName.Text ?? "", Size: _zoneRadius.S.Value)), "AdminCreateSafeZone", true);
+        _resizeZone = OnlineUi.Button("Resize", () => { if (_zoneList.SelectedItem is SafeZoneInfo z) Send(new AdminRequest(AdminAction.DeleteSafeZone, z.NetId, Size: _resize.S.Value)); }, "AdminResizeSafeZone");
         _deleteZone = OnlineUi.Button("Delete", () => { if (_zoneList.SelectedItem is SafeZoneInfo z) SocialUi.Confirm("Delete safe zone", "Delete '" + z.Name + "'?", () => AdminAccess.Send(new AdminRequest(AdminAction.DeleteSafeZone, z.NetId))); }, "AdminDeleteSafeZone");
-        _zoneName.Width = 420; _zoneRadius.Width = 140; _resize.Width = 140;
-        var zones = Page(OnlineUi.Row(_zoneName, OnlineUi.Text("Radius (10-2000 m)", "SubTitle"), _zoneRadius, _createZone), _zoneList, OnlineUi.Row(_resize, _resizeZone, _deleteZone));
+        _zoneName.Width = 420; _distance.S.Value = 25; _zoneRadius.S.Value = 100; _resize.S.Value = 100;
+        _zoneList.SelectionChanged += (_, _) => { if (_zoneList.SelectedItem is SafeZoneInfo z) _resize.S.Value = Math.Clamp(z.Radius, 10, 2000); };
+        var zones = Page(OnlineUi.Row(_zoneName, OnlineUi.Text("Radius", "SubTitle"), _zoneRadius.Row, _createZone), _zoneList, OnlineUi.Row(_resize.Row, _resizeZone, _deleteZone));
 
         _teleport = OnlineUi.Button("Teleport to player", () => { if (_playerList.SelectedItem is AccessPlayer p) Send(new AdminRequest(AdminAction.TeleportTo, p.SteamId)); }, "AdminTeleportTo", true);
         _bring = OnlineUi.Button("Bring player to me", () => { if (_playerList.SelectedItem is AccessPlayer p) Send(new AdminRequest(AdminAction.Bring, p.SteamId)); }, "AdminBring", true);
         var players = Page(OnlineUi.Text("Kick, ban and promote players from the Players screen (" + MpMenu.Settings.PlayersKey + ").", "SubtleNotice", 22), _playerList, OnlineUi.Row(_teleport, _bring));
 
-        _pages = new Control[] { OnlineUi.Scroll(OnlineUi.Stack(tools, pvp, sun)), spawn, items, zones, players };
+        _pages = new Control[] { OnlineUi.Scroll(OnlineUi.Stack(tools, pvp, motd, sun)), spawn, items, zones, players };
         string[] names = { "Creative", "Spawn", "Items", "Safe zones", "Players" };
         _tabs = new Button[names.Length];
         for (int i = 0; i < names.Length; i++) { int index = i; _tabs[i] = OnlineUi.Button(names[i], () => Select(index), "Admin" + names[i].Replace(" ", "")); _tabs[i].Classes.Add("OnlineNavigation"); }
@@ -212,6 +222,7 @@ public sealed class AdminScreen : ScreenView
         _pvp.Text = "PvP is " + (state.Pvp ? "ON" : "OFF");
         _raid.Text = "Offline raid protection is " + (state.OfflineRaidProtection ? "ON" : "OFF");
         _pcu.Text = "PCU limit per player: " + (state.PcuLimit <= 0 || state.PcuLimit == int.MaxValue ? "unlimited" : state.PcuLimit.ToString("N0"));
+        _motd.Text = string.IsNullOrWhiteSpace(state.Motd) ? "No message of the day." : "Current: " + state.Motd;
         _sun.Text = "Sun rotation is " + (state.SunRotation ? "ON" : "OFF") + (state.SunPeriodMinutes > 0 ? ", one full day every " + AccessList.DayLength(state.SunPeriodMinutes) : "");
         if (_page.Content == _pages[1] || _page.Content == _pages[2]) RefreshCatalogs();
         string zones = string.Join("|", state.SafeZones.Select(z => z.NetId + z.Name + z.Radius));

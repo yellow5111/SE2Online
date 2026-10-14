@@ -118,6 +118,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		host.OnBeforeProjectsLoaded += OnBeforeProjectsLoaded;
 		host.OnBeforeEngineInstantiated += OnBeforeEngineInstantiated;
 		AssertHandler.Install();
+		OnlineUi.InstallRawTexts(_harmony);
 		Controller = new OnlineSessionController(new OnlineRuntime(this));
 		var bootstrap = new[]
 		{
@@ -131,12 +132,17 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			if (!hook.Item2) throw new InvalidOperationException(hook.Item1 + ": " + hook.Item3);
 		}
 		DedicatedRuntime.Initialize(LaunchArgs, _harmony);
+		PassengerSeats.Hook();
 		WorldSocial.Install(_harmony);
+		NameSync.Install(_harmony);
 		TurretRelations.Install(_harmony);
 		PvpRules.Install(_harmony);
 		MapGuard.Install(_harmony);
 		JoinStatusUi.Install(_harmony);
 		BlockSizeFilter.Install(_harmony);
+		BackupBlobFix.Install(_harmony);
+		ResourceMultiplierRules.Install(_harmony);
+		BrokenMods.Install(_harmony);
 		InstallExitGuards();
 		if (DedicatedRuntime.Headless)
 		{
@@ -148,6 +154,13 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		{
 			MpMenu.Install(_harmony);
 			GpsShareUi.Install();
+			GunHudGuard.Install(_harmony);
+			ProceduralVoxelHandoff.Install(_harmony);
+			HostOnlySaves.Install(_harmony);
+			WaterMirror.Install(_harmony);
+			PassengerSeats.Install(_harmony);
+			TradeUi.Install();
+			ReplicationRaceGuards.Install(_harmony);
 			PermissionFeedback.Install(_harmony);
 		}
 		_log.Info(DedicatedRuntime.Headless ? "Y51_SE2Online dedicated bootstrap installed" : "Y51_SE2Online ready: use Multiplayer in the main or pause menu");
@@ -465,6 +478,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		{
 			int initCount = Interlocked.Increment(ref _worldInits);
 			GameLog.Instance.Info($"canary: WorldSessionComponent.InitAsync #{initCount} IsServer={ob.IsServer} (Harmony prefix on R2R code works)");
+			PassengerSeats.Apply();
 			if (ob.IsServer)
 			{
 				_observedWorld = __instance;

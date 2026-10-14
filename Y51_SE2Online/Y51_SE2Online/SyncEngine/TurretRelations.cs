@@ -8,47 +8,45 @@ using Keen.Game2.Simulation.WorldObjects.CubeBlocks.Weapons;
 using Keen.Game2.Simulation.WorldObjects.CubeGrids.Weapons;
 using Keen.VRage.Core.Game.Systems;
 using Keen.VRage.DCS.Components;
+using Y51_SE2Online.Sync;
 
 namespace Y51_SE2Online.SyncEngine;
 
 /// <summary>
-/// Player-to-player relations for turrets and sensors in multiplayer: with PvP on, players outside your faction are
-/// hostile; you and your faction members (and your grids) are not. With PvP off, no player is hostile to another.
+/// Player-to-player relations for turrets and sensors in multiplayer (<see cref="RelationTable"/>): with PvP on,
+/// players whose factions have no treaty or are at war are hostile; own faction, allies and factions at peace are not.
+/// With PvP off, no player is hostile to another.
 /// </summary>
 internal static class TurretRelations
 {
     /// <summary>Set per multiplayer session from the host's "turrets attack players outside your faction" setting.</summary>
     public static volatile bool PlayersHostile;
 
-    // identity -> faction id; read on the simulation thread, replaced whole when membership changes.
-    private static volatile Dictionary<long, string> _factions = new();
+    // Read on the simulation thread, replaced whole when membership or treaties change.
+    private static volatile RelationTable _table = RelationTable.Empty;
     private static string _signature;
+
+    public static RelationTable Table => _table;
 
     public static void Install(Harmony harmony)
         => harmony.Patch(AccessTools.Method(typeof(RelationsSessionComponent), nameof(RelationsSessionComponent.GetRelationFromOwners)),
             postfix: new HarmonyMethod(typeof(TurretRelations), nameof(RelationPostfix)));
 
-    public static RelationState Relation(long a, long b, bool playersHostile, IReadOnlyDictionary<long, string> factions)
-    {
-        if (!playersHostile || a == b) return RelationState.NonHostile;
-        return factions.TryGetValue(a, out var fa) && factions.TryGetValue(b, out var fb) && fa == fb ? RelationState.NonHostile : RelationState.Hostile;
-    }
-
     private static void RelationPostfix(RelationsSessionComponent __instance, IdentityId ownerA, IdentityId ownerB, ref RelationState __result)
     {
         long a = (long)ownerA, b = (long)ownerB;
         if (!PvpRules.Active || a == 0 || b == 0 || __instance._npcIdentity.IsNpc(ownerA) || __instance._npcIdentity.IsNpc(ownerB)) return;
-        __result = Relation(a, b, PlayersHostile, _factions);
+        __result = RelationTable.MayFight(_table.Of(a, b), PlayersHostile) ? RelationState.Hostile : RelationState.NonHostile;
     }
 
-    /// <summary>Publishes faction membership; returns true when it changed so turrets need re-evaluating.</summary>
-    public static bool SetFactions(IEnumerable<(long Member, string Faction)> members)
+    /// <summary>Publishes faction membership and treaties; returns true when they changed so turrets need re-evaluating.</summary>
+    public static bool SetRelations(IEnumerable<Sync.OnlineFaction> factions, IEnumerable<Sync.FactionPact> pacts)
     {
-        var map = members.GroupBy(m => m.Member).ToDictionary(g => g.Key, g => g.First().Faction);
-        string signature = string.Join(";", map.OrderBy(kv => kv.Key).Select(kv => kv.Key + "=" + kv.Value));
+        string signature = string.Join(";", factions.OrderBy(f => f.Id).Select(f => f.Id + "=" + string.Join(",", f.Members.OrderBy(m => m))))
+            + "|" + string.Join(";", pacts.Select(p => p.A + "-" + p.B + "=" + p.State).OrderBy(x => x, StringComparer.Ordinal));
         if (signature == _signature) return false;
         _signature = signature;
-        _factions = map;
+        _table = RelationTable.Build(factions, pacts);
         return true;
     }
 
@@ -92,7 +90,7 @@ internal static class TurretRelations
     public static void Reset()
     {
         PlayersHostile = false;
-        _factions = new();
+        _table = RelationTable.Empty;
         _signature = null;
     }
 }

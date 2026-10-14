@@ -112,7 +112,7 @@ public sealed class PlayersScreen : ScreenView
         Styles.Add(new Avalonia.Styling.Style(s => s.OfType<Button>().Class("OnlineNavigation").Class("Selected")) { Setters = { new Avalonia.Styling.Setter(Button.BorderThicknessProperty, new Thickness(3)), new Avalonia.Styling.Setter(Button.BorderBrushProperty, new Keen.VRage.UI.AvaloniaInterface.Utilities.VRageDynamicResource("Primary")), new Avalonia.Styling.Setter(Button.FontWeightProperty, Avalonia.Media.FontWeight.Bold) } });
         var body = OnlineUi.Columns(OnlineUi.Panel(roster), OnlineUi.Panel(_page), "*,24,760");
         var connection = OnlineUi.Stack(_status, _message); connection.Spacing = 6;
-        Content = OnlineUi.Shell(this, "PLAYERS", OnlineUi.Row(_tabs), connection, body, OnlineUi.Row());
+        Content = OnlineUi.Shell(this, "PLAYERS", OnlineUi.Row(_tabs), connection, body, OnlineUi.Row(OnlineUi.Button("Server info", ServerInfoUi.OpenInGame, "ServerInfo")));
         Select(0);
     }
 
@@ -150,7 +150,7 @@ public sealed class PlayersScreen : ScreenView
         _model = DataContext as PlayersScreenViewModel;
         if (_model != null) _model.Refresh += QueueRefresh;
     }
-    private void QueueRefresh() => Dispatcher.UIThread.Post(() => { if (!_closed) RefreshControls(); });
+    private void QueueRefresh() => Dispatcher.UIThread.Post(() => { if (!_closed) { RefreshControls(); ServerInfoUi.Tick(); } });
 
     private void RefreshControls()
     {

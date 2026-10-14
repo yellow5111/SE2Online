@@ -79,6 +79,7 @@ internal static class HeadlessReplication
     {
         if (!Active) return true;
         if (!sessionBuilder.IsServer) throw new InvalidOperationException("Headless replication requires a server session.");
+        Y51_SE2Online.SyncEngine.PassengerSeats.Apply();
         var replication = new InProcessReplication(Singleton<DefinitionManager>.Instance.GetDefinitionsOfType<PrefabBindingDefinition>().ToImmutableArray());
         ((ISessionConfigurator)replication.ServerContext).ConfigureSession(sessionBuilder);
         sessionBuilder.ExternalServices.Add((ILocalClientProvider)new LocalClient());

@@ -26,6 +26,15 @@ public sealed partial class HostSession
 		_world.OnGpsShare(from, fromName, share with { Name = SocialState.Clean(share.Name ?? "", 80) });
 	}
 
+	/// <summary>Tells a fighter's client to hold or release its own input; the hosting player is handled locally.</summary>
+	public void SendFightLock(ushort clientId, bool locked)
+	{
+		if (clientId == SyncProtocol.HostClientId) { FightLockState.Set(locked); return; }
+		PeerId? peer;
+		lock (_sync) peer = _players.Values.FirstOrDefault(p => p.ClientId == clientId)?.Peer;
+		if (peer.HasValue) _t.Send(peer.Value, Channel.Control, SocialMessage.Encode(SyncMsg.FightLock, new FightLockMessage(locked)));
+	}
+
 	/// <summary>A system chat line for one player; the hosting player's goes straight into the local chat log.</summary>
 	public void GpsNotice(ushort clientId, string text)
 	{

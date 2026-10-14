@@ -229,6 +229,8 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 	internal WorldSocial Social => _worldSession == null ? null : WorldSocial.For(_worldSession);
 	internal long IdentityOf(ushort clientId) => _identityOf.TryGetValue(clientId, out var identity) ? identity : 0;
 	private readonly ConcurrentQueue<(PeerId? Peer, ushort ClientId, SocialRequest Request)> _socialRequests = new();
+	private readonly Dictionary<string, (int Count, long Bytes)> _frameSignalBytes = new();
+	private long _heavyLoggedMs = long.MinValue / 2;
 	private readonly Dictionary<long, SocialRequest> _socialViews = new();
 	private readonly Dictionary<long, string> _socialMessages = new();
 	private readonly ConcurrentDictionary<ushort, long> _socialRate = new();
@@ -239,7 +241,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 	private string Tagged(long identity, string name)
 	{
 		string tag = FactionTagOf(identity);
-		return string.IsNullOrEmpty(tag) ? name : "[" + tag + "] " + name;
+		return FactionTag.Prefix(tag, name);
 	}
 
 	// Read from the net thread while HostSession holds its own lock, so it must not take social.Sync.
@@ -305,6 +307,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 	{
 		ApplyPcuLimit(session);
 		ApplySun(session);
+		ResourceMultiplierRules.Apply(session);
 		BlockSizeFilter.EnsureHost();
 		var social = Social;
 		if (social == null || _host == null) return;
@@ -314,7 +317,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			PvpRules.SetPlayers(social.State.Players.Select(p => p.Identity),
 				_joiners.Values.Select(j => IdentityOf(j.ClientId)).Append(Dedicated.DedicatedRuntime.Headless ? 0 : PlayerIdentities.HotfixIdentity),
 				social.State.Factions.Select(f => (IReadOnlyCollection<long>)f.Members));
-			if (TurretRelations.SetFactions(social.State.Factions.SelectMany(f => f.Members.Select(m => (m, f.Id)))) | TurretRelations.TakeRefresh())
+			if (TurretRelations.SetRelations(social.State.Factions, social.State.Pacts) | TurretRelations.TakeRefresh())
 				_log.Info($"turrets: factions or PvP changed; {TurretRelations.Refresh(session)} turret grid(s) re-evaluated their targets; {PvpRules.Describe()}");
 			social.InitializeGrids(_worldSession);
 			var roster = _host.PlayerTable();
@@ -339,14 +342,20 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			long now = MpClock.NowMs();
 			if (!changed && now < _socialNextPublish) return;
 			_socialNextPublish = now + 1000;
+			WorldSocial.TagAntennas(session, FactionTagOf);
+			foreach (var (clientId, text) in social.DueFactionMotds(roster)) _host.GpsNotice(clientId, text);
 			var grids = session.Entities.Where(e => e.TryGet<CubeGridComponent>() != null && e.TryGet<OwnershipComponent>() != null && !EngineCodec.IsDead(e))
 				.Select(e => new SocialGrid(_ids.GetOrAssign(e), SocialState.Clean(e.TryGet<CubeGridComponent>().DisplayName.ToString(), 100), TeamPermissions.OwnerOf(e), WorldSocial.SharingOf(e))).ToArray();
+			var (listed, open) = BlockLists(session);
 			foreach (var player in roster)
 			{
 				var view = _socialViews.TryGetValue(player.Identity, out var current) ? current : new SocialRequest(SocialAction.Refresh);
 				var message = _socialMessages.TryGetValue(player.Identity, out var text) ? text : "";
 				var snapshot = social.Snapshot(player.Identity, grids, view, message);
 				snapshot.FocusBlock = FocusBlockOf(player.Identity);
+				snapshot.AllowedBlocks = listed.Where(b => b.Acl.Allow.Contains(player.Identity)).Select(b => b.Id).ToArray();
+				snapshot.DeniedBlocks = listed.Where(b => b.Acl.Deny.Contains(player.Identity)).Select(b => b.Id).ToArray();
+				snapshot.OpenBlocks = open;
 				var peer = _host.Players().FirstOrDefault(p => p.ClientId == player.ClientId)?.Peer;
 				if (peer.HasValue) _host.SendSocial(peer.Value, snapshot);
 			}
@@ -361,7 +370,12 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 
 	private long _lastStatusMs;
 
-	public const int RegistrationWaitMs = 10000;
+	public const int RegistrationWaitMs = 30000;
+
+	// Server ticks a capture has waited for its player's registration. Wall time alone is not enough: while the host is
+	// still loading (or stalled) the server does not tick, and a joiner timed out that way played as the host's identity.
+	private const int RegistrationWaitTicks = 300;
+	private readonly System.Collections.Concurrent.ConcurrentDictionary<PeerId, int> _registrationWaitTicks = new();
 
 	private volatile WorldSessionComponent? _worldSession;
 
@@ -415,7 +429,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 
 	private readonly object _despawnSync = new();
 
-	private List<(uint Id, byte Mode, Entity? Forgotten)> _pendingDespawns = new();
+	private List<(uint Id, byte Mode, Entity? Forgotten, uint Root)> _pendingDespawns = new();
 
 	private readonly Dictionary<uint, (long Ms, string What)> _forgotten = new();
 
@@ -455,6 +469,16 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			{
 				return "?";
 			}
+		}
+	}
+
+	/// <summary>Stable per-world key for files that belong to one hosted world: the save container, else the world name.</summary>
+	public string WorldKey
+	{
+		get
+		{
+			try { return _worldSession?.SaveContainerId?.ToString() ?? WorldName; }
+			catch (Exception) { return WorldName; }
 		}
 	}
 
@@ -552,6 +576,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		finally
 		{
 			_pendingRegistration.TryRemove(r.Peer, out _);
+			_registrationWaitTicks.TryRemove(r.Peer, out _);
 		}
 	}
 
@@ -586,7 +611,9 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 
 	private string? StoryGate(ushort clientId, object box, Session? server)
 	{
-		if (!IsAdminClient(clientId) && AdminGuard.IsAdminStory(box.GetType()))
+		string? emote = EmoteGate(clientId, box);
+		if (emote is { Length: > 0 }) return emote;
+		if (emote == null && !IsAdminClient(clientId) && AdminGuard.IsAdminStory(box.GetType()))
 		{
 			Interlocked.Increment(ref AdminGuard.Refused);
 			return "Only admins can do that on this server.";
@@ -684,6 +711,10 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		_log.Warn($"host world sync: slow frame work {ms:0} ms (factions/ownership refresh {_socialMs:0} ms)");
 	}
 
+	private volatile List<WorldMod> _mods = new List<WorldMod>();
+
+	public IReadOnlyList<WorldMod> Mods => _mods;
+
 	private void OnServerCommit(InProcessReplicationSessionComponent comp)
 	{
 		if (comp.IsUnloading)
@@ -715,6 +746,16 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			{
 				_log.Warn("host world sync: the server session has no IReadOnlyDataOffloading; planets/asteroids will fail on clients");
 			}
+			try
+			{
+				_mods = WorkshopMods.From(comp.Session.ExternalServices?.TryGet<Keen.VRage.Core.Worlds.ModList>());
+				if (_mods.Count > 0) _log.Info("host world sync: the world runs mods; joiners download them: " + WorldMods.Summary(_mods));
+			}
+			catch (Exception ex)
+			{
+				_mods = new List<WorldMod>();
+				_log.Warn($"host world sync: could not read the world's mod list ({ex.GetType().Name}: {ex.Message}); joiners load no mods");
+			}
 			Volatile.Write(ref _serverComp, comp);
 			_log.Info($"host world sync: server scene attached (world '{WorldName}', data offloading {_offloading?.GetType().Name ?? "MISSING"}); friends can join now");
 			if (hadWorld)
@@ -744,6 +785,17 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		{
 			PublishPlayerStatus(comp);
 		}
+		if (!_joiners.IsEmpty)
+		{
+			try
+			{
+				UpdateStreaming(comp);
+			}
+			catch (Exception ex)
+			{
+				_log.WarnOnce("host-streaming", $"streaming: update failed ({ex.GetType().Name}: {ex.Message}); retrying next update");
+			}
+		}
 		UpdateNametagRoster(comp);
 		List<PeerId>? waiting = null;
 		PeerId peer;
@@ -759,14 +811,17 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			if (_pendingRegistration.TryGetValue(peer, out var pending))
 			{
 				// Hold the capture until the player's identity exists, so the snapshot already carries it.
-				if (MpClock.NowMs() - pending.Since < RegistrationWaitMs)
+				int ticks = _registrationWaitTicks.TryGetValue(peer, out int waited) ? waited + 1 : 1;
+				if (MpClock.NowMs() - pending.Since < RegistrationWaitMs || ticks < RegistrationWaitTicks)
 				{
+					_registrationWaitTicks[peer] = ticks;
 					(waiting ??= new List<PeerId>()).Add(peer);
 					continue;
 				}
+				_registrationWaitTicks.TryRemove(peer, out _);
 				_pendingRegistration.TryRemove(peer, out _);
 				_identityOf.TryRemove(pending.ClientId, out _);
-				_log.Warn($"host world sync: {peer}'s player registration did not run within {RegistrationWaitMs / 1000} s; capturing its world anyway (it plays as the host's identity)");
+				_log.Warn($"host world sync: {peer}'s player registration did not run within {RegistrationWaitMs / 1000} s and {RegistrationWaitTicks} server ticks; capturing its world anyway (it plays as the host's identity)");
 			}
 			Capture(comp, peer);
 		}
@@ -819,10 +874,17 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			int failedRoots = 0;
 			int entities = 0;
 			var seen = new HashSet<Entity>(ReferenceEqualityComparer.Instance);
+			var outOfRange = CaptureExclusions(comp, peer);
+			int streamedOut = 0;
 			foreach (var entity in session.Entities)
 			{
 				if (entity == comp.Entity)
 				{
+					continue;
+				}
+				if (outOfRange != null && outOfRange.Contains(entity))
+				{
+					streamedOut++;
 					continue;
 				}
 				if (entity.Data.Has<ParentData>())
@@ -904,7 +966,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 				msgs[i].LifeSeq = firstLifeSeq + (uint)i;
 			}
 			double captureMs = stopwatch.Elapsed.TotalMilliseconds;
-			string pre = $"captured on the server thread in {captureMs:0} ms: {roots} roots / {entities} entities in {msgs.Count} part(s) ({children} child entities in scene, {notOnClient} roots not on the local client skipped, {failedRoots} roots failed, {unlocatedCount} unlocated), {blobCount} data blobs";
+			string pre = $"captured on the server thread in {captureMs:0} ms: {roots} roots / {entities} entities in {msgs.Count} part(s) ({children} child entities in scene, {notOnClient} roots not on the local client skipped, {streamedOut} roots beyond the streaming radius, {failedRoots} roots failed, {unlocatedCount} unlocated), {blobCount} data blobs";
 			_log.Info($"host world sync: world for {peer} {pre}");
 			// Serializing and loading offloaded blobs is slow; only the scene walk above needs the server thread.
 			Task.Run(() =>
@@ -1554,6 +1616,10 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		OnServer(() => UpdateSocial(server.Session));
 		OnServer(() => UpdateAdmin(server.Session));
 		OnServer(() => UpdateGps(server.Session));
+		OnServer(() => UpdateWater(server.Session));
+		OnServer(() => UpdateTrades(server.Session));
+		OnServer(UpdatePunches);
+		OnServer(UpdateVoicePositions);
 		Registration next;
 		while (_registrations.TryDequeue(out next))
 		{
@@ -1561,6 +1627,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			OnServer(() => ServerRegister(server, r));
 		}
 		List<WireCommand>? signals = null;
+		string? heavy = null;
 		lock (_signalSync)
 		{
 			if (_pendingSignals.Count > 0)
@@ -1568,7 +1635,18 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 				signals = _pendingSignals;
 				_pendingSignals = new List<WireCommand>();
 			}
+			long bytes = 0;
+			foreach (var tally in _frameSignalBytes.Values) bytes += tally.Bytes;
+			long nowMs = MpClock.NowMs();
+			// One frame's signals go out as one ordered message: a big one delays everything after it on a slow link.
+			if (bytes >= 65536 && nowMs - _heavyLoggedMs > 5000)
+			{
+				_heavyLoggedMs = nowMs;
+				heavy = $"host world sync: one frame's signals came to {MpLogExtensions.Bytes(bytes)}: " + string.Join(", ", _frameSignalBytes.OrderByDescending(kv => kv.Value.Bytes).Take(6).Select(kv => $"{kv.Key} x{kv.Value.Count} {MpLogExtensions.Bytes(kv.Value.Bytes)}"));
+			}
+			_frameSignalBytes.Clear();
 		}
+		if (heavy != null) _log.Info(heavy);
 		if (signals != null && _host != null)
 		{
 			CollectHostStrings(_host);
@@ -1577,7 +1655,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			{
 				_host.AddHostStrings(strings);
 			}
-			_host.PublishSignals(_hostTick, signals);
+			_host.PublishSignals(_hostTick, signals, SignalRoots(signals));
 		}
 		if (_host != null)
 		{
@@ -1790,7 +1868,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			}
 			else
 			{
-				WriteMarkedData(buffer, assemblyOffset + 1, comp.Entity, target, typeId, bytes);
+				WriteMarkedData(buffer, assemblyOffset + 1, comp.Entity, target, typeId, FightLocked(b.ClientId) && EngineCodec.IsMovementInput(typeId) ? new byte[bytes.Length] : bytes);
 				dataApplied++;
 			}
 		}
@@ -1867,6 +1945,10 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 				fail = "admin only";
 				Interlocked.Increment(ref AdminGuard.Refused);
 			}
+			else if (IsWaterSignal(signal) && !MayEditWater(b.ClientId, actor, comp.Session))
+			{
+				fail = "water edits need admin or creative";
+			}
 			else if (SocialGuard.IsOwnershipSignal(signal))
 			{
 				fail = "ownership changes require the authenticated grid ownership controls";
@@ -1874,6 +1956,10 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			else if (cmd.Refs.Any(r => r.Kind == WireKind.Entity && WorldSocial.Access(Local(r.Id), actor) == false))
 			{
 				fail = "grid access denied by its owner";
+			}
+			else if (FightLocked(b.ClientId) && signal.Contains("Tool", StringComparison.Ordinal))
+			{
+				fail = "in a fight scene";
 			}
 			else if (ControlGuard.Enabled && ControlGuard.IsControllerOnly(layout) && cmd.Refs.Count > 0 && cmd.Refs[0].Kind == WireKind.Entity && (allowed == null || !allowed.Contains(cmd.Refs[0].Id)) && Local(cmd.Refs[0].Id)?.TryGet<CharacterControllableComponent>() != null)
 			{
@@ -2168,7 +2254,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		}
 		byte[] wire = msg.Encode();
 		var host = _host;
-		host?.PublishLifecycle(wire);
+		host?.PublishLifecycle(wire, StreamSpawnFilter(data.EntityObjectBuilders));
 		SpawnBundles++;
 		SpawnBytes += wire.Length;
 		if (blobs.Count > 0 && host != null)
@@ -2260,7 +2346,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			hostMs = (uint)MpClock.NowMs();
 			UnstampedPostData++;
 		}
-		host.PublishState(new StateEntry(id, key.Key, (uint)Interlocked.Increment(ref _version), data.ToArray(), hostMs));
+		host.PublishState(new StateEntry(id, key.Key, (uint)Interlocked.Increment(ref _version), data.ToArray(), hostMs, _streamingActive ? RootIdOf(source) : 0u));
 	}
 
 	public void OnRemoveData(Entity? source, int typeId)
@@ -2373,6 +2459,9 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		lock (_signalSync)
 		{
 			_pendingSignals.Add(command);
+			var name = ShortName(layout.Name);
+			_frameSignalBytes.TryGetValue(name, out var tally);
+			_frameSignalBytes[name] = (tally.Count + 1, tally.Bytes + command.Payload.Length + 4 * command.Refs.Count);
 		}
 		SignalsForwarded++;
 		if (_s2cSent.AddOrUpdate(ShortName(layout.Name), 1L, (string _, long c) => c + 1) == 1)
@@ -2512,6 +2601,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 
 	public void ForgetStories(PeerId client)
 	{
+		ForgetStream(client);
 		_stories?.Forget(client);
 		_observables.Forget(client);
 	}
@@ -2539,13 +2629,13 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		// Mode 0 despawns (the entity may come back into range); mode 1 forgets it for good.
 		lock (_despawnSync)
 		{
-			_pendingDespawns.Add((id, removed ? (byte)0 : (byte)1, removed ? null : entity));
+			_pendingDespawns.Add((id, removed ? (byte)0 : (byte)1, removed ? null : entity, 0u));
 		}
 	}
 
 	private void FlushDespawns(HostSession host)
 	{
-		List<(uint Id, byte Mode, Entity? Forgotten)> pending;
+		List<(uint Id, byte Mode, Entity? Forgotten, uint Root)> pending;
 		lock (_despawnSync)
 		{
 			if (_pendingDespawns.Count == 0)
@@ -2555,21 +2645,42 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			pending = _pendingDespawns;
 			_pendingDespawns = new();
 		}
-		foreach (var (id, mode, forgotten) in pending)
+		// One message per run of the same mode: an explosion's hundred removals were a hundred ordered messages, and the
+		// joiner takes at most 64 a frame.
+		var run = new List<uint>();
+		var runRoots = new List<uint>();
+		byte runMode = 0;
+		foreach (var (id, mode, forgotten, root) in pending)
 		{
+			if (run.Count > 0 && mode != runMode)
+			{
+				host.PublishDespawn(run.ToArray(), runMode, runRoots.ToArray());
+				run.Clear();
+				runRoots.Clear();
+			}
+			runMode = mode;
+			run.Add(id);
+			// A joiner skips ids it streamed out (roots); their children never reached it, and it ignores unknown ids.
+			runRoots.Add(id);
+			if (mode == 1)
+			{
+				ForgetStreamedRoot(id);
+			}
 			if (mode == 0)
 			{
 				Despawns++;
-				host.PublishDespawn(new[] { id }, 0);
 				continue;
 			}
 			Forgets++;
-			host.PublishDespawn(new[] { id }, 1);
 			if (forgotten != null)
 			{
 				_ids.Remove(forgotten, out _);
 				RememberForgotten(id, forgotten);
 			}
+		}
+		if (run.Count > 0)
+		{
+			host.PublishDespawn(run.ToArray(), runMode, runRoots.ToArray());
 		}
 	}
 

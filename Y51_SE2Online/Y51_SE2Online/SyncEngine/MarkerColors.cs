@@ -9,16 +9,19 @@ using Keen.VRage.Core.Game.Systems;
 using Keen.VRage.DCS.Components;
 using Keen.VRage.Library.Mathematics;
 using Y51_SE2Online.Core;
+using Y51_SE2Online.Sync;
 
 namespace Y51_SE2Online.SyncEngine;
 
 /// <summary>
-/// Multiplayer marker colours by owner: your own green, your faction's yellow, anyone else's red.
-/// SE2 draws every antenna signal in one colour whoever owns it.
+/// Multiplayer marker colours by relationship (<see cref="RelationTable"/>, the same one turrets and damage use): own
+/// green, faction yellow, allies cyan, factions at peace white, war and NPCs red, and other players red when PvP is on
+/// or white when it is off. SE2 draws every antenna signal in one colour whoever owns it.
 /// </summary>
 internal static class MarkerColors
 {
-    public static readonly ColorSRGB Own = new(90, 220, 90), Faction = new(255, 210, 60), Enemy = new(240, 70, 60);
+    public static readonly ColorSRGB Own = new(90, 220, 90), Faction = new(255, 210, 60), Ally = new(80, 210, 230), Enemy = new(240, 70, 60), Neutral = new(225, 225, 225);
+    private static (SocialSnapshot Snapshot, RelationTable Table) _relations;
     private static long _nextScanMs;
     private static readonly System.Reflection.PropertyInfo SessionProperty = HarmonyLib.AccessTools.Property(typeof(GPSMarkerRenderSessionComponent), "Session");
 
@@ -27,9 +30,20 @@ internal static class MarkerColors
     {
         var social = SocialUi.Snapshot;
         if (owner == 0 || social.Actor == 0) return null;
-        if (owner == social.Actor) return Own;
-        return social.Factions.Any(f => f.Members.Contains(owner) && f.Members.Contains(social.Actor)) ? Faction : Enemy;
+        var cached = _relations;
+        if (!ReferenceEquals(cached.Snapshot, social)) _relations = cached = (social, RelationTable.Build(social.Factions, social.Pacts));
+        return cached.Table.Of(social.Actor, owner) switch
+        {
+            PlayerRelation.Own => Own,
+            PlayerRelation.Faction => Faction,
+            PlayerRelation.Allied => Ally,
+            PlayerRelation.Peace => Neutral,
+            PlayerRelation.Neutral => PvpOn ? Enemy : Neutral,
+            _ => Enemy
+        };
     }
+
+    private static bool PvpOn => AdminAccess.Hosting ? AdminAccess.Host.Pvp : AdminAccess.Client?.Admin.Pvp ?? true;
 
     private static readonly List<Entity> AntennaEntities = new();
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, Entity> MarkerAntenna = new();
