@@ -22,6 +22,7 @@ public sealed class OnlineSessionController
     private bool _returnToMenu;
     private bool _worldExiting;
     private long _requestedAt;
+    private long _lastTick;
 
     public OnlineSessionState State { get; private set; }
     public MpOptions Current { get; private set; }
@@ -36,7 +37,7 @@ public sealed class OnlineSessionController
         _target = target;
         _worldExiting = false;
         _returnToMenu = Current?.Join == true || target?.Join == true;
-        _requestedAt = now;
+        _requestedAt = _lastTick = now;
         Error = null;
         State = OnlineSessionState.Stopping;
         _runtime.StopNetworking();
@@ -48,7 +49,7 @@ public sealed class OnlineSessionController
         _target = null;
         _returnToMenu = false;
         _worldExiting = true;
-        _requestedAt = now;
+        _requestedAt = _lastTick = now;
         Error = null;
         State = OnlineSessionState.Stopping;
         _runtime.StopNetworking();
@@ -57,6 +58,9 @@ public sealed class OnlineSessionController
     public void Tick(long now)
     {
         if (!Busy) return;
+        // A server frame that stalls for a minute while a big world finishes loading is not the old session failing to close.
+        if (now - _lastTick > 1000) _requestedAt += now - _lastTick;
+        _lastTick = now;
         try
         {
             if (!_worldExiting && now - _requestedAt > 20000) throw new InvalidOperationException("The previous session is still closing. Wait for the game to finish loading or closing, then try again.");
