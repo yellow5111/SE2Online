@@ -65,8 +65,13 @@ public sealed class OnlineScreen : ScreenView
     private readonly OnlineToggle _nametags = new OnlineToggle("Show player name tags");
     private readonly (Slider S, Control Row) _range = OnlineUi.Slider(50, 10000, 50, v => v + " m");
     private readonly OnlineToggle _spawn = new OnlineToggle("Spawn new players near the host");
+    private readonly OnlineToggle _hacking = new OnlineToggle("Hacking: players can take over grids from a terminal or control block");
+    private readonly OnlineToggle _hackPlayers = new OnlineToggle("Players' grids can be hacked too (only with PvP on, never in safe zones)");
+    private readonly (Slider S, Control Row) _hackTime = OnlineUi.Slider(1, 100, 1, v => "x" + (v / 10.0).ToString("0.0", CultureInfo.InvariantCulture));
+    private readonly KeyBindButton _hackKey = new();
     private readonly OnlineToggle _reconnect = new OnlineToggle("Automatically reconnect after connection loss");
     private readonly OnlineToggle _updates = new OnlineToggle("Check se2-online.yellow51.dev for plugin updates when the game starts");
+    private readonly OnlineToggle _autoUpdate = new OnlineToggle("Install updates automatically (signed downloads, restart to apply; not for Pulsar installs)");
     private readonly (Slider S, Control Row) _smoothing = OnlineUi.Slider(0, 250, 5, v => v + " ms");
     private readonly (Slider S, Control Row) _bandwidth = OnlineUi.Slider(32, 4096, 32, v => v + " KiB/s");
     private readonly TextBox _password = new() { Watermark = "No password", MaxLength = 64, FontSize = 24, MinHeight = 50, PasswordChar = '*' };
@@ -118,14 +123,16 @@ public sealed class OnlineScreen : ScreenView
             OnlineUi.Section("WORLD RULES", OnlineUi.Text("New grids are private. Use Grid ownership and Factions in the pause menu to control sharing.", "SubtleNotice", 21), _team, _research, _turrets, _spawn,
                 OnlineUi.Field("Energy usage", _energyUse.Row, "Suit energy, jetpack and tools, and block power use. x1 is normal, x0 uses none"),
                 OnlineUi.Field("Hydrogen usage", _hydrogenUse.Row, "Jetpack boost and hydrogen thrusters and engines"),
-                OnlineUi.Field("Oxygen usage", _oxygenUse.Row, "Breathing and blocks that use oxygen. Changes apply live while hosting")),
+                OnlineUi.Field("Oxygen usage", _oxygenUse.Row, "Breathing and blocks that use oxygen. Changes apply live while hosting"),
+                _hacking, _hackPlayers, OnlineUi.Field("Hack time", _hackTime.Row, "x1 is 30 s plus 0.25 s per block, at most 5 min; powered grids take 1.5x")),
             OnlineUi.Section("KEYBINDS", OnlineUi.Text("Click a binding, then press the new key or combination. Esc cancels.", "SubtleNotice", 21),
                 OnlineUi.Field("Open chat", _chatKey), OnlineUi.Field("Players list", _playersKey), OnlineUi.Field("Admin panel", _adminKey), OnlineUi.Field("Suit broadcast", _broadcastKey, "Hides or shows your name tag to other players"),
-                OnlineUi.Field("Push to talk", _voiceKey, "Hold to talk to players near you"), OnlineUi.Field("Emotes", _emoteKey, "Hold for the emote menu; release over an emote to play it")),
+                OnlineUi.Field("Push to talk", _voiceKey, "Hold to talk to players near you"), OnlineUi.Field("Emotes", _emoteKey, "Hold for the emote menu; release over an emote to play it"),
+                OnlineUi.Field("Hack", _hackKey, "At a terminal or control block: hack the grid, or counter-hack one of yours; again cancels")),
             OnlineUi.Section("VOICE", _voice, _openMic, OnlineUi.Field("Voice volume", _voiceVolume.Row, "0-200 percent"),
                 OnlineUi.Field("Voice range when hosting", _voiceRadius.Row, "0 turns voice off for your session"),
                 OnlineUi.Text("Your microphone is Steam's (Steam > Settings > Voice). Type /mute <player> in chat to stop hearing someone.", "SubtleNotice", 21)),
-            OnlineUi.Section("CONNECTION", _reconnect, _updates, OnlineUi.Field("Motion smoothing", _smoothing.Row, "0-250 milliseconds"), OnlineUi.Field("Bandwidth per player", _bandwidth.Row, "32-4096 KiB/s")),
+            OnlineUi.Section("CONNECTION", _reconnect, _updates, _autoUpdate, OnlineUi.Field("Motion smoothing", _smoothing.Row, "0-250 milliseconds"), OnlineUi.Field("Bandwidth per player", _bandwidth.Row, "32-4096 KiB/s")),
             OnlineUi.Text("Applying settings while hosting restarts the session and disconnects other players. Your local world stays open.", "SubtleNotice", 22), _save));
         _players = OnlineUi.Button("Players", MpMenu.OpenPlayers, "OpenPlayers", true);
         _leave = OnlineUi.Button("Stop hosting", MpMenu.Leave, "LeaveSession");
@@ -207,9 +214,10 @@ public sealed class OnlineScreen : ScreenView
         _team.IsChecked = s.TeamGrids; _research.IsChecked = s.SharedResearch; _turrets.IsChecked = s.Pvp; _nametags.IsChecked = s.Nametags;
         _range.S.Value = Math.Clamp(s.NametagRange, 50, 10000); _spawn.IsChecked = s.SpawnNearHost;
         _energyUse.S.Value = Math.Clamp(s.EnergyUsageMultiplier * 10, 0, ResourceMultipliers.Max * 10); _hydrogenUse.S.Value = Math.Clamp(s.HydrogenUsageMultiplier * 10, 0, ResourceMultipliers.Max * 10); _oxygenUse.S.Value = Math.Clamp(s.OxygenUsageMultiplier * 10, 0, ResourceMultipliers.Max * 10);
-        _password.Text = s.Password; _chatKey.Binding = s.ChatKey; _playersKey.Binding = s.PlayersKey; _adminKey.Binding = s.AdminKey; _broadcastKey.Binding = s.BroadcastKey; _voiceKey.Binding = s.VoiceKey; _emoteKey.Binding = s.EmoteKey;
+        _password.Text = s.Password; _chatKey.Binding = s.ChatKey; _playersKey.Binding = s.PlayersKey; _adminKey.Binding = s.AdminKey; _broadcastKey.Binding = s.BroadcastKey; _voiceKey.Binding = s.VoiceKey; _emoteKey.Binding = s.EmoteKey; _hackKey.Binding = s.HackKey;
+        _hacking.IsChecked = s.Hacking; _hackPlayers.IsChecked = s.AllowHackingPlayerGrids; _hackTime.S.Value = Math.Clamp(s.HackTimeMultiplier * 10, 1, 100);
         _voice.IsChecked = s.VoiceEnabled; _openMic.IsChecked = s.VoiceOpenMic; _voiceVolume.S.Value = Math.Clamp(s.VoiceVolume, 0, 200); _voiceRadius.S.Value = Math.Clamp(s.VoiceRadiusMeters, 0, 500);
-        _reconnect.IsChecked = s.AutoReconnect; _updates.IsChecked = s.CheckForUpdates; _smoothing.S.Value = Math.Clamp(s.InterpolationMs, 0, 250); _bandwidth.S.Value = Math.Clamp(s.StateBudgetKiB, 32, 4096);
+        _reconnect.IsChecked = s.AutoReconnect; _updates.IsChecked = s.CheckForUpdates; _autoUpdate.IsChecked = s.AutoUpdate; _smoothing.S.Value = Math.Clamp(s.InterpolationMs, 0, 250); _bandwidth.S.Value = Math.Clamp(s.StateBudgetKiB, 32, 4096);
         _directIp.IsCheckedChanged += (_, _) => RefreshControls();
     }
 
@@ -226,13 +234,15 @@ public sealed class OnlineScreen : ScreenView
             FriendsOnly = _friendsOnly.IsChecked == true, Advertise = _advertise.IsChecked == true, AdvertiseChosen = true, AllowDirectIp = _directIp.IsChecked == true, WaterSync = _waterSync.IsChecked == true,
             BindAddress = _bind.Text ?? "", ListenPort = port, PublicAddress = _publicAddress.Text ?? "",
             TeamGrids = _team.IsChecked == true, SharedResearch = _research.IsChecked == true, Pvp = _turrets.IsChecked == true, Nametags = _nametags.IsChecked == true, NametagRange = range,
-            SpawnNearHost = _spawn.IsChecked == true, AutoReconnect = _reconnect.IsChecked == true, CheckForUpdates = _updates.IsChecked == true, InterpolationMs = smoothing, StateBudgetKiB = bandwidth,
+            SpawnNearHost = _spawn.IsChecked == true, AutoReconnect = _reconnect.IsChecked == true, CheckForUpdates = _updates.IsChecked == true, AutoUpdate = _autoUpdate.IsChecked == true, InterpolationMs = smoothing, StateBudgetKiB = bandwidth,
             Password = _password.Text ?? "", ChatKey = _chatKey.Binding, PlayersKey = _playersKey.Binding, AdminKey = _adminKey.Binding, BroadcastKey = _broadcastKey.Binding, SuitBroadcast = MpMenu.Settings.SuitBroadcast, SkippedUpdate = MpMenu.Settings.SkippedUpdate,
             // Settings without a control here (server.json-style edits and admin choices) must survive a save.
             StreamingRadiusMeters = MpMenu.Settings.StreamingRadiusMeters, OfflineRaidProtection = MpMenu.Settings.OfflineRaidProtection, PcuLimit = MpMenu.Settings.PcuLimit,
             SunRotation = MpMenu.Settings.SunRotation, SunPeriodMinutes = MpMenu.Settings.SunPeriodMinutes, RespawnShips = MpMenu.Settings.RespawnShips, RespawnShipCooldownMinutes = MpMenu.Settings.RespawnShipCooldownMinutes,
             VoiceKey = _voiceKey.Binding, EmoteKey = _emoteKey.Binding, VoiceEnabled = _voice.IsChecked == true, VoiceOpenMic = _openMic.IsChecked == true, VoiceVolume = (int)Math.Round(_voiceVolume.S.Value), VoiceRadiusMeters = Math.Round(_voiceRadius.S.Value),
             MutedVoices = MpMenu.Settings.MutedVoices,
+            Hacking = _hacking.IsChecked == true, AllowHackingPlayerGrids = _hackPlayers.IsChecked == true, HackTimeMultiplier = Math.Round(_hackTime.S.Value) / 10, HackKey = _hackKey.Binding,
+            HackLockdownSeconds = MpMenu.Settings.HackLockdownSeconds, HackLockdownCooldownSeconds = MpMenu.Settings.HackLockdownCooldownSeconds,
             EnergyUsageMultiplier = Math.Round(_energyUse.S.Value) / 10, HydrogenUsageMultiplier = Math.Round(_hydrogenUse.S.Value) / 10, OxygenUsageMultiplier = Math.Round(_oxygenUse.S.Value) / 10
         };
         string error = settings.Validate();

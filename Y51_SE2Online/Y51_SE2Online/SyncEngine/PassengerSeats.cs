@@ -6,14 +6,20 @@ using System.Linq;
 using HarmonyLib;
 using Keen.Game2.Client.GameSystems;
 using Keen.Game2.Client.GameSystems.Interaction;
+using Keen.Game2.Client.GameSystems.PlayerControl;
+using Keen.Game2.Client.GameSystems.PlayerControl.PlayerInput.InputHandlers;
 using Keen.Game2.Client.UI.Library.Controls.ControlHints;
+using Keen.Game2.Client.WorldObjects.Character;
 using Keen.Game2.Client.WorldObjects.CubeBlocks.Cockpit;
 using Keen.Game2.Simulation.WorldObjects.CubeBlocks;
 using Keen.Game2.Simulation.WorldObjects.CubeBlocks.Pilotable;
 using Keen.Game2.Simulation.WorldObjects.Characters;
+using Keen.Game2.Simulation.WorldObjects.Movement;
+using Keen.Game2.Simulation.WorldObjects.Shared.Movement;
 using Keen.VRage.Core;
 using Keen.VRage.Core.Game.Components;
 using Keen.VRage.Core.Game.Data;
+using Keen.VRage.Core.Game.GameSystems.Gravity;
 using Keen.VRage.Core.Game.Definitions;
 using Keen.VRage.Core.Model;
 using Keen.VRage.DCS.Components;
@@ -27,13 +33,14 @@ using Keen.VRage.Library.Definitions;
 using Keen.VRage.Library.Mathematics;
 using Keen.VRage.Library.Threading;
 using Keen.VRage.Library.Utils;
+using Keen.VRage.Physics.Data;
 using Y51_SE2Online.Core;
 
 namespace Y51_SE2Online.SyncEngine;
 
 /// <summary>
 /// SE2 ships Seat, Toilet and Bed blocks with no seat in them. Before each world loads, their composites get SE2's own
-/// <see cref="SeatComponent"/> (the control seat's definition, so the native sitting pose), and their models get the
+/// <see cref="SeatComponent"/> (the cockpit's definition, so its relaxed sitting pose rather than the control seat's arms-out one), and their models get the
 /// control seat's "Seat" and "Enter" dummies. Sitting, riding with the grid, one occupant, release on death, block
 /// destruction or loss of function, saving the seated player and multiplayer replication are then SE2's own seat code;
 /// the plugin's story gate checks grid access exactly as for cockpits. With no controllable on the block, nobody flies
@@ -44,17 +51,21 @@ internal static class PassengerSeats
 {
     private sealed record Block(string Name, Guid Composite, Guid ClientComposite, Guid Model, float SeatHeight, float SeatBack, float Yaw);
 
-    // Where the seated character's origin goes: height above the model's floor (about 0.35 m above the cushion, as in the
-    // control seat), offset towards the seat's back in metres (the bed's is negative: sit on its edge), and facing.
-    // Tuned from rig screenshots in E:\SE2MP\artifacts\seats.
+    // Where the seated character's origin goes: height above the model's floor, offset towards the seat's back in metres
+    // (negative: the cockpit pose puts the hips well behind the origin), and facing. Tuned from rig screenshots in
+    // E:\SE2MP\artifacts\seat-poses (rig: "seat tune" on the client plus "seathost tune" on the server, then re-sit).
     private static readonly Block[] Blocks =
     {
-        new("Seat", new("45fedc87-d06c-4499-bc06-05a7864a8343"), new("4a1a3ea8-1da8-4232-813e-755548575108"), new("96b0ffdc-3e90-4398-9bc0-443ddb7d94cb"), 0.80f, 0.05f, 180f),
-        new("Toilet", new("4e787b1a-0ee4-4c52-8936-b921f817451d"), new("0f8f5754-797c-42aa-8125-d0fb49823d20"), new("685525a9-4aab-4d08-8a22-40072a696417"), 0.77f, 0.05f, 0f),
-        new("Bed", new("2afbbab3-a9c1-4508-a8d0-320a9442111d"), new("9a73c55d-a663-4edc-80b2-a5f57aa62770"), new("64585083-da8a-45dc-ab67-07656ec2055a"), 0.78f, -0.25f, 0f),
+        new("Seat", new("45fedc87-d06c-4499-bc06-05a7864a8343"), new("4a1a3ea8-1da8-4232-813e-755548575108"), new("96b0ffdc-3e90-4398-9bc0-443ddb7d94cb"), 0.80f, -0.40f, 0f),
+        new("Toilet", new("4e787b1a-0ee4-4c52-8936-b921f817451d"), new("0f8f5754-797c-42aa-8125-d0fb49823d20"), new("685525a9-4aab-4d08-8a22-40072a696417"), 0.80f, -0.20f, 0f),
+        new("Bed", new("2afbbab3-a9c1-4508-a8d0-320a9442111d"), new("9a73c55d-a663-4edc-80b2-a5f57aa62770"), new("64585083-da8a-45dc-ab67-07656ec2055a"), 0.78f, -0.45f, 0f),
     };
 
-    private static readonly Guid ControlSeatSeat = new("ac78e060-eede-4ab4-8830-1d955fb7bd51");
+    // SeatType Cockpit: hands low on the side sticks. The control seat's pose holds both arms out at chest height.
+    // (SE2 also ships A_Male_Sitting_Seat/_Toilet and A_Male_Sleeping_Bed, but played as stateless animations they leave
+    // the astronaut in its rest pose turned on its face; checked live 2026-10-14. Masked to the arm bones, those clips and
+    // A_Austro_Idle leave the arms on the sticks: only the spine follows a masked stateless clip; checked 2026-10-15.)
+    private static readonly Guid CockpitSeat = new("76ecaeb5-d6d3-404c-addc-ec3bbae3ac69");
     // The control seat's client-side seat: hides the jetpack and backpack (a render preset) while someone sits.
     private static readonly Guid ControlSeatClientSeat = new("45f8d0ac-2496-4304-88c2-f863ef7469ec");
     private static readonly Guid ControlSeatModel = new("93524a87-56ad-4604-84e7-c568cea5552e");
@@ -86,7 +97,7 @@ internal static class PassengerSeats
             try
             {
                 var defs = Singleton<DefinitionManager>.Instance;
-                if (!defs.TryGetDefinition(ControlSeatSeat, out SeatComponentDefinition seat) || !defs.TryGetDefinition(ControlSeatModel, out ModelComponentDefinition controlModel)) { State = "control seat definitions not loaded"; return; }
+                if (!defs.TryGetDefinition(CockpitSeat, out SeatComponentDefinition seat) || !defs.TryGetDefinition(ControlSeatModel, out ModelComponentDefinition controlModel)) { State = "control seat definitions not loaded"; return; }
                 var seatDummy = controlModel.Dummies.FirstOrDefault(d => d.Type?.Guid == SeatDummyType);
                 var enterDummy = controlModel.Dummies.FirstOrDefault(d => d.Type?.Guid == EnterDummyType);
                 if (seatDummy == null || enterDummy == null) { Fail("control seat dummies missing"); return; }
@@ -125,10 +136,7 @@ internal static class PassengerSeats
             var box = model.Collider.GetBoundingBox(Quaternion.Identity);
             var sit = seatDummy.DeepClone();
             sit.Name = "Seat";
-            // A seated character faces -Z; Yaw turns it to face the way the model's seat faces.
-            var facing = Quaternion.CreateFromAxisAngle(Vector3.Up, block.Yaw * (float)Math.PI / 180f);
-            var back = Vector3.Transform(Vector3.Backward, facing);
-            sit.Transform = new RelativeTransformWithEulerHint(new Vector3(box.Center.X, box.Min.Y + block.SeatHeight, box.Center.Z) + back * block.SeatBack, facing);
+            sit.Transform = SeatAt(model, block);
             var enter = enterDummy.DeepClone();
             enter.Name = "Enter";
             enter.Transform = new RelativeTransformWithEulerHint(box.Center, Quaternion.Identity);
@@ -167,6 +175,28 @@ internal static class PassengerSeats
             changed++;
         }
         return null;
+    }
+
+    private static RelativeTransformWithEulerHint SeatAt(ModelComponentDefinition model, Block block)
+    {
+        var box = model.Collider!.GetBoundingBox(Quaternion.Identity);
+        // A seated character faces -Z; Yaw turns it to face the way the model's seat faces.
+        var facing = Quaternion.CreateFromAxisAngle(Vector3.Up, block.Yaw * (float)Math.PI / 180f);
+        var back = Vector3.Transform(Vector3.Backward, facing);
+        return new RelativeTransformWithEulerHint(new Vector3(box.Center.X, box.Min.Y + block.SeatHeight, box.Center.Z) + back * block.SeatBack, facing);
+    }
+
+    /// <summary>Rig: "tune &lt;block&gt; &lt;height&gt; &lt;back&gt; &lt;yaw&gt;" moves that block's seat dummy; sitting down again uses it.</summary>
+    internal static string Tune(string args)
+    {
+        var w = args.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        int i = Array.FindIndex(Blocks, b => b.Name.Equals(w[0], StringComparison.OrdinalIgnoreCase));
+        if (i < 0 || w.Length < 4) return "tune <Seat|Toilet|Bed> <height> <back> <yaw>";
+        float F(int n) => float.Parse(w[n], System.Globalization.CultureInfo.InvariantCulture);
+        var block = Blocks[i] = Blocks[i] with { SeatHeight = F(1), SeatBack = F(2), Yaw = F(3) };
+        if (!Singleton<DefinitionManager>.Instance.TryGetDefinition(block.Model, out ModelComponentDefinition model) || model.Dummies.FirstOrDefault(d => d.Type?.Guid == SeatDummyType) is not { } dummy) return "no seat dummy";
+        dummy.Transform = SeatAt(model, block);
+        return $"{block.Name} seat at {dummy.Transform.Transform.Position}, yaw {block.Yaw}";
     }
 
     // Placed blocks, blueprints and the save loader's migration of older saves all start from the prefab's object
@@ -252,9 +282,14 @@ internal static class PassengerSeats
             var session = MpPlugin.App?.ClientSession;
             try { if (!_keepFailed) KeepSeated(session); }
             catch (Exception ex) { _keepFailed = true; GameLog.Instance.Warn("passenger seats: keeping seated characters seated failed: " + ex); }
+            try { if (!_holdFailed && session != null) HoldSeated(session, server: false); }
+            catch (Exception ex) { _holdFailed = true; GameLog.Instance.Warn("passenger seats: holding seated characters still failed: " + ex); }
             var interactor = session?.GetEntitiesOfType<InteractorEntityComponent>().Select(e => e.Get<InteractorEntityComponent>()).FirstOrDefault(i => i.IsControlledByLocalPlayer);
             var seat = interactor?.Entity.AsInterface<ISeatable>()?.CurrentSeat as SeatComponent;
-            if (seat == null || !IsPassengerSeat(seat.Entity) || session == null) { Clear(); return; }
+            bool passenger = seat != null && IsPassengerSeat(seat.Entity) && session != null;
+            try { if (!_inputFailed && session != null) HoldInput(session, passenger ? interactor!.Entity : null); }
+            catch (Exception ex) { _inputFailed = true; _heldInput = null; GameLog.Instance.Warn("passenger seats: switching movement keys off in a seat failed: " + ex); }
+            if (!passenger) { Clear(); return; }
             // Use belongs to standing up while seated; a block in view keeps its action paused.
             if (interactor!._actionInputContext is { } blockContext && blockContext != _context) (_processor ?? interactor._inputProcessor)?.DeactivateContext(blockContext);
             if (_seat == seat && _context != null) return;
@@ -278,13 +313,13 @@ internal static class PassengerSeats
     }
 
     private static long _nextSeatedCheckMs;
-    private static bool _keepFailed;
+    private static bool _keepFailed, _holdFailed, _inputFailed;
 
     /// <summary>
     /// SE2 switches a character to its Sitting movement state only on the server, and a character's saved or replicated
     /// state is the one from before it sat down. A client that receives an already seated character (joining, rejoining,
-    /// streaming the grid in) therefore shows it with its jetpack running. Passengers get Sitting locally here; standing
-    /// up replicates the server's state change back.
+    /// streaming the grid in) therefore shows it with its jetpack running, in a cockpit as in a passenger seat. Seated
+    /// characters get Sitting locally here; standing up replicates the server's state change back.
     /// </summary>
     private static void KeepSeated(Keen.VRage.Core.Game.Systems.Session? session)
     {
@@ -293,7 +328,7 @@ internal static class PassengerSeats
         _nextSeatedCheckMs = now + 250;
         foreach (var e in session.GetEntitiesOfType<SeatComponent>())
         {
-            if (!IsPassengerSeat(e) || e.Get<SeatComponent>().Pilot?.TryGet<CharacterMovementComponent>() is not { } movement) continue;
+            if (e.Get<SeatComponent>().Pilot?.TryGet<CharacterMovementComponent>() is not { } movement) continue;
             if (movement.CurrentMovementState == CharacterMovementState.Sitting) continue;
             // Clients may not set the property; write it the way a replicated change lands: the field, then every
             // handler after the first one (that one is the setter, a throwing stub on clients).
@@ -305,6 +340,87 @@ internal static class PassengerSeats
             if (end - begin > 1) CharacterMovementComponent.__InternalCurrentMovementStateProperty.Trigger(pilot, signals.SignalHandlers.AsSpan().Slice(begin + 1, end - begin - 1), in sitting);
         }
     }
+
+    private static readonly HashSet<Entity> WeightlessServer = new(), WeightlessClient = new(), SeatedServer = new(), SeatedClient = new();
+
+    /// <summary>
+    /// Every frame, on the server (its thread) and on clients. A seated character stays a free Havok character that
+    /// EntityParentData only pins in place, so in gravity (planet or generator) its velocity keeps growing while it cannot
+    /// move: the character HUD's speedometer, which reads the character's RigidBodyData, climbed to the speed cap and the
+    /// speed effects played. Cockpit pilots grow the same velocity, but their HUD shows the grid's. Seated bodies get no
+    /// gravity and the seat grid's velocity (what SE2 gives them when they stand up); standing up gives gravity back.
+    /// Clients also drop jetpack data a late replicated update left on a sitting character (SE2 removes it on the
+    /// switch to Sitting): with it, keys pressed in the seat ran the jetpack's thrust on the body.
+    /// </summary>
+    internal static void HoldSeated(Keen.VRage.Core.Game.Systems.Session session, bool server)
+    {
+        var weightless = server ? WeightlessServer : WeightlessClient;
+        var seated = server ? SeatedServer : SeatedClient;
+        seated.Clear();
+        foreach (var e in session.GetEntitiesOfType<SeatComponent>())
+        {
+            var seat = e.Get<SeatComponent>();
+            if (seat.Pilot is not { } pilot || EngineCodec.IsDead(pilot)) continue;
+            seated.Add(pilot);
+            var data = pilot.Data;
+            var gridVelocity = seat.Parent != null && seat.Parent.Data.TryGet<RigidBodyData>(out var grid) ? grid.LinearVelocity : Vector3.Zero;
+            if (data.TryGet<RigidBodyData>(out var body) && ((body.LinearVelocity - gridVelocity).LengthSquared() > 1e-8f || body.AngularVelocity.LengthSquared() > 1e-8f))
+                data.Set(new RigidBodyData(gridVelocity, Vector3.Zero));
+            if (data.TryGet<CustomGravity>(out var gravity) && gravity.Value != Vector3.Zero)
+            {
+                data.Set(default(CustomGravity));
+                weightless.Add(pilot);
+            }
+            if (!server && pilot.TryGet<CharacterMovementComponent>()?.CurrentMovementState == CharacterMovementState.Sitting)
+            {
+                data.TryRemove<CharacterMovementComponent.JetpackModeData>();
+                data.TryRemove<MaxThrustData>();
+                data.TryRemove<ActiveThrustData>();
+            }
+        }
+        weightless.RemoveWhere(pilot =>
+        {
+            if (seated.Contains(pilot)) return false;
+            if (!EngineCodec.IsDead(pilot) && pilot.Data.Has<CustomGravity>())
+            {
+                if (pilot.Data.TryGet<GravityEffectData>(out var effect) && effect.GravitySum != Vector3.Zero) pilot.Data.Set(new CustomGravity { Value = effect.GravitySum });
+                else pilot.Data.TryRemove<CustomGravity>();
+            }
+            return true;
+        });
+    }
+
+    private static CharacterMovementInputHandlerComponent? _heldInput;
+    private static readonly StringId[] HeldKinds = { InputKinds.Movement, InputKinds.Utility };
+
+    /// <summary>
+    /// A cockpit takes the movement and utility input kinds away from the character it seats (control passes to the
+    /// cockpit); a passenger seat has nothing to control, so the local character's own movement and jetpack keys are
+    /// switched off here while it sits. Mouse look (Rotation) stays.
+    /// </summary>
+    private static void HoldInput(Keen.VRage.Core.Game.Systems.Session session, Entity? character)
+    {
+        if (character == null)
+        {
+            if (_heldInput is { } held)
+            {
+                _heldInput = null;
+                if (!EngineCodec.IsDead(held.Entity)) RestoreInput.Invoke(held, new object[] { held._observerControllable });
+            }
+            return;
+        }
+        if (_heldInput == null || _heldInput.EntityAdapter.ObservedEntity != character)
+        {
+            _heldInput = session.GetEntitiesOfType<CharacterMovementInputHandlerComponent>().SelectMany(e => e.Components.OfType<CharacterMovementInputHandlerComponent>()).FirstOrDefault(h => h.EntityAdapter.ObservedEntity == character);
+            if (_heldInput == null) return;
+            _heldInput._basicMovementInputs = default;
+            _heldInput.UpdateMovement();
+        }
+        foreach (var kind in HeldKinds)
+            if (_heldInput._inputContexts.TryGetValue(kind, out var context) && context.IsActive) _heldInput._inputProcessor?.DeactivateContext(context);
+    }
+
+    private static readonly System.Reflection.MethodInfo RestoreInput = AccessTools.Method(typeof(InputHandlerBaseComponent), "UpdateInputContexts");
 
     // Leaves the passenger seat the local player sits in, if any.
     private static void Stand()
@@ -367,7 +483,7 @@ internal static class PassengerSeats
     internal static string Rig(string args)
     {
         var session = MpPlugin.App?.ClientSession;
-        var me = session?.GetEntitiesOfType<InteractorEntityComponent>().Select(e => e.Get<InteractorEntityComponent>()).FirstOrDefault(i => i.IsControlledByLocalPlayer)?.Entity;
+        var me = ClientWorld.Current?.OwnCharacter ?? session?.GetEntitiesOfType<InteractorEntityComponent>().Select(e => e.Get<InteractorEntityComponent>()).FirstOrDefault(i => i.IsControlledByLocalPlayer)?.Entity;
         if (session == null || me == null) return "no local character";
         var at = me.Data.GetWorldTransform().Position;
         var current = me.AsInterface<ISeatable>()?.CurrentSeat as SeatComponent;
@@ -384,11 +500,11 @@ internal static class PassengerSeats
             case "cam":
             {
                 // cam [right up forward]: this client's free spectator camera at that offset (in the seated character's
-                // frame) from the first other seated character, looking at its chest
-                var other = session.GetEntitiesOfType<SeatComponent>().Select(e => e.Get<SeatComponent>()).Where(s => s.Pilot != null && s.Pilot != me).OrderBy(s => IsPassengerSeat(s.Entity) ? 0 : 1).FirstOrDefault();
+                // frame of its seat block) from the first seated character (another one first), looking at its chest
+                var other = session.GetEntitiesOfType<SeatComponent>().Select(e => e.Get<SeatComponent>()).Where(s => s.Pilot != null).OrderBy(s => s.Pilot == me ? 1 : 0).ThenBy(s => IsPassengerSeat(s.Entity) ? 0 : 1).FirstOrDefault();
                 if (other == null) return "no seated character";
                 var o = words.Length > 1 ? words[1].Split(' ').Select(x => double.Parse(x, System.Globalization.CultureInfo.InvariantCulture)).ToArray() : new[] { 0.0, 0.6, 1.8 };
-                var p = other.Pilot!.Data.GetWorldTransform();
+                var p = other.Entity.Data.GetWorldTransform();
                 Vector3D right = (Vector3D)p.Orientation.GetRight(), up = (Vector3D)p.Orientation.GetUp(), forward = (Vector3D)p.Orientation.GetForward();
                 var eye = p.Position + right * o[0] + up * o[1] + forward * o[2];
                 var look = Vector3D.Normalize(p.Position + up * 0.6 - eye);
@@ -396,13 +512,16 @@ internal static class PassengerSeats
                 session.SessionComponents.TryGet<Keen.Game2.Client.WorldObjects.Spectators.SpectatingModesSessionComponent>()?.SwitchToSpectator(new WorldTransform(eye, Quaternion.CreateFromForwardUp((Vector3)look, (Vector3)Vector3D.Cross(side, look)))).SkipWait();
                 return $"camera on {other.Entity.GetComposition()?.DebugNameShort}";
             }
+            case "tune":
+                return Tune(words.Length > 1 ? words[1] : "");
             case "stand":
                 if (current == null) return "not seated";
                 current.TryClearPilotAsync().SkipWait();
                 return "standing up from " + current.Entity;
             default:
                 string where = current == null ? "standing" : FormattableString.Invariant($"seated in {current.Entity} (passenger {IsPassengerSeat(current.Entity)}), {Vector3D.Distance(current.Entity.Data.GetWorldTransform().Position, at):0.000} m from it, parented {me.Data.Has<EntityParentData>()}, use-to-stand {(_context != null)}") + (current == null ? "" : " " + SeatGeometry(current, me));
-                return FormattableString.Invariant($"me at {at.X:0.00},{at.Y:0.00},{at.Z:0.00} {where} | {Describe(session)}");
+                var top = session.SessionComponents.TryGet<Keen.Game2.Client.GameSystems.PlayerControl.ClientPlayersSessionComponent>()?.LocalPlayerController?.GetTopControllable();
+                return FormattableString.Invariant($"me at {at.X:0.00},{at.Y:0.00},{at.Z:0.00} {where}, controlling {top?.GetType().Name ?? "nothing"} | {Describe(session)}");
         }
     }
 }

@@ -60,7 +60,7 @@ internal static class DedicatedRuntime
     private static string _statusPath;
     private static long _lastStatus;
     private static string _savedId;
-    private sealed record ResumeState(string SaveId, string SourceSaveId, string SourceContent, string WorldName);
+    private sealed record ResumeState(string SaveId, string SourceSaveId, string SourceContent, string WorldName, string SourceWorkshop = "");
 
     public static void Initialize(string[] args, Harmony harmony)
     {
@@ -203,14 +203,15 @@ internal static class DedicatedRuntime
     private static async Task Load(GameAppComponent app)
     {
         await Task.SetLifetime(app.Scene);
+        bool resumed = false;
         try
         {
             ContainerId? save = string.IsNullOrWhiteSpace(Config.SaveId) ? null : new ContainerId(Config.SaveId);
-            bool resumed = false;
             if (File.Exists(Config.ResumePath))
             {
                 var state = JsonSerializer.Deserialize<ResumeState>(File.ReadAllText(Config.ResumePath), DedicatedConfig.Json);
-                if (state != null && state.SourceSaveId == Config.SaveId && state.SourceContent == Config.StartContent && state.WorldName == Config.WorldName)
+                if (state != null && state.SourceSaveId == Config.SaveId && state.SourceContent == Config.StartContent && state.WorldName == Config.WorldName
+                    && (state.SourceWorkshop ?? "") == Config.StartWorkshop)
                 {
                     save = new ContainerId(state.SaveId);
                     resumed = true;
@@ -218,7 +219,13 @@ internal static class DedicatedRuntime
             }
             if (save.HasValue && !(await SaveHelper.TryGetSaveAsync(save.Value)).HasValue)
                 throw new InvalidOperationException("Native save does not exist in this server profile: " + Config.SaveId);
-            if (!resumed && !string.IsNullOrWhiteSpace(Config.StartContent))
+            if (!resumed && Config.StartWorkshopId != 0)
+            {
+                if (!Headless) throw new InvalidOperationException("StartWorkshop needs the headless server (runner.json Headless: true).");
+                Status = "Downloading Workshop world";
+                save = await DedicatedMods.StartWorldAsync(app, Config);
+            }
+            else if (!resumed && !string.IsNullOrWhiteSpace(Config.StartContent))
                 save = app.Scene.Single<DefaultWorldsComponent>().TryFindDefaultWorldContainerId(Config.StartContent)
                     ?? new ContainerId(SaveHelper.GetContentContainerIdString(Config.StartContent));
             ModList mods = Config.OverrideModList.HasValue
@@ -244,7 +251,7 @@ internal static class DedicatedRuntime
             // Content has to be saved into the profile once. A profile save is already durable, and saving it straight back
             // can deadlock SE2: the commit holds the save collection, a world area spawning its blocking bundle on the main
             // thread waits for a voxel blob from that collection, and the commit's continuation needs the main thread.
-            bool inProfile = save.HasValue && (resumed || string.IsNullOrWhiteSpace(Config.StartContent));
+            bool inProfile = save.HasValue && (resumed || (string.IsNullOrWhiteSpace(Config.StartContent) && Config.StartWorkshopId == 0));
             if (inProfile)
             {
                 _savedId = (world.SaveContainerId ?? save.Value).ToString();
@@ -259,7 +266,7 @@ internal static class DedicatedRuntime
                 GameLog.Instance.Info("dedicated: ordinary native world loaded" + (inProfile ? "" : " and saved") + "; ContainerId " + world.SaveContainerId);
             }
         }
-        catch (Exception ex) { Fail("world load", ex); }
+        catch (Exception ex) { Fail("world load", !resumed && Config.StartWorkshopId != 0 ? DedicatedMods.ExplainStartFailure(ex, Config.StartWorkshopId) : ex); }
     }
 
     private static async Keen.VRage.Library.Threading.Task<bool> Save(WorldSessionComponent world, bool exiting)
@@ -276,7 +283,7 @@ internal static class DedicatedRuntime
                 result = await world.TrySaveWorldSession(world.SaveContainerId.HasValue ? null : Config.WorldName, variant: null);
             }
             if (result != SaveResults.Success) throw new InvalidOperationException("Native world save returned " + result);
-            var state = new ResumeState(world.SaveContainerId.Value.ToString(), Config.SaveId, Config.StartContent, Config.WorldName);
+            var state = new ResumeState(world.SaveContainerId.Value.ToString(), Config.SaveId, Config.StartContent, Config.WorldName, Config.StartWorkshop);
             Directory.CreateDirectory(Path.GetDirectoryName(Config.ResumePath));
             string temp = Config.ResumePath + ".tmp";
             File.WriteAllText(temp, JsonSerializer.Serialize(state, DedicatedConfig.Json));
@@ -330,6 +337,7 @@ internal static class DedicatedRuntime
         else if (command.Equals("restart", StringComparison.OrdinalIgnoreCase)) BeginRestart(app, "console");
         else if (command.Equals("restart now", StringComparison.OrdinalIgnoreCase)) { _restartRequested = true; GameLog.Instance.Info("dedicated: restarting now (console)"); StopNow(app); }
         else if (command.Equals("restart cancel", StringComparison.OrdinalIgnoreCase)) CancelRestart();
+        else if (command.StartsWith("restart update", StringComparison.OrdinalIgnoreCase)) UpdateRestart(command.Substring("restart update".Length).Trim());
         else if (command.StartsWith("motd", StringComparison.OrdinalIgnoreCase) && (command.Length == 4 || command[4] == ' ')) SetMotd(command.Substring(4).Trim());
         else if (command.Equals("save", StringComparison.OrdinalIgnoreCase))
         {
@@ -389,7 +397,7 @@ internal static class DedicatedRuntime
         if (left > countdown)
         {
             int warn = online ? RestartSchedule.WarnDue(Config.AutoRestart.WarnMinutes, _restartWarned, left) : 0;
-            if (warn > 0 && warn * 60 > countdown) { _restartWarned = warn; Say(RestartSchedule.WarnText(warn)); }
+            if (warn > 0 && warn * 60 > countdown) { _restartWarned = warn; Say(_updateVersion != null ? $"Server restart in {warn} min to update Y51_SE2Online to {_updateVersion} - finish up and get somewhere safe." : RestartSchedule.WarnText(warn)); }
             return;
         }
         if (_lastSaveFailed || _saving)
@@ -399,7 +407,21 @@ internal static class DedicatedRuntime
             GameLog.Instance.Warn("dedicated: scheduled restart postponed to " + _restartAt.Value.ToString("HH:mm") + (_saving ? ": a save is running" : ": the last save failed"));
             return;
         }
-        BeginRestart(app, "scheduled");
+        BeginRestart(app, _updateVersion != null ? "update " + _updateVersion : "scheduled");
+    }
+
+    // Queued by the runner's live console once it has downloaded and verified a server update: the same warnings as a
+    // scheduled restart (AutoRestart.WarnMinutes while players are online, then the countdown), and the same
+    // postponement while a save is running or the last one failed.
+    private static string _updateVersion;
+    private static void UpdateRestart(string version)
+    {
+        _updateVersion = version.Length == 0 ? "a new version" : version;
+        int lead = OnlinePlayers() > 0 ? Config.AutoRestart.WarnMinutes.DefaultIfEmpty(0).Max() : 0;
+        _restartAt = DateTime.Now.AddMinutes(lead);
+        _restartWarned = int.MaxValue;
+        GameLog.Instance.Info($"dedicated: update {_updateVersion} is verified and staged by the runner; restarting to install it at {_restartAt.Value:HH:mm}");
+        WriteStatus(true);
     }
 
     private static void BeginRestart(GameAppComponent app, string why)
@@ -415,6 +437,7 @@ internal static class DedicatedRuntime
     {
         bool counting = _restartRequested && _shutdownAtMs != 0;
         _restartRequested = false;
+        _updateVersion = null;
         _shutdownAtMs = 0;
         if (counting) Say("Server restart cancelled.");
         // Skips the restart that was due (or counting down) and plans the one after it.

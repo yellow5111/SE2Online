@@ -180,5 +180,5 @@ internal static class AudioGate
 		}
 	}
 
-	public static string Describe() => $"{AudioRouting.Instance.Describe()}; 2D plays muted {Interlocked.Read(in Muted2D)}";
+	public static string Describe() => $"{AudioRouting.Instance.Describe()}; 2D plays muted {Interlocked.Read(in Muted2D)}; {SoundRange.Describe()}";
 }

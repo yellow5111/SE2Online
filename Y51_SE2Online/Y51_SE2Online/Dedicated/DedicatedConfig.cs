@@ -14,6 +14,9 @@ public sealed class DedicatedConfig
 {
     public string SaveId { get; set; } = "";
     public string StartContent { get; set; } = "";
+    /// <summary>Steam Workshop item (id or link) the world starts from: a Workshop world, or a mod that ships worlds (StartContent then names one).</summary>
+    public string StartWorkshop { get; set; } = "";
+    [JsonIgnore] public ulong StartWorkshopId { get; private set; }
     public string WorldName { get; set; } = "Y51 Dedicated World";
     public bool? EnableAutosave { get; set; } = true;
     public bool? PlayMission { get; set; }
@@ -23,6 +26,9 @@ public sealed class DedicatedConfig
     public int ShutdownCountdownSeconds { get; set; } = 60;
     [JsonObjectCreationHandling(JsonObjectCreationHandling.Populate)]
     public RestartSettings AutoRestart { get; set; } = new();
+    /// <summary>Read by the runner's live console: signed server updates from the website, installed with a warned restart.</summary>
+    [JsonObjectCreationHandling(JsonObjectCreationHandling.Populate)]
+    public UpdateSettings AutoUpdate { get; set; } = new();
     /// <summary>Message of the day shown to each joiner; {player}, {server}, {online} and {max} are filled in.</summary>
     public string Motd { get; set; } = "";
     public string MotdTitle { get; set; } = "";
@@ -62,6 +68,16 @@ public sealed class DedicatedConfig
         config.ConfigPath = path;
         if (!string.IsNullOrWhiteSpace(config.SaveId) && !string.IsNullOrWhiteSpace(config.StartContent))
             throw new ArgumentException("Choose SaveId or StartContent, not both.");
+        config.StartWorkshop = config.StartWorkshop?.Trim() ?? "";
+        if (config.StartWorkshop.Length > 0)
+        {
+            if (!Y51_SE2Online.Sync.WorldMods.TryParseWorkshopId(config.StartWorkshop, out ulong start))
+                throw new ArgumentException($"StartWorkshop: '{config.StartWorkshop}' is not a Steam Workshop item id or link.");
+            if (!string.IsNullOrWhiteSpace(config.SaveId)) throw new ArgumentException("Choose SaveId or StartWorkshop, not both.");
+            config.StartWorkshopId = start;
+            // The resume checkpoint compares this; switching between the id and its link is not a new world.
+            config.StartWorkshop = start.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
         if (string.IsNullOrWhiteSpace(config.WorldName) || config.WorldName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
             throw new ArgumentException("WorldName must be a valid native save name.");
         if (config.SaveIntervalSeconds < 0 || (config.SaveIntervalSeconds > 0 && config.SaveIntervalSeconds < 30))
@@ -69,6 +85,7 @@ public sealed class DedicatedConfig
         if (config.ShutdownCountdownSeconds is < 0 or > 600)
             throw new ArgumentException("ShutdownCountdownSeconds must be between 0 and 600.");
         config.AutoRestart.Validate();
+        if (config.AutoUpdate == null || config.AutoUpdate.CheckMinutes is < 5 or > 1440) throw new ArgumentException("AutoUpdate.CheckMinutes must be between 5 and 1440.");
         if ((config.Motd ?? "").Length > Core.Motd.MaxText) throw new ArgumentException($"Motd can be at most {Core.Motd.MaxText} characters.");
         if ((config.MotdTitle ?? "").Length > Core.Motd.MaxTitle) throw new ArgumentException($"MotdTitle can be at most {Core.Motd.MaxTitle} characters.");
         if (config.Network == null) throw new ArgumentException("Network must be configured.");
@@ -102,6 +119,13 @@ public sealed class DedicatedConfig
         NativeDefinitionSettings.Validate(config.DefinitionSettings);
         return config;
     }
+}
+
+/// <summary>Server auto-update (the runner checks, downloads and verifies; players get the AutoRestart warnings first).</summary>
+public sealed class UpdateSettings
+{
+    public bool Enabled { get; set; } = true;
+    public int CheckMinutes { get; set; } = 30;
 }
 
 /// <summary>Scheduled restarts (the runner relaunches the server) and restarts after a crash.</summary>

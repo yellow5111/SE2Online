@@ -1,6 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
+using Avalonia.Layout;
+using Avalonia.Media;
 using Keen.Game2.Client.UI.Library.Dialogs.OneOptionDialog;
 using Y51_SE2Online.Core;
 using Y51_SE2Online.Sync;
@@ -73,14 +78,44 @@ internal static class ServerInfoUi
         Show(AdminAccess.ServerName, rows);
     }
 
+    private const string TitlePrefix = "Server info - ";
+    private static bool _fitInstalled;
+
     public static void Show(string title, IEnumerable<ServerInfoRow> rows) => MpMenu.Queue(() =>
     {
         var shared = JoinStatusUi.FindShared(MpPlugin.App); if (shared == null) return;
+        if (!_fitInstalled) { _fitInstalled = true; Control.LoadedEvent.AddClassHandler<OneOptionDialogControl>((dialog, _) => Fit(dialog)); }
         shared.ShowDialog(new OneOptionDialogViewModel(new OneOptionDialogDefinition
         {
-            Title = OnlineUi.Raw("Server info - " + ServerInfo.Clean(title, 60)),
+            Title = OnlineUi.Raw(TitlePrefix + ServerInfo.Clean(title, 60)),
             Content = OnlineUi.Raw(ServerInfo.Text(rows)),
             ConfirmOption = OnlineUi.Raw("Close")
         }));
     });
+
+    /// <summary>
+    /// SE2's one-option dialog grows with its text and has no scrolling, so a long settings list ran off the screen.
+    /// Our dialog's text goes into a scroll viewer capped to the part of the screen the dialog can use.
+    /// </summary>
+    private static void Fit(OneOptionDialogControl dialog)
+    {
+        try
+        {
+            if (dialog.Content is not Grid grid) return;
+            var title = grid.Children.OfType<TextBlock>().FirstOrDefault(t => Grid.GetRow(t) == 0);
+            var body = grid.Children.OfType<TextBlock>().FirstOrDefault(t => Grid.GetRow(t) == 1);
+            if (body == null || title?.Text?.StartsWith(TitlePrefix, StringComparison.OrdinalIgnoreCase) != true) return;
+            int index = grid.Children.IndexOf(body);
+            grid.Children.Remove(body);
+            body.TextAlignment = TextAlignment.Left; body.HorizontalAlignment = HorizontalAlignment.Left;
+            var scroll = new ScrollViewer { Content = body, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, AllowAutoHide = false };
+            Grid.SetRow(scroll, 1);
+            grid.Children.Insert(index, scroll);
+            // The UI may be scaled to the window, so the screen height is measured in the dialog's own units.
+            if (TopLevel.GetTopLevel(dialog) is { } top && dialog.TransformToVisual(top) is { } toScreen && toScreen.M22 > 0)
+                scroll.MaxHeight = Math.Max(240, top.ClientSize.Height / toScreen.M22 * 0.5);
+            else scroll.MaxHeight = 520;
+        }
+        catch (Exception e) { GameLog.Instance.Warn("server info: dialog layout failed: " + e.Message); }
+    }
 }

@@ -358,16 +358,22 @@ public sealed partial class HostSession : IStorySink
 			{
 				var (phase, text) = TextMessage.Decode(data);
 				string name;
+				ushort clientId = 0;
 				lock (_sync)
 				{
 					name = _clients.TryGetValue(peer, out RemoteClient client) ? client.Name : "?";
 					if (client != null)
 					{
 						client.LastPhase = ((ClientPhase)phase).ToString();
+						clientId = client.Player?.ClientId ?? 0;
 					}
 				}
+				if (phase == (byte)ClientPhase.NotSeated && clientId != 0)
+				{
+					_world.OnNotSeated(clientId);
+				}
 				string message = $"client {peer} '{name}': {(ClientPhase)phase}: {text}";
-				if (phase >= (byte)ClientPhase.Error)
+				if (phase == (byte)ClientPhase.Error)
 				{
 					_log.Error(message);
 				}

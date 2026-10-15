@@ -225,6 +225,7 @@ internal static class MpMenu
         MotdUi.Tick();
         PlayerInteraction.Tick();
         PassengerSeats.Tick();
+        SeatRestore.Tick();
         FactionPopups.Tick();
         JoinPresence.Tick(Joined && ClientWorld.Progress.Stage == Sync.JoinStage.Playing);
         if (MpPlugin.SteamAvailable && _finder == null) { _finder = new FriendFinder(GameLog.Instance); _finder.Start(); }
@@ -286,6 +287,7 @@ internal static class MpMenu
         if (!inWorld) return;
         bool free = shared.TryGetTopScreenNeedingInput() == null;
         FightLock.Tick();
+        if (AdminAccess.InSession) HackUi.Tick(app, shared, free);
         EmoteMenu.Tick(AdminAccess.InSession && !ChatUi.InputOpen && (free || EmoteMenu.IsOpen));
         if (chat && free && AdminAccess.InSession && !ChatUi.InputOpen) ChatUi.OpenInput(shared);
         if (AdminAccess.InSession) SuitBroadcast(app, broadcast && free && !ChatUi.InputOpen);

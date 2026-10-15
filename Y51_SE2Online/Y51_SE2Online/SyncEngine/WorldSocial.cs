@@ -15,6 +15,8 @@ using Keen.Game2.Simulation.WorldObjects.CubeBlocks;
 using Keen.Game2.Simulation.WorldObjects.CubeGrids;
 using Keen.VRage.Core.Game.Systems;
 using Keen.VRage.Core.Worlds;
+using Keen.VRage.Core;
+using Keen.VRage.Core.Game.Data;
 using Keen.VRage.Core.Game.Components;
 using Keen.VRage.DCS.Components;
 using Keen.VRage.DCS.Builders;
@@ -88,6 +90,7 @@ internal sealed class WorldSocial
             {
                 social.State = stream == null ? new SocialState() : SocialState.Deserialize(bytes.ToArray());
                 social._initialized = false;
+                social._tagged.Clear(); social._unmatched = null;
             }
         }
     }
@@ -240,14 +243,53 @@ internal sealed class WorldSocial
     private string ApplyAntennaTag(long actor, SocialRequest request, Func<uint, Entity> resolve)
     {
         var block = resolve(request.Grid);
-        var permissions = block?.TryGet<BlockPermissionsComponent>();
         var grid = block == null ? null : GridOf(block);
-        if (permissions == null || grid == null || BlockOf(block) != block || block.TryGet<AntennaComponent>() == null) return "That antenna is no longer available.";
+        if (grid == null || BlockOf(block) != block || block.TryGet<AntennaComponent>() == null) return "That antenna is no longer available.";
         if (!State.MayTag(TeamPermissions.OwnerOf(grid), actor)) return "Only the antenna's owner, or their faction's leader or admins, can change this.";
-        var acl = AclOf(block) with { ShowTag = request.Offset == 1 };
-        permissions.AccessGroup = acl.IsEmpty ? Singleton<DefinitionManager>.Instance.GetConfiguration<PermissionsConfiguration>().OwnerAccess : StringId.Get(acl.ToString());
+        bool on = request.Offset == 1;
+        if (on) _tagged.Add(block); else _tagged.Remove(block);
+        // Builds before 0.15.1 kept the switch in the access group of antennas that have block permissions (modded ones).
+        if (!on && block.TryGet<BlockPermissionsComponent>() is { } permissions && AclOf(block).ShowTag)
+        {
+            var acl = AclOf(block) with { ShowTag = false };
+            permissions.AccessGroup = acl.IsEmpty ? Singleton<DefinitionManager>.Instance.GetConfiguration<PermissionsConfiguration>().OwnerAccess : StringId.Get(acl.ToString());
+        }
         State.Revision++;
-        return acl.ShowTag ? "This antenna's signal now shows its owner's faction tag." : "This antenna's signal no longer shows a faction tag.";
+        return on ? "This antenna's signal now shows its owner's faction tag." : "This antenna's signal no longer shows a faction tag.";
+    }
+
+    // Server, under Sync. SE2 entities have no id that survives a save, so State.TaggedAntennas keeps each tagged antenna's
+    // grid cell and position (refreshed every pass) and a loaded world matches them back to its antennas.
+    private readonly HashSet<Entity> _tagged = new();
+    private List<TaggedAntenna> _unmatched;
+    private long _matchedMs;
+    internal bool IsTagged(Entity antenna) => _tagged.Contains(antenna) || AclOf(antenna).ShowTag;
+
+    private static TaggedAntenna Saved(Entity antenna)
+    {
+        var cell = antenna.Get<CubeBlockComponent>().AABB.Min;
+        var at = antenna.Data.GetWorldTransform().Position;
+        return new(cell.X, cell.Y, cell.Z, at.X, at.Y, at.Z);
+    }
+
+    private void MatchSaved(Session session)
+    {
+        _unmatched ??= State.TaggedAntennas.ToList();
+        long now = Environment.TickCount64;
+        if (_unmatched.Count == 0 || now - _matchedMs < 5000) return;
+        _matchedMs = now;
+        var antennas = session.GetEntitiesOfType<AntennaComponent>().Where(e => e.TryGet<CubeBlockComponent>() != null && !EngineCodec.IsDead(e) && !_tagged.Contains(e)).ToList();
+        // ponytail: pending x antennas every 5 s; entries whose antenna is gone stay pending (and saved) for good.
+        _unmatched.RemoveAll(saved =>
+        {
+            var spot = new Keen.VRage.Library.Mathematics.Vector3D(saved.PX, saved.PY, saved.PZ);
+            var match = antennas.Where(e => e.Get<CubeBlockComponent>().AABB.Min is var c && c.X == saved.X && c.Y == saved.Y && c.Z == saved.Z)
+                .Select(e => (e, d: Keen.VRage.Library.Mathematics.Vector3D.Distance(e.Data.GetWorldTransform().Position, spot)))
+                .Where(x => x.d < 25).OrderBy(x => x.d).Select(x => x.e).FirstOrDefault();
+            if (match == null) return false;
+            _tagged.Add(match); antennas.Remove(match);
+            return true;
+        });
     }
 
     /// <summary>
@@ -255,15 +297,19 @@ internal sealed class WorldSocial
     /// renames, so the tag is put back on the next pass.
     /// </summary>
     // ponytail: a 1 Hz pass over every antenna marker; after a rename the untagged name shows for up to a second.
-    internal static void TagAntennas(Session session, Func<long, string> tagOf)
+    internal void TagAntennas(Session session, Func<long, string> tagOf)
     {
+        MatchSaved(session);
+        _tagged.RemoveWhere(e => EngineCodec.IsDead(e) || e.TryGet<CubeBlockComponent>() == null);
+        // JSON has no NaN: one bad transform would fail the whole faction save.
+        State.TaggedAntennas = _tagged.Select(Saved).Where(a => double.IsFinite(a.PX) && double.IsFinite(a.PY) && double.IsFinite(a.PZ)).Concat(_unmatched).ToList();
         var markers = session.SessionComponents.TryGet<AntennaMarkersSessionComponent>()?._markers;
         if (markers == null) return;
         foreach (var (antenna, marker) in markers.AntennaToMarker)
         {
             if (antenna?.Entity == null || EngineCodec.IsDead(antenna.Entity)) continue;
             string name = ((antenna.BroadcastCustomMessage ? null : marker.Grid?.DisplayName) ?? antenna.CustomMessage).EvaluateText() ?? "";
-            string tag = AclOf(antenna.Entity).ShowTag ? tagOf(TeamPermissions.OwnerOf(antenna.Entity)) : null;
+            string tag = IsTagged(antenna.Entity) ? tagOf(TeamPermissions.OwnerOf(antenna.Entity)) : null;
             string wanted = FactionTag.Prefix(tag, name);
             if (marker.Name != wanted) marker.Name = wanted;
         }

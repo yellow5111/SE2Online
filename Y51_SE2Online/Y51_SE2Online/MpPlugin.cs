@@ -132,6 +132,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			if (!hook.Item2) throw new InvalidOperationException(hook.Item1 + ": " + hook.Item3);
 		}
 		DedicatedRuntime.Initialize(LaunchArgs, _harmony);
+		AutoUpdateClient.CleanUp();
 		PassengerSeats.Hook();
 		WorldSocial.Install(_harmony);
 		NameSync.Install(_harmony);
@@ -155,10 +156,13 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			MpMenu.Install(_harmony);
 			GpsShareUi.Install();
 			GunHudGuard.Install(_harmony);
+			AnimatorGuard.Install(_harmony);
+			SoundRange.Install(_harmony);
 			ProceduralVoxelHandoff.Install(_harmony);
 			HostOnlySaves.Install(_harmony);
 			WaterMirror.Install(_harmony);
 			PassengerSeats.Install(_harmony);
+			SeatRestore.Install(_harmony);
 			TradeUi.Install();
 			ReplicationRaceGuards.Install(_harmony);
 			PermissionFeedback.Install(_harmony);

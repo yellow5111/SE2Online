@@ -91,6 +91,7 @@ public sealed class ChatHudScreen : ScreenView
         var hud = new Grid { IsHitTestVisible = false };
         hud.Children.Add(ChatUi.Frame(_lines));
         hud.Children.Add(PlayerAimView.Layer());
+        hud.Children.Add(HackUi.Layer());
         Content = hud;
         OnDisposing += _ => { _closed = true; if (_model != null) _model.Refresh -= QueueRefresh; };
     }

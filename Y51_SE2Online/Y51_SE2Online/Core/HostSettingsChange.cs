@@ -35,6 +35,9 @@ public static class HostSettingsChange
         if (before.VoiceRadiusMeters != after.VoiceRadiusMeters) live.Add(after.VoiceRadiusMeters > 0 ? "voice range " + Metres(after.VoiceRadiusMeters) : "voice chat off");
         if (before.WaterSync != after.WaterSync) live.Add("water sync " + OnOff(after.WaterSync) + " for players who join from now on");
         if (before.UsageMultipliers != after.UsageMultipliers) live.Add("resource usage " + after.UsageMultipliers.Describe());
+        if (before.Hacking != after.Hacking || before.AllowHackingPlayerGrids != after.AllowHackingPlayerGrids || before.HackTimeMultiplier != after.HackTimeMultiplier
+            || before.HackLockdownSeconds != after.HackLockdownSeconds || before.HackLockdownCooldownSeconds != after.HackLockdownCooldownSeconds)
+            live.Add(!after.Hacking ? "hacking off" : "hacking on" + (after.AllowHackingPlayerGrids ? " (player grids with PvP)" : " (NPC and unowned grids only)") + ", hack time x" + after.HackTimeMultiplier.ToString("0.##", CultureInfo.InvariantCulture));
         if (before.TeamGrids != after.TeamGrids) next.Add("grid sharing");
         if (before.SharedResearch != after.SharedResearch) next.Add("shared research");
         if (before.Nametags != after.Nametags || before.NametagRange != after.NametagRange) next.Add("name tags");

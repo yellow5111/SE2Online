@@ -24,14 +24,21 @@ public enum SocialAction
     /// <summary>Antenna HUD marker shows its owner's faction tag: Offset 1 on, 0 off. The block is Secure.</summary>
     AntennaTag,
     /// <summary>Turns down FactionId's invitation.</summary>
-    DeclineInvitation
+    DeclineInvitation,
+    /// <summary>Offset 1 starts a hack at the nearest terminal (or counter-hacks one on your own grid), 0 cancels yours, 2 says a terminal was opened.</summary>
+    Hack,
+    /// <summary>Freezes the hack on Grid (0: every hack on your side's grids).</summary>
+    Lockdown
 }
 
 public sealed record SocialRequest(SocialAction Action, string FactionId = "", long Player = 0,
     uint Grid = 0, GridSharing Sharing = GridSharing.Private, string Name = "", string Tag = "", int Offset = 0, Guid Secure = default);
 public sealed record SocialPlayer(long Identity, string Name);
 public sealed record SocialGrid(uint NetId, string Name, long Owner, GridSharing Sharing);
-public sealed record SocialBlock(uint NetId, string Name, long Owner, long[] Allow, long[] Deny, Guid Secure, bool Antenna = false, bool ShowTag = false);
+/// <summary>A saved antenna faction-tag switch: SE2 entities keep no id across a save, so the antenna is found again by its grid cell and position.</summary>
+public sealed record TaggedAntenna(int X, int Y, int Z, double PX, double PY, double PZ);
+/// <param name="Lists">False for block types SE2 gives no per-block access (lights, doors, thrusters...): they follow the grid.</param>
+public sealed record SocialBlock(uint NetId, string Name, long Owner, long[] Allow, long[] Deny, Guid Secure, bool Antenna = false, bool ShowTag = false, bool Lists = true);
 public sealed class OnlineFaction
 {
     public string Id { get; set; } = "";
@@ -73,6 +80,8 @@ public sealed class SocialSnapshot
     public uint[] AllowedBlocks { get; set; } = Array.Empty<uint>();
     public uint[] DeniedBlocks { get; set; } = Array.Empty<uint>();
     public uint[] OpenBlocks { get; set; } = Array.Empty<uint>();
+    /// <summary>Hacks this player runs or defends against.</summary>
+    public HackView[] Hacks { get; set; } = Array.Empty<HackView>();
 }
 
 public sealed class SocialState
@@ -83,6 +92,8 @@ public sealed class SocialState
     public List<OnlineFaction> Factions { get; set; } = new();
     public List<FactionPact> Pacts { get; set; } = new();
     public List<FactionProposal> Proposals { get; set; } = new();
+    /// <summary>Antennas whose HUD marker shows their owner's faction tag (SE2 antennas have no block permissions to keep the flag in).</summary>
+    public List<TaggedAntenna> TaggedAntennas { get; set; } = new();
     public const int MaxMotd = 300;
 
     public static bool CanAccess(long owner, long actor, GridSharing sharing, IEnumerable<OnlineFaction> factions)
@@ -262,6 +273,7 @@ public sealed class SocialState
             if (faction.Motd.Length > MaxMotd || faction.Admins.Concat(faction.Moderators).Any(p => p == faction.Leader || !faction.Members.Contains(p)) || faction.Admins.Intersect(faction.Moderators).Any()) throw new InvalidOperationException("Invalid faction roles.");
         }
         Pacts ??= new(); Proposals ??= new();
+        TaggedAntennas = (TaggedAntennas ?? new()).Where(a => a != null).Take(65536).ToList();
         var pairs = new HashSet<(string, string)>();
         if (Pacts.Count > 65536 || Proposals.Count > 4096) throw new InvalidOperationException("Invalid faction diplomacy.");
         foreach (var pact in Pacts)

@@ -84,6 +84,9 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 
 		public Entity? Seat;
 
+		/// <summary>The seat a rejoining player's saved character still sat in when it was taken over.</summary>
+		public Entity? RestoredSeat;
+
 		public bool SeatMismatchLogged;
 
 		public readonly Dictionary<Entity, long> ScannedRoots = new(ReferenceEqualityComparer.Instance);
@@ -233,7 +236,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 	private long _heavyLoggedMs = long.MinValue / 2;
 	private readonly Dictionary<long, SocialRequest> _socialViews = new();
 	private readonly Dictionary<long, string> _socialMessages = new();
-	private readonly ConcurrentDictionary<ushort, long> _socialRate = new();
+	private readonly ConcurrentDictionary<ushort, (long Start, int Count)> _socialRate = new();
 
 	/// <summary>Players with their suit broadcast off: other players get no name tag for them.</summary>
 	private readonly ConcurrentDictionary<ushort, bool> _silentClients = new();
@@ -253,8 +256,10 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 	public void OnSocialRequest(PeerId peer, ushort clientId, SocialRequest request)
 	{
 		long now = MpClock.NowMs();
-		if (_socialRequests.Count >= 128 || (_socialRate.TryGetValue(clientId, out long last) && now - last < 200)) return;
-		_socialRate[clientId] = now;
+		// A burst of five a second: a single 200 ms slot dropped clicks that landed next to a periodic request (suit broadcast, terminal open).
+		var (start, count) = _socialRate.TryGetValue(clientId, out var rate) && now - rate.Start < 1000 ? rate : (now, 0);
+		if (_socialRequests.Count >= 128 || count >= 5) return;
+		_socialRate[clientId] = (start, count + 1);
 		_socialRequests.Enqueue((peer, clientId, request));
 	}
 
@@ -334,6 +339,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 					continue;
 				}
 				if (!roster.Any(p => p.Identity == actor)) continue;
+				if (command.Request.Action is SocialAction.Hack or SocialAction.Lockdown) { HackCommand(session, actor, command.ClientId, command.Request); continue; }
 				var request = WithSecureTarget(session, actor, command.Request);
 				if (request.Action == SocialAction.Refresh) _socialViews[actor] = request;
 				else _socialMessages[actor] = social.Apply(actor, request, id => _ids.TryGet(id, out Entity entity) && !EngineCodec.IsDead(entity) ? entity : null);
@@ -342,7 +348,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			long now = MpClock.NowMs();
 			if (!changed && now < _socialNextPublish) return;
 			_socialNextPublish = now + 1000;
-			WorldSocial.TagAntennas(session, FactionTagOf);
+			social.TagAntennas(session, FactionTagOf);
 			foreach (var (clientId, text) in social.DueFactionMotds(roster)) _host.GpsNotice(clientId, text);
 			var grids = session.Entities.Where(e => e.TryGet<CubeGridComponent>() != null && e.TryGet<OwnershipComponent>() != null && !EngineCodec.IsDead(e))
 				.Select(e => new SocialGrid(_ids.GetOrAssign(e), SocialState.Clean(e.TryGet<CubeGridComponent>().DisplayName.ToString(), 100), TeamPermissions.OwnerOf(e), WorldSocial.SharingOf(e))).ToArray();
@@ -356,6 +362,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 				snapshot.AllowedBlocks = listed.Where(b => b.Acl.Allow.Contains(player.Identity)).Select(b => b.Id).ToArray();
 				snapshot.DeniedBlocks = listed.Where(b => b.Acl.Deny.Contains(player.Identity)).Select(b => b.Id).ToArray();
 				snapshot.OpenBlocks = open;
+				snapshot.Hacks = HackViewsFor(player.Identity);
 				var peer = _host.Players().FirstOrDefault(p => p.ClientId == player.ClientId)?.Peer;
 				if (peer.HasValue) _host.SendSocial(peer.Value, snapshot);
 			}
@@ -379,7 +386,8 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 
 	private volatile WorldSessionComponent? _worldSession;
 
-	public const int WorldPartEntities = 1500;
+	// Not const: the live rig shrinks it to put a seat and its pilot into different parts.
+	internal static int WorldPartEntities = 1500;
 
 	private static readonly HashSet<string> ShipActionStories = new(StringComparer.Ordinal) { "CubeGridComponent.TogglePower", "CubeGridComponent.ToggleDampeners", "CubeGridComponent.ToggleLights", "CubeGridComponent.ToggleParkingBrakes", "GridSpeedLimitComponent.SetBoost" };
 
@@ -1616,10 +1624,12 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		OnServer(() => UpdateSocial(server.Session));
 		OnServer(() => UpdateAdmin(server.Session));
 		OnServer(() => UpdateGps(server.Session));
+		OnServer(() => UpdateHacks(server.Session));
 		OnServer(() => UpdateWater(server.Session));
 		OnServer(() => UpdateTrades(server.Session));
 		OnServer(UpdatePunches);
 		OnServer(UpdateVoicePositions);
+		OnServer(UpdateSeats);
 		Registration next;
 		while (_registrations.TryDequeue(out next))
 		{
@@ -2101,6 +2111,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			{
 				_parked.TryRemove(saved, out _);
 				character = saved;
+				RestoreSeat(j, saved);
 				via = "its saved character (the host's save kept it; same identity)";
 			}
 			else if (j.ShipPending || !ChosenSpawn(server.Session, host, j, respawn, identityId, hostCharacter, out character, out via))

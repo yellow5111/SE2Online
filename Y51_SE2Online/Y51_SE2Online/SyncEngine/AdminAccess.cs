@@ -62,7 +62,7 @@ internal static class AdminAccess
     public static void Chat(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return;
-        if (VoiceCommand(text.Trim()) || TradeUi.Command(text.Trim())) return;
+        if (VoiceCommand(text.Trim()) || TradeUi.Command(text.Trim()) || HackUi.Command(text.Trim())) return;
         if (Hosting) Host.LocalChat(text, false);
         else Client?.SendChat(text);
     }

@@ -1838,6 +1838,21 @@ internal sealed class ClientWorld
 		return ragdoll;
 	}
 
+	internal Entity? OwnCharacter => _ownCharacter is { } own && !EngineCodec.IsDead(own) ? own : null;
+
+	// A bundle's reference to an entity outside it becomes an unbuilt client stub; this keeps which host entity it meant.
+	private readonly ConditionalWeakTable<Entity, Entity> _unbuiltRefs = new();
+
+	/// <summary>The built client entity behind a host entity's proxy, or behind a bundle's reference to one built later.</summary>
+	internal Entity? ClientEntityOf(Entity reference)
+	{
+		var proxy = _unbuiltRefs.TryGetValue(reference, out var meant) ? meant : reference;
+		bool skip = false;
+		return _comp?.ReplayContext.TranslateObject(proxy, ReplicationFailureStrategy.NullOnAnyFail, ref skip) is Entity entity && !EngineCodec.IsDead(entity) ? entity : null;
+	}
+
+	internal void ReportNotSeated(string text) => Report(ClientPhase.NotSeated, text);
+
 	private Entity? ClientEntity(uint id)
 	{
 		if (_comp == null || !_proxies.IsLive(id) || !_proxies.TryGet(id, out Entity e))
@@ -2848,6 +2863,10 @@ internal sealed class ClientWorld
 				{
 					paired.Add(id);
 				}
+			}
+			else if (!translated && !builders.ContainsKey(proxy))
+			{
+				_unbuiltRefs.AddOrUpdate(clientEntity, proxy);
 			}
 		}
 		double translateMs = sw.Elapsed.TotalMilliseconds - startMs - deserializeMs;

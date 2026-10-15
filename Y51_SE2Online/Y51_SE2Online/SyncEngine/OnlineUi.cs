@@ -111,6 +111,21 @@ internal static class OnlineUi
         return button;
     }
 
+    /// <summary>A button the size of the control panel's own buttons, for panels laid over SE2's screens.</summary>
+    public static Button SmallButton(string label, Action action, string name = null)
+    {
+        var button = Button(label, action, name);
+        button.FontSize = 20; button.MinHeight = 40; button.MinWidth = 96; button.Padding = new Thickness(14, 4);
+        return button;
+    }
+
+    /// <summary>A compact player picker (a native drop-down instead of a tall list).</summary>
+    public static ComboBox PlayerPicker(string placeholder) => new()
+    {
+        MinHeight = 40, MinWidth = 240, FontSize = 20, PlaceholderText = placeholder, VerticalAlignment = VerticalAlignment.Center,
+        ItemTemplate = new Avalonia.Controls.Templates.FuncDataTemplate<SocialPlayer>((p, _) => p == null ? null : Text(p.Name, size: 20, inheritForeground: true))
+    };
+
     public static Button Back(ScreenView screen, Action action)
     {
         var button = Button(Localize("GenericBack", "Back"), action, "OnlineBack", true);

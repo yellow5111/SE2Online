@@ -11,5 +11,7 @@ public enum ClientPhase : byte
 	CharacterReady = 8,
 	Progress = 7,
 	Warning = 9,
-	Error = 10
+	Error = 10,
+	/// <summary>The player's character is not seated on this client although it rejoined seated; the host stands it up.</summary>
+	NotSeated = 11
 }

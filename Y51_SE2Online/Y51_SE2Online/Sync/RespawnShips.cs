@@ -4,7 +4,11 @@ using System.Linq;
 
 namespace Y51_SE2Online.Sync;
 
-public sealed record RespawnShip(Guid Prefab, string Key, string Name, string Detail);
+/// <param name="Lift">Upward acceleration in m/s^2 from the thrusters that lift the ship in its upright pose (rig probe, after the top-up).</param>
+/// <param name="Grid">For a prefab that holds more than the ship (a planet contract): the one grid to keep.</param>
+/// <param name="Space">Offered as a space respawn ship near the world spawn.</param>
+/// <param name="Ion">Ion thrust: full only in thin air, so landers need a planet with an air density of at most <see cref="RespawnShips.IonAirDensity"/>.</param>
+public sealed record RespawnShip(Guid Prefab, string Key, string Name, string Detail, double Lift = 0, string? Grid = null, bool Space = true, bool Ion = true);
 
 /// <summary>The ships players can take on spawn or respawn: vanilla 2.4 cargo encounters that pass the survival checklist.</summary>
 public static class RespawnShips
@@ -12,17 +16,33 @@ public static class RespawnShips
     /// <summary>Every flyable cargo encounter in SE2 2.4; the rig probe checks all of them.</summary>
     public static readonly RespawnShip[] Candidates =
     {
-        new(new("57c9cf6b-d639-4352-820e-63cbb574eb0e"), "Pathfinder", "Pathfinder prospector", "Space miner and explorer: survival kit, refinery, assembler, ore detector"),
-        new(new("553ffc79-7ec5-43d4-84bb-01889d78c7f5"), "Nova35", "Nova 35 freighter", "Unarmed space hauler with the biggest cargo hold"),
-        new(new("f8c0082d-750b-4e9d-8886-c4d6dc511c4e"), "RenegadePathfinder", "Armed Pathfinder", "Pathfinder with gatling cannons and turrets"),
-        new(new("dd8285f9-8841-454a-bbd8-8997f0090b10"), "CentreLineC", "CentreLine C", "Armed space hauler"),
-        new(new("9c95bcf3-fe59-4ebc-843d-4ecb6fa61d37"), "CentreLineH2", "CentreLine H2", "Armed hydrogen hauler"),
-        new(new("3a9d2387-86f4-405c-90dd-63feae963cbf"), "Gladius", "Gladius gunship", "Armed space gunship with gatling turrets"),
+        new(new("57c9cf6b-d639-4352-820e-63cbb574eb0e"), "Pathfinder", "Pathfinder prospector", "Space miner and explorer: survival kit, refinery, assembler, ore detector", 7.2),
+        new(new("553ffc79-7ec5-43d4-84bb-01889d78c7f5"), "Nova35", "Nova 35 freighter", "Unarmed space hauler with the biggest cargo hold", 9.6),
+        new(new("f8c0082d-750b-4e9d-8886-c4d6dc511c4e"), "RenegadePathfinder", "Armed Pathfinder", "Pathfinder with gatling cannons and turrets", 6.9),
+        new(new("dd8285f9-8841-454a-bbd8-8997f0090b10"), "CentreLineC", "CentreLine C", "Armed space hauler", 7.2),
+        new(new("9c95bcf3-fe59-4ebc-843d-4ecb6fa61d37"), "CentreLineH2", "CentreLine H2", "Armed hydrogen hauler", 6.5),
+        new(new("3a9d2387-86f4-405c-90dd-63feae963cbf"), "Gladius", "Gladius gunship", "Armed space gunship with gatling turrets", 9.2),
+        // The only vanilla 2.4 prefab with a survival kit that lifts off at 1 g: the hydrogen dropship of the Verdure bounty contract
+        // (every planet encounter is a static base; the other atmospheric craft have no survival kit or recharging power).
+        new(new("0581d25e-1e6b-4801-a2d6-cfed4af6cabd"), "Dropship", "Renegade Dropship", "Hydrogen lander: survival kit, refinery, assembler, O2/H2 generator, turret", 34.2, "Renegade Dropship", Space: false, Ion: false),
     };
 
     // The candidates that pass the survival checklist after the spawn top-up (E:\SE2MP\artifacts\ships\ship-checklist.md).
     // Both CentreLines have no oxygen source at all. ponytail: re-run the rig probe (shipprobe/shipreport) after a game update.
-    public static readonly RespawnShip[] Catalog = Candidates.Where(s => s.Key is "Pathfinder" or "Nova35" or "RenegadePathfinder" or "Gladius").ToArray();
+    public static readonly RespawnShip[] Catalog = Candidates.Where(s => s.Key is "Pathfinder" or "Nova35" or "RenegadePathfinder" or "Gladius" or "Dropship").ToArray();
+
+    /// <summary>A lander needs this much more lift than the planet's surface gravity (cargo, climbing).</summary>
+    public const double LiftMargin = 1.5;
+
+    /// <summary>Ion thrust is full up to this air density and falls off above it (ThrustClassesConfiguration "Ion").</summary>
+    public const double IonAirDensity = 0.2;
+
+    /// <summary>The landers: the dropship for every planet, the Pathfinder for airless low-gravity moons (one survival ship per planet type).</summary>
+    public static readonly string[] LanderKeys = { "Pathfinder", "Dropship" };
+
+    /// <summary>The offered landers that can lift off from a planet with this surface gravity (m/s^2) and air density.</summary>
+    public static RespawnShip[] ForPlanet(IReadOnlyCollection<string>? allowed, double gravity, double airDensity)
+        => Offered(allowed).Where(s => LanderKeys.Contains(s.Key) && s.Lift >= gravity * LiftMargin && (!s.Ion || airDensity <= IonAirDensity)).ToArray();
 
     public const int MaxCooldownMinutes = 1440;
 

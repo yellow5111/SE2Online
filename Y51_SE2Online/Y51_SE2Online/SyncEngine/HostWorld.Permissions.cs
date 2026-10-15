@@ -31,13 +31,19 @@ internal sealed partial class HostWorld
         var entity = session.SessionComponents.Components.OfType<ISecureEntityIds>().FirstOrDefault()?.TryGetEntity(id, null);
         if (entity != null && EngineCodec.IsDead(entity)) entity = null;
         var block = entity == null ? null : WorldSocial.BlockOf(entity);
-        if (block?.TryGet<BlockPermissionsComponent>() == null) block = null;
         if (request.Action == SocialAction.Refresh)
         {
+            // Every block gets an answer, so the panel can say at once when its type has no access lists.
             if (block != null) _focusBlocks[actor] = (block, request.Secure);
             else _focusBlocks.TryRemove(actor, out _);
         }
-        var target = request.Action is SocialAction.BlockAllow or SocialAction.BlockDeny or SocialAction.AntennaTag ? block : entity == null ? null : WorldSocial.GridOf(entity);
+        var target = request.Action switch
+        {
+            SocialAction.BlockAllow or SocialAction.BlockDeny => block?.TryGet<BlockPermissionsComponent>() != null ? block : null,
+            // SE2 antennas have no block permissions; their tag switch is kept by WorldSocial.
+            SocialAction.AntennaTag => block?.TryGet<Keen.Game2.Simulation.GameSystems.Antennas.AntennaComponent>() != null ? block : null,
+            _ => entity == null ? null : WorldSocial.GridOf(entity)
+        };
         return request with { Grid = target == null ? 0 : _ids.GetOrAssign(target), Secure = Guid.Empty };
     }
 
@@ -69,9 +75,10 @@ internal sealed partial class HostWorld
         if (!_focusBlocks.TryGetValue(actor, out var focus)) return null;
         var block = focus.Block;
         if (EngineCodec.IsDead(block)) { _focusBlocks.TryRemove(actor, out _); return null; }
-        var acl = WorldSocial.AclOf(block);
+        bool lists = block.TryGet<BlockPermissionsComponent>() != null;
+        var acl = lists ? WorldSocial.AclOf(block) : new BlockAcl(Array.Empty<long>(), Array.Empty<long>());
         string name = block.TryGet<CubeBlockComponent>()?.Definition?.DebugNameShort ?? "Block";
         bool antenna = block.TryGet<Keen.Game2.Simulation.GameSystems.Antennas.AntennaComponent>() != null;
-        return new SocialBlock(_ids.GetOrAssign(block), SocialState.Clean(name, 100), TeamPermissions.OwnerOf(block), acl.Allow, acl.Deny, focus.Secure, antenna, acl.ShowTag);
+        return new SocialBlock(_ids.GetOrAssign(block), SocialState.Clean(name, 100), TeamPermissions.OwnerOf(block), acl.Allow, acl.Deny, focus.Secure, antenna, antenna && (Social?.IsTagged(block) ?? acl.ShowTag), lists);
     }
 }

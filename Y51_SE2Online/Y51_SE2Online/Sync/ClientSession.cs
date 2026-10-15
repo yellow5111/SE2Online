@@ -231,7 +231,7 @@ public sealed class ClientSession
 	public void Report(ClientPhase phase, string text)
 	{
 		string message = $"client: {phase}: {text}";
-		if (phase >= ClientPhase.Error)
+		if (phase == ClientPhase.Error)
 		{
 			_log.Error(message);
 		}

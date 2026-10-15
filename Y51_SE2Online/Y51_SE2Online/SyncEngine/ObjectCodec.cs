@@ -9,6 +9,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Keen.Game2.Simulation.GameSystems.BlockPlacement;
+using Keen.Game2.Simulation.GameSystems.Toolbars.Actions;
 using Keen.VRage.Core.Game.Systems;
 using Keen.VRage.DCS.Builders;
 using Keen.VRage.DCS.Components;
@@ -149,21 +150,26 @@ internal static class ObjectCodec
 		}
 		if (o is ObservableObject && !copyObservables)
 		{
-			if (sp.ObservableId == null)
-			{
-				fail = o.GetType().Name + " is an observable object (shared by replication pairing; this side does not name models)";
-				return WireValue.NullValue;
-			}
-			if (sp.ObservableId(o) is uint oid)
+			if (sp.ObservableId?.Invoke(o) is uint oid)
 			{
 				sp.Observed.Add(oid);
 				return WireValue.Observable(oid);
 			}
-			Func<object, bool>? wasReleased = sp.WasReleased;
-			fail = wasReleased != null && wasReleased(o)
-				? o.GetType().Name + " was already released by the host"
-				: o.GetType().Name + " is an observable model the other side cannot have (not replicated)";
-			return WireValue.NullValue;
+			// A toolbar action is a plain value (detail model type + member name) that derives from ObservableObject.
+			// The control panel creates it locally (no pairing id), so it travels by value (Keen-serialized below).
+			if (!(o is IToolbarAction && IsKeenSerializable(o.GetType())))
+			{
+				if (sp.ObservableId == null)
+				{
+					fail = o.GetType().Name + " is an observable object (shared by replication pairing; this side does not name models)";
+					return WireValue.NullValue;
+				}
+				Func<object, bool>? wasReleased = sp.WasReleased;
+				fail = wasReleased != null && wasReleased(o)
+					? o.GetType().Name + " was already released by the host"
+					: o.GetType().Name + " is an observable model the other side cannot have (not replicated)";
+				return WireValue.NullValue;
+			}
 		}
 		Type type = o.GetType();
 		if (o is IList observedList && o is INotifyCollectionChanged && sp.ListId?.Invoke(observedList) is uint listId)

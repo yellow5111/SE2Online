@@ -16,6 +16,8 @@ public sealed class OnlineSettings
     public bool AdvertiseChosen { get; set; }
     /// <summary>Asks se2-online.yellow51.dev for the newest release once per game start.</summary>
     public bool CheckForUpdates { get; set; } = true;
+    /// <summary>Plain -plugins: installs download, verify and install a newer release themselves, then offer a restart.</summary>
+    public bool AutoUpdate { get; set; } = true;
     public bool AllowDirectIp { get; set; } = true;
     public string BindAddress { get; set; } = "0.0.0.0";
     public int ListenPort { get; set; } = 7742;
@@ -78,6 +80,17 @@ public sealed class OnlineSettings
     public string EmoteKey { get; set; } = "N";
     /// <summary>Whether other players see this player's name tag (the suit antenna broadcast).</summary>
     public bool SuitBroadcast { get; set; } = true;
+    /// <summary>Hosting: players can take over grids by hacking a terminal or control block (Alt+H by default).</summary>
+    public bool Hacking { get; set; } = true;
+    /// <summary>Hosting: scales every hack's duration (0.1-10).</summary>
+    public double HackTimeMultiplier { get; set; } = 1;
+    /// <summary>Hosting: other players' grids can be hacked too (still only with PvP on and never inside safe zones).</summary>
+    public bool AllowHackingPlayerGrids { get; set; } = true;
+    /// <summary>Hosting: how long an owner's remote lockdown freezes a hack; 0 turns lockdown off.</summary>
+    public int HackLockdownSeconds { get; set; } = 60;
+    /// <summary>Hosting: wait before the same grid can be locked down again.</summary>
+    public int HackLockdownCooldownSeconds { get; set; } = 300;
+    public string HackKey { get; set; } = "Alt+H";
 
     public string Validate()
     {
@@ -102,11 +115,12 @@ public sealed class OnlineSettings
         if (VoiceVolume < 0 || VoiceVolume > 200) return "Voice volume must be between 0 and 200 percent.";
         if (Sync.RespawnShips.Validate(RespawnShips, RespawnShipCooldownMinutes) is { } ships) return ships;
         if (MutedVoices == null || MutedVoices.Count > 200) return "Too many muted players.";
+        if (HackRules.Validate(this) is string hacking) return hacking;
         if (InterpolationMs < 0 || InterpolationMs > 250) return "Motion smoothing must be between 0 and 250 milliseconds.";
         if (StateBudgetKiB < 32 || StateBudgetKiB > 4096) return "Update bandwidth must be between 32 and 4096 KiB/s.";
         if (PlayerName == null || PlayerName.Trim().Length > 32 || PlayerName.IndexOfAny(new[] { '\r', '\n', '\0' }) >= 0) return "Player name must be at most 32 characters on one line.";
         if (Password == null || Password.Length > 64 || Password.Any(char.IsControl)) return "Password must be at most 64 characters on one line.";
-        foreach (var (label, key) in new[] { ("Chat", ChatKey), ("Players", PlayersKey), ("Admin panel", AdminKey), ("Suit broadcast", BroadcastKey), ("Push to talk", VoiceKey), ("Emotes", EmoteKey) })
+        foreach (var (label, key) in new[] { ("Chat", ChatKey), ("Players", PlayersKey), ("Admin panel", AdminKey), ("Suit broadcast", BroadcastKey), ("Push to talk", VoiceKey), ("Emotes", EmoteKey), ("Hack", HackKey) })
             if (!KeyBinding.TryParse(key, out _)) return label + " key binding '" + key + "' is not a valid key.";
         return null;
     }

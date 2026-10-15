@@ -26,7 +26,7 @@ namespace Y51_SE2Online.SyncEngine;
 
 internal sealed partial class HostWorld
 {
-    private sealed record SpawnTarget(SpawnOption Option, Entity? Point, RespawnShip? Ship = null);
+    private sealed record SpawnTarget(SpawnOption Option, Entity? Point, RespawnShip? Ship = null, Guid Planet = default);
 
     private const long ShipSpawnTimeoutMs = 30_000;
     private readonly ConcurrentDictionary<long, long> _shipReadyAt = new();
@@ -67,7 +67,7 @@ internal sealed partial class HostWorld
             how = "the world spawn in a suit";
             break;
         case SpawnKind.Ship when target.Ship != null:
-            if (!StartShip(session, j, respawn, target.Ship)) { SendSpawnMenu(session, host, j, identity, hostCharacter, $"The {target.Ship.Name} could not be spawned. Choose another spawn."); return false; }
+            if (!StartShipOrLander(session, j, respawn, target)) { SendSpawnMenu(session, host, j, identity, hostCharacter, $"The {target.Ship.Name} could not be spawned. Choose another spawn."); return false; }
             _log.Info($"host world sync: spawning a respawn ship ({target.Ship.Name}) for ClientId {j.ClientId} '{j.Name}'");
             return false;
         default:
@@ -135,12 +135,13 @@ internal sealed partial class HostWorld
         targets.AddRange(medbays.OrderByDescending(m => m.Home).ThenBy(m => m.Target.Option.Kind).ThenBy(m => m.Distance).Take(40).Select(m => m.Target));
         targets.Add(new(new SpawnOption(SpawnKind.Suit, "Space suit", "Spawn in your suit at the world spawn", true), null));
         long wait = _shipReadyAt.TryGetValue(me, out long ready) ? ready - MpClock.NowMs() : 0;
-        foreach (var ship in RespawnShips.Offered(ShipSettings?.RespawnShips))
+        foreach (var ship in RespawnShips.Offered(ShipSettings?.RespawnShips).Where(s => s.Space))
         {
             bool hasShip = Singleton<DefinitionManager>.Instance.TryGetDefinition(ship.Prefab, out PrefabDefinition _);
             string detail = !hasShip ? "Not available in this game version" : wait > 0 ? $"Available again in {(wait + 59_999) / 60_000} min" : ship.Detail + ", fuelled and yours to keep";
             targets.Add(new(new SpawnOption(SpawnKind.Ship, "Respawn ship: " + ship.Name, detail, hasShip && wait <= 0), null, ship));
         }
+        AddPlanetShips(session, targets, wait);
         j.Menu = targets;
         host.SendSpawnMenu(j.Peer, new SpawnMenu(targets.Select(t => t.Option).ToArray(), j.Respawn, message));
         _log.Info($"host world sync: sent ClientId {j.ClientId} '{j.Name}' {targets.Count} spawn choices ({medbays.Count} medbays){(message.Length > 0 ? ": " + message : "")}");
@@ -170,7 +171,7 @@ internal sealed partial class HostWorld
         j.ShipRoots = null;
         j.ShipDeadline = MpClock.NowMs() + ShipSpawnTimeoutMs;
         j.ShipPending = true;
-        SpawnShip(session, encounters, prefab, new WorldTransform(spawn.Position + up * 150 + side * 150, spawn.Orientation), j);
+        SpawnShip(session, encounters, prefab, new WorldTransform(OpenSpace(session, spawn.Position + up * 150 + side * 150), spawn.Orientation), j);
         return true;
     }
 
@@ -290,6 +291,7 @@ internal sealed partial class HostWorld
             }
         }
         catch (Exception ex) { _log.Warn("host world sync: taking over the respawn ship failed: " + ex); }
+        ship = PlaceOnPlanet(session, j, ship, out var beside);
         var main = ship.Where(e => e.TryGet<CubeGridComponent>() != null && e.Data.HasTransform()).FirstOrDefault();
         var respawn = session.TryGet<IRespawn>() as RespawnSessionComponent;
         if (main == null || respawn == null)
@@ -311,7 +313,7 @@ internal sealed partial class HostWorld
         j.ShipSettleUntil = MpClock.NowMs() + 8000;
         var at = main.Data.GetWorldTransform();
         var up = WorldTransform.TransformDirection(new Vector3D(0, 1, 0), at);
-        var character = CreateAt(respawn, identity, new WorldTransform(at.Position + up * 12, at.Orientation));
+        var character = CreateAt(respawn, identity, beside ?? new WorldTransform(at.Position + up * 12, at.Orientation));
         if (character != null) _shipReadyAt[identity] = MpClock.NowMs() + ShipCooldownMs;
         Assign(host, j, character, identity, null, "a respawn ship (" + ship.Count + " entities)");
     }

@@ -1,7 +1,5 @@
 using System;
 using System.Diagnostics;
-using System.Net.Http;
-using System.Text.Json;
 using System.Threading.Tasks;
 using Keen.Game2.Client.UI.Library;
 using Keen.Game2.Client.UI.Library.Dialogs.OneOptionDialog;
@@ -29,18 +27,13 @@ internal static class UpdatePrompt
         string latest = Latest;
         if (!MpMenu.Settings.CheckForUpdates) return line;
         if (latest == null) return line + " - checking se2-online.yellow51.dev...";
+        if (AutoUpdateClient.Installed != null) return line + " - version " + AutoUpdateClient.Installed + " is installed; restart the game to use it";
         return VersionMismatch.IsNewer(latest, MpPlugin.Version)
             ? line + " - version " + latest + " is available on se2-online.yellow51.dev"
             : line + " - up to date (latest " + latest + ")";
     }
 
-    public static async Task<string> LatestAsync()
-    {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
-        http.DefaultRequestHeaders.UserAgent.ParseAdd("Y51_SE2Online/" + MpPlugin.Version);
-        using var json = JsonDocument.Parse(await http.GetStringAsync(VersionUrl));
-        return json.RootElement.TryGetProperty("version", out var version) ? version.GetString() : null;
-    }
+    public static async Task<string> LatestAsync() => (await AutoUpdate.FetchAsync(VersionUrl, "Y51_SE2Online/" + MpPlugin.Version)).Version;
 
     /// <summary>Checks once per game start; the dialog waits for the main menu.</summary>
     public static void Tick(SharedUIComponent shared, bool atMainMenu)
@@ -52,14 +45,18 @@ internal static class UpdatePrompt
             {
                 try
                 {
-                    string latest = await LatestAsync();
+                    var manifest = await AutoUpdate.FetchAsync(AutoUpdateClient.Url, "Y51_SE2Online/" + MpPlugin.Version);
+                    string latest = manifest.Version;
                     Latest = latest;
                     GameLog.Instance.Info($"update check: newest release {latest ?? "unknown"}, this game runs {MpPlugin.Version}");
-                    if (VersionMismatch.IsNewer(latest, MpPlugin.Version) && latest != MpMenu.Settings.SkippedUpdate) _available = latest;
+                    if (!VersionMismatch.IsNewer(latest, MpPlugin.Version) || latest == MpMenu.Settings.SkippedUpdate) return;
+                    if (AutoUpdateClient.Eligible && manifest.Client != null && await AutoUpdateClient.InstallAsync(manifest.Client)) return;
+                    _available = latest;
                 }
                 catch (Exception ex) { GameLog.Instance.Info("update check: " + ex.GetType().Name + ": " + ex.Message); }
             });
         }
+        AutoUpdateClient.Tick(shared, atMainMenu);
         string available = _available;
         if (available == null || shared == null || !atMainMenu) return;
         _available = null;
