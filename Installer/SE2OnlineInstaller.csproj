@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>SE2OnlineInstaller</AssemblyName>
+    <RootNamespace>SE2OnlineInstaller</RootNamespace>
+    <Version>1.0.0</Version>
+    <Product>Space Engineers 2 Online Installer</Product>
+    <Company>yellow51</Company>
+    <Copyright>yellow51. MIT License.</Copyright>
+    <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <BuiltInComInteropSupport>false</BuiltInComInteropSupport>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <!-- One self-contained exe, so there is exactly one file to sign and run. -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.3.10" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.10" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.10" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\icon.png" />
+    <!-- The plugin's own update check: same manifest, same SHA-256 and release-key signature check. -->
+    <Compile Include="..\Y51_SE2Online\Y51_SE2Online\Core\AutoUpdate.cs" Link="Shared\AutoUpdate.cs" />
+    <Compile Include="..\Y51_SE2Online\Y51_SE2Online\Core\VersionMismatch.cs" Link="Shared\VersionMismatch.cs" />
+  </ItemGroup>
+
+</Project>

@@ -58,7 +58,8 @@ public sealed class OnlineScreen : ScreenView
     private readonly TextBox _publicAddress = OnlineUi.Input("Optional public IP address:port", 100);
     private readonly OnlineToggle _advertise = new OnlineToggle("List this session in the public directory");
     private readonly OnlineToggle _directIp = new OnlineToggle("Allow connections by IP address");
-    private readonly OnlineToggle _waterSync = new OnlineToggle("Water sync (experimental)");
+    private readonly OnlineToggle _waterSync = new OnlineToggle("Water sync (experimental)", "Synchronizes water between players.",
+        "Performance heavy and uses extra bandwidth; not meant for full time use as water is not officially in the game yet!");
     private readonly OnlineToggle _friendsOnly = new OnlineToggle("Only Steam friends may join");
     private readonly OnlineToggle _team = new OnlineToggle("Keep existing grids shared when upgrading an older world");
     private readonly OnlineToggle _research = new OnlineToggle("Share research progression");
@@ -115,7 +116,7 @@ public sealed class OnlineScreen : ScreenView
             OnlineUi.Section("HOST A SESSION", OnlineUi.Text("Host your current world, or start hosting and then load or create a world."),
                 OnlineUi.Row(_host, _load, _create), OnlineUi.Field("Session name", _sessionName), OnlineUi.Field("Description", _description), OnlineUi.Field("Country", _country, "auto finds it from your IP, or a 2-letter code like US, GB, DE"),
                 OnlineUi.Field("Maximum players", _limit.Row, "2-32 players, including you"), OnlineUi.Field("Join password", _password, "Optional. Admins can join without it."), _friendsOnly, _advertise,
-                _waterSync, OnlineUi.Text("Experimental: sends debug-menu water to players. Costs bandwidth and performance; not meant for full-time use yet.", "SubtleNotice", 20)),
+                _waterSync),
             OnlineUi.Section("DIRECT IP CONNECTIONS", _directIp, OnlineUi.Field("Bind address", _bind, "0.0.0.0 listens on all IPv4 interfaces"),
                 OnlineUi.Field("Listen port", _port), OnlineUi.Field("Public address", _publicAddress, "Shown in the directory for direct connections"),
                 OnlineUi.Text("Remote players need a reachable IP address and the listen port open on your router and firewall.", "SubtleNotice", 22), _hostSave)));

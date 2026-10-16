@@ -51,6 +51,9 @@ internal static class ServerInfoUi
         };
         rows.AddRange((e.Tags ?? Array.Empty<string>()).Where(t => t is not ("Password" or "Whitelist")).Take(8).Select(t => new ServerInfoRow("Settings", "Setting", t)));
         if (!string.IsNullOrWhiteSpace(e.Description)) rows.Add(new ServerInfoRow("About", "Description", e.Description.Replace('\n', ' ')));
+        if (MpMenu.Ping(e) is { Length: > 0 } ping) rows.Insert(0, new ServerInfoRow("Connection", "Your ping", ping));
+        rows.Add(new ServerInfoRow("Mods", "Mods", ListingMod.Total(e.Mods)));
+        rows.AddRange((e.Mods ?? Array.Empty<ListingMod>()).Select(m => new ServerInfoRow("Mods", m.Name, m.Describe())));
         return rows.ToArray();
     }
 

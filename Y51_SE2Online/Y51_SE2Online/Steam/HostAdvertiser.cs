@@ -19,6 +19,12 @@ internal sealed class HostAdvertiser
 
 	private string? _current;
 
+	public const string PingKey = "y51online_ping";
+
+	private string _ping = "";
+
+	private long _nextPingMs;
+
 	private bool _failed;
 
 	public HostAdvertiser(IMpLog log, ulong me, int virtualPort, ushort syncVersion, string pluginVersion)
@@ -46,6 +52,8 @@ internal sealed class HostAdvertiser
 					Set("y51online_host", null);
 					Set("connect", null);
 					Set("status", null);
+					Set(PingKey, null);
+					_ping = "";
 					_log.Info("steam presence: no world loaded: 'Join Game' removed from your Steam profile");
 				}
 				else
@@ -55,6 +63,14 @@ internal sealed class HostAdvertiser
 					_log.Info($"steam presence: advertising world '{worldName}' to Steam friends{(flag ? "" : " (Steam refused a key, see above)")}: {"y51online_host"}='{text}', connect='{value}'. Friends join with Join-Friend.bat, -y51online:join:friends, " + "or 'Join Game' in the Steam friends list (needs -plugins:... in their SE2 Steam launch options)");
 				}
 				_current = text;
+			}
+			// Steam measures the location a few seconds after start and refines it later; friends estimate their ping from it.
+			long now = MpClock.NowMs();
+			if (text != null && now >= _nextPingMs)
+			{
+				_nextPingMs = now + 30000;
+				string ping = SteamPing.ForPresence(SteamPing.Local(server: false));
+				if (ping.Length > 0 && ping != _ping && Set(PingKey, ping)) _ping = ping;
 			}
 		}
 		catch (Exception ex)
@@ -75,6 +91,8 @@ internal sealed class HostAdvertiser
 			Set("y51online_host", null);
 			Set("connect", null);
 			Set("status", null);
+			Set(PingKey, null);
+			_ping = "";
 			_current = null;
 			_log.Info("steam presence: removed (" + why + ")");
 		}

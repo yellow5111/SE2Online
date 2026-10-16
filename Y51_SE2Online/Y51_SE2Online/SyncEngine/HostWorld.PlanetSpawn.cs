@@ -210,8 +210,9 @@ internal sealed partial class HostWorld
     }
 
     /// <summary>
-    /// After a lander spawned (wherever its prefab put it): keeps only the ship's grids, stands it upright on the chosen site
-    /// with its bottom just above the highest ground under it, and returns where the player stands beside it.
+    /// After a lander spawned (wherever its prefab put it): keeps only the ship's grids, stands it upright over the chosen site
+    /// with its bottom <see cref="RespawnShips.LanderHoverMeters"/> above the highest ground under it (just above it when it
+    /// has no cockpit for the player), and returns where the player stands beside it if it cannot sit in it.
     /// </summary>
     private List<Entity> PlaceOnPlanet(Session session, Joiner j, List<Entity> released, out WorldTransform? beside)
     {
@@ -250,7 +251,8 @@ internal sealed partial class HostWorld
             highest = Math.Max(highest, SurfaceRadius(p, Vector3.Normalize(dir + (a * (float)Math.Cos(s) + b * (float)Math.Sin(s)) * (float)(reach / groundRadius))));
         }
         // The box centre (not the grid origin, which can sit far off the hull) goes over the site.
-        var position = site.Ground - (Vector3D)Vector3.Transform(new Vector3(box.Center.X, 0, box.Center.Z), orientation) + site.Up * (highest - groundRadius + 1.5 - box.Min.Y);
+        bool piloted = PilotSeat(keep) != null;
+        var position = site.Ground - (Vector3D)Vector3.Transform(new Vector3(box.Center.X, 0, box.Center.Z), orientation) + site.Up * RespawnShips.LanderOriginHeight(highest - groundRadius, box.Min.Y, piloted);
         var rotation = orientation * Quaternion.Conjugate(old.Orientation);
         var pins = new List<(Entity Grid, WorldTransform At)>();
         foreach (var grid in keep)
@@ -276,7 +278,7 @@ internal sealed partial class HostWorld
         double standRadius = SurfaceRadius(p, standDir);
         var stand = WorldTransform.Transform((Vector3D)(standDir * (float)(standRadius > 0 ? standRadius + 1.2 : groundRadius + 1.2)), frame);
         beside = new WorldTransform(stand, Quaternion.CreateFromForwardUp(-side, up));
-        _log.Info($"host world sync: lander {site.Ship.Name} for ClientId {j.ClientId} placed on {p.Name}: {keep.Count} grids, footprint {footprint:0} m, ground rise {highest - groundRadius:0.0} m, box {box.Min} to {box.Max}");
+        _log.Info($"host world sync: lander {site.Ship.Name} for ClientId {j.ClientId} placed on {p.Name}: {keep.Count} grids, footprint {footprint:0} m, ground rise {highest - groundRadius:0.0} m, {(piloted ? $"hovering {RespawnShips.LanderHoverMeters:0} m up for its pilot" : "no cockpit, resting on its gear")}, box {box.Min} to {box.Max}");
         return keep;
     }
 
@@ -320,8 +322,9 @@ internal sealed partial class HostWorld
 
     private const int PinStaticTicks = 5, PinHeldTicks = 30;
 
-    // Once dynamic, settling onto its gear (it is placed 1.5 m up) moves it a few metres and is left to the physics;
-    // pulling it back up every tick shook it into the ground and broke blocks off. A lost move is km.
+    // Once dynamic, a lander sags a little before its dampeners hold it (or settles onto its gear when it has no pilot);
+    // that is left to the physics: pulling it back every tick shook it into the ground and broke blocks off. A lost
+    // move is km. Stays well above RespawnShips.LanderHoverMeters.
     private const double PinSlackMeters = 50;
 
 #if !PULSAR

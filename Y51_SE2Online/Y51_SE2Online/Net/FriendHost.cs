@@ -1,6 +1,6 @@
 namespace Y51_SE2Online.Net;
 
-public sealed record FriendHost(ulong SteamId, string Name, HostPresence? Presence, string? RawPresence = null)
+public sealed record FriendHost(ulong SteamId, string Name, HostPresence? Presence, string? RawPresence = null, string PingLocation = "")
 {
 	public bool Hosting => Presence != null;
 

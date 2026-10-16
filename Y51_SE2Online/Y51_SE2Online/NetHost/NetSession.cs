@@ -594,6 +594,7 @@ internal sealed class NetSession
 				Description = _o.Description, SteamId = _localIdentity.ToString(System.Globalization.CultureInfo.InvariantCulture), Address = _o.PublicAddress,
 				VirtualPort = _o.VirtualPort, Players = (_host?.Players().Count(p => p.Peer.HasValue) ?? 0) + (_o.Dedicated ? 0 : 1), MaxPlayers = _o.MaxPlayers,
 				PluginVersion = _pluginVersion, GameVersion = _gameVersion, SyncVersion = SyncProtocol.Version, FriendsOnly = _o.FriendsOnly, Country = _o.Country,
+				PingLocation = SteamPing.Local(_o.Dedicated), Mods = world.ListingMods(),
 				Tags = _host != null ? ServerInfoUi.ListingTags(_host) : new[] { string.IsNullOrEmpty(_o.Password) ? null : "Password" }.Where(t => t != null).ToArray()
 			};
 		}

@@ -14,7 +14,7 @@ public sealed record ServerInfoMessage(ServerInfoRow[] Rows);
 
 public static class ServerInfo
 {
-	public const int MaxRows = 80;
+	public const int MaxRows = 200;
 
 	/// <summary>Plain text grouped by section; every value is capped and stripped of control characters (it may come from another machine).</summary>
 	public static string Text(IEnumerable<ServerInfoRow> rows)

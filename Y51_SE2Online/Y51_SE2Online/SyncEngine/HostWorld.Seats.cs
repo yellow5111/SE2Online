@@ -4,6 +4,7 @@ using System.Linq;
 using Keen.Game2.Simulation.GameSystems.Encounters;
 using Keen.Game2.Simulation.WorldObjects.CubeBlocks;
 using Keen.Game2.Simulation.WorldObjects.CubeBlocks.Pilotable;
+using Keen.Game2.Simulation.WorldObjects.CubeGrids;
 using Keen.VRage.Core;
 using Keen.VRage.Core.Game.Components;
 using Keen.VRage.Core.Game.Data;
@@ -71,6 +72,45 @@ internal sealed partial class HostWorld
         _log.Info($"host world sync: ClientId {j.ClientId} '{j.Name}' stood up from {seat.Entity.GetComposition()?.DebugNameShort}: {why}");
     }
 
+    // SeatComponent.SetPilotStory's server half; every client is told. The seat keeps the pilot's offset from it as the
+    // spot it stands up at, so the pilot is put in front of the seat first.
+    private static void Sit(SeatComponent seat, Entity body)
+    {
+        var block = seat.Entity.Data.GetWorldTransform();
+        body.Data.Set(new WorldTransform(block.Position + (Vector3D)block.Orientation.GetForward() * 1.5, block.Orientation));
+        SeatRestore.SetPilotInternal(seat, body);
+        seat.BroadcastSetPilot(body);
+    }
+
+    /// <summary>A respawn ship's free working cockpit, on its first (main) grid first.</summary>
+    private static SeatComponent? PilotSeat(System.Collections.Generic.IEnumerable<Entity> grids)
+    {
+        foreach (var grid in grids)
+        {
+            if (EngineCodec.IsDead(grid) || grid.TryGet<CubeGridComponent>() is not { } cube) continue;
+            SeatComponent? found = null;
+            cube.VisitAllBlocksWithComponent((SeatComponent s) => { if (found == null && s.IsFunctional && s.Pilot == null && s.Entity.TryGet<CockpitComponent>() != null) found = s; }, includeSubgrids: false);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    /// <summary>Server thread, the tick after a respawn ship's pilot was created: it sits down in the ship's cockpit.</summary>
+    private void SeatShipPilot(Joiner j, Entity seatEntity)
+    {
+        var body = j.Character;
+        var seat = EngineCodec.IsDead(seatEntity) ? null : seatEntity.TryGet<SeatComponent>();
+        if (body == null || EngineCodec.IsDead(body) || seat == null || !seat.CanSeat(body) || body.AsInterface<ISeatable>()?.CurrentSeat != null)
+        {
+            _log.Info($"host world sync: ClientId {j.ClientId} '{j.Name}' stays beside its respawn ship (its cockpit is taken, broken or gone)");
+            return;
+        }
+        Sit(seat, body);
+        // A client that cannot seat it reports NotSeated after a few seconds and is stood up instead of left stuck.
+        j.RestoredSeat = seatEntity;
+        _log.Info($"host world sync: ClientId {j.ClientId} '{j.Name}' seated in its respawn ship's {seatEntity.GetComposition()?.DebugNameShort}");
+    }
+
 #if !PULSAR
     // SE2's Ransacked Station space encounter: the nearest vanilla content with Seat, Toilet and Bed blocks.
     private static readonly Guid SeatProbePrefab = new("7ed22360-5637-4fdd-9903-672b58bb17e0");
@@ -98,10 +138,7 @@ internal sealed partial class HostWorld
                     .Select(e => e.Get<SeatComponent>()).Where(s => s.CanSeat(body)).OrderBy(s => Vector3D.Distance(s.Entity.Data.GetWorldTransform().Position, at)).FirstOrDefault();
                 if (seat == null) return "no free seat";
                 _rigSeats[key] = seat.Entity;
-                var block = seat.Entity.Data.GetWorldTransform();
-                body.Data.Set(new WorldTransform(block.Position + (Vector3D)block.Orientation.GetForward() * 1.5, block.Orientation));
-                SeatRestore.SetPilotInternal(seat, body);
-                seat.BroadcastSetPilot(body);
+                Sit(seat, body);
                 return $"seated in {seat.Entity.GetComposition()?.DebugNameShort}";
             }
             case "tune":

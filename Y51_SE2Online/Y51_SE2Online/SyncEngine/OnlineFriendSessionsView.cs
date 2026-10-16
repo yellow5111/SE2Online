@@ -24,11 +24,11 @@ internal sealed class OnlineFriendSessionsView : UserControl
     private readonly Button _join;
     private FriendHost[] _last;
     private string _query;
-    private const string Columns = "*,*,320";
+    private const string Columns = "*,*,140,320";
 
     public OnlineFriendSessionsView()
     {
-        _hosts.ItemTemplate = new FuncDataTemplate<FriendHost>((friend, _) => friend == null ? null : OnlineUi.ListCells(Columns, friend.Name, friend.Presence?.WorldName ?? "", Compatible(friend) ? "Multiplayer build matches" : "Version " + (friend.Presence?.PluginVersion ?? "?")));
+        _hosts.ItemTemplate = new FuncDataTemplate<FriendHost>((friend, _) => friend == null ? null : OnlineUi.ListCells(Columns, friend.Name, friend.Presence?.WorldName ?? "", MpMenu.Ping(friend) is { Length: > 0 } ping ? ping : "-", Compatible(friend) ? "Multiplayer build matches" : "Version " + (friend.Presence?.PluginVersion ?? "?")));
         _hosts.SelectionChanged += (_, _) => Detail();
         _hosts.DoubleTapped += (_, _) => Join();
         _search.Classes.Add("SearchBox");
@@ -40,7 +40,7 @@ internal sealed class OnlineFriendSessionsView : UserControl
         var roster = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*,Auto") };
         roster.Children.Add(toolbar);
         _count.Margin = new Thickness(0, 14); Grid.SetRow(_count, 1); roster.Children.Add(_count);
-        var headers = OnlineUi.Cells(Columns, "STEAM FRIEND", "WORLD", "MULTIPLAYER BUILD"); Grid.SetRow(headers, 2); roster.Children.Add(headers);
+        var headers = OnlineUi.Cells(Columns, "STEAM FRIEND", "WORLD", "PING", "MULTIPLAYER BUILD"); Grid.SetRow(headers, 2); roster.Children.Add(headers);
         Grid.SetRow(_hosts, 3); roster.Children.Add(_hosts);
         _empty.HorizontalAlignment = HorizontalAlignment.Center; _empty.VerticalAlignment = VerticalAlignment.Center; _empty.IsHitTestVisible = false;
         Grid.SetRow(_empty, 3); roster.Children.Add(_empty);
@@ -73,7 +73,7 @@ internal sealed class OnlineFriendSessionsView : UserControl
         _join.IsEnabled = !MpMenu.Busy && friend != null && Compatible(friend);
         _title.Text = friend?.Name ?? "Select a friend";
         _world.Text = friend?.Presence.WorldName ?? "Your friends' hosted worlds appear in this list.";
-        _build.Text = friend == null ? "" : "Y51_SE2Online " + friend.Presence.PluginVersion + (friend.Presence.PluginVersion != MpPlugin.Version ? " (you have " + MpPlugin.Version + ")" : "") + "\nSteam host: " + friend.SteamId;
+        _build.Text = friend == null ? "" : "Y51_SE2Online " + friend.Presence.PluginVersion + (friend.Presence.PluginVersion != MpPlugin.Version ? " (you have " + MpPlugin.Version + ")" : "") + "\nSteam host: " + friend.SteamId + "\nPing: " + (MpMenu.Ping(friend) is { Length: > 0 } ping ? ping + " (Steam estimate)" : "Unknown");
         _reason.Text = friend == null ? "Select a friend to join their world." : Compatible(friend) ? "Multiplayer build matches. Ready to connect." : VersionMismatch.Explain(friend.Presence?.PluginVersion ?? "?", MpPlugin.Version);
     }
 }

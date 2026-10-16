@@ -188,7 +188,13 @@ public sealed partial class HostSession
 				if (_o.Access.IsAdmin(account)) return "Only the host can demote another admin.";
 			}
 			result = _o.Access.SetAdmin(account, name, r.Action == AdminAction.Promote); break;
-		case AdminAction.WhitelistAdd: result = _o.Access.SetWhitelisted(account, name, true); break;
+		case AdminAction.WhitelistAdd:
+			if (KnownName(r.Target) == null)
+			{
+				if (!AccessList.IsPlayerSteamId(account)) return "That is not a Steam player's SteamID64.";
+				name = AccessList.Clean(r.Name, 64);
+			}
+			result = _o.Access.SetWhitelisted(account, name, true); break;
 		case AdminAction.WhitelistRemove: result = _o.Access.SetWhitelisted(account, name, false); break;
 		case AdminAction.WhitelistOnly: result = _o.Access.SetWhitelistOnly(r.Value); break;
 		case AdminAction.Pvp:
@@ -231,7 +237,9 @@ public sealed partial class HostSession
 		return result;
 	}
 
-	private string NameOf(ulong steamId)
+	private string NameOf(ulong steamId) => KnownName(steamId) ?? steamId.ToString();
+
+	private string KnownName(ulong steamId)
 	{
 		lock (_sync)
 		{
@@ -239,7 +247,7 @@ public sealed partial class HostSession
 			if (p != null) return p.Name;
 		}
 		var (bans, whitelist, admins) = _o.Access.Copy(0);
-		return bans.FirstOrDefault(b => b.SteamId == steamId)?.Name ?? whitelist.Concat(admins).FirstOrDefault(a => a.SteamId == steamId)?.Name ?? steamId.ToString();
+		return bans.FirstOrDefault(b => b.SteamId == steamId)?.Name ?? whitelist.Concat(admins).FirstOrDefault(a => a.SteamId == steamId)?.Name;
 	}
 
 	/// <summary>Removes every game instance of a Steam account.</summary>

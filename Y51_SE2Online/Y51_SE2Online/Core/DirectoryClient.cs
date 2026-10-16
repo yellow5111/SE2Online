@@ -21,6 +21,8 @@ public sealed class DirectoryClient : IDisposable
 {
     private readonly HttpClient _http;
     private readonly Uri _base;
+    // Directories before 0.15.3 refuse unknown fields; once one does, the ping location and mod list are left out.
+    private bool _extras = true;
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true };
     public DirectoryClient(string service, HttpMessageHandler handler = null)
     {
@@ -71,8 +73,16 @@ public sealed class DirectoryClient : IDisposable
         }, Json)!.AsObject();
         // Sent only when configured: the directory locates "auto" servers itself, and directories older than 0.15.2 refuse unknown fields.
         if (Countries.IsCode(listing.Country)) body["country"] = listing.Country;
+        bool extras = _extras && (listing.PingLocation.Length > 0 || listing.Mods.Length > 0);
+        if (extras && listing.PingLocation.Length > 0) body["pingLocation"] = listing.PingLocation;
+        if (extras && listing.Mods.Length > 0) body["mods"] = JsonSerializer.SerializeToNode(listing.Mods, Json);
         request.Content = new StringContent(body.ToJsonString(Json), Encoding.UTF8, "application/json");
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellation).ConfigureAwait(false);
+        if (extras && response.StatusCode == HttpStatusCode.BadRequest)
+        {
+            _extras = false;
+            return await PublishAsync(listing, lease, cancellation).ConfigureAwait(false);
+        }
         if (lease != null && response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Unauthorized)
             return await PublishAsync(listing, null, cancellation).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();

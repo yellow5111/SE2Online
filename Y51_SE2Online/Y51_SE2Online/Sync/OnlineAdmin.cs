@@ -202,11 +202,24 @@ public sealed class AccessList
         lock (_sync)
         {
             bool has = Whitelist.Any(a => a.SteamId == id);
-            if (has == listed) return listed ? "Already whitelisted." : "Not on the whitelist.";
+            if (has == listed) return listed ? $"{Display(name, id)} is already on the whitelist." : "Not on the whitelist.";
             if (listed) Whitelist.Add(new AccessEntry(id, Clean(name, 64))); else Whitelist.RemoveAll(a => a.SteamId == id);
             Save();
         }
         return listed ? $"{Display(name, id)} added to the whitelist." : $"{Display(name, id)} removed from the whitelist.";
+    }
+
+    /// <summary>A Steam player account: public universe, individual type, desktop instance, nonzero account.</summary>
+    public static bool IsPlayerSteamId(ulong id) => id >> 32 == 0x0110_0001 && (uint)id != 0;
+
+    /// <summary>Parses a SteamID64 or a steamcommunity.com/profiles/ link into a player account id.</summary>
+    public static bool TryParsePlayerId(string text, out ulong id)
+    {
+        const string profiles = "steamcommunity.com/profiles/";
+        string s = (text ?? "").Trim();
+        int at = s.IndexOf(profiles, StringComparison.OrdinalIgnoreCase);
+        if (at >= 0) s = s.Substring(at + profiles.Length).Split('/', '?', '#')[0];
+        return ulong.TryParse(s, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out id) && IsPlayerSteamId(id);
     }
 
     public string SetWhitelistOnly(bool on)

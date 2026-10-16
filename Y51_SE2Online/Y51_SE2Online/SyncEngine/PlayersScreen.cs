@@ -7,6 +7,7 @@ using Avalonia.Layout;
 using Avalonia.Threading;
 using Avalonia.Styling;
 using Keen.VRage.UI.Screens;
+using Steamworks;
 using Y51_SE2Online.Core;
 using Y51_SE2Online.Net;
 using Y51_SE2Online.NetHost;
@@ -46,9 +47,11 @@ public sealed class PlayersScreen : ScreenView
     private readonly TextBlock _moderationNote = OnlineUi.Text("", "SubtleNotice", 22);
     private readonly TextBlock _accessNote = OnlineUi.Text("", "SubtleNotice", 22);
     private readonly TextBox _reason = OnlineUi.Input("Reason (shown to the player)", 200);
+    private readonly TextBox _addId = OnlineUi.Input("SteamID64 or steamcommunity.com/profiles/ link", 120);
+    private readonly TextBlock _addNote = OnlineUi.Text("", "SubtleNotice", 22);
     private readonly ComboBox _duration = new() { ItemsSource = Durations, SelectedIndex = 0, MinHeight = 48, MinWidth = 260, FontSize = 24 };
     private readonly OnlineToggle _whitelistOnly = new("Only whitelisted players and admins may join");
-    private readonly Button _kick, _ban, _admin, _whitelistButton, _unban, _unlist, _invite, _refreshFriends;
+    private readonly Button _kick, _ban, _admin, _whitelistButton, _unban, _unlist, _addWhitelist, _invite, _refreshFriends;
     private readonly Button[] _tabs;
     private readonly Control[] _pages;
     private readonly ContentControl _page = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
@@ -56,6 +59,7 @@ public sealed class PlayersScreen : ScreenView
     private bool _closed, _syncingToggle;
     private FriendHost[] _lastFriends;
     private string _signature, _accessSignature;
+    private (ulong Id, long UntilMs)? _lookup;
     private AdminState _state = new();
 
     public PlayersScreen()
@@ -71,6 +75,8 @@ public sealed class PlayersScreen : ScreenView
         _whitelistButton = OnlineUi.Button("Whitelist", () => { if (Selected is { } p) MpMenu.Admin(new AdminRequest(Listed(p.SteamId) ? AdminAction.WhitelistRemove : AdminAction.WhitelistAdd, p.SteamId)); }, "TogglePlayerWhitelist");
         _unban = OnlineUi.Button("Remove ban", () => { if (_bans.SelectedItem is BanRow b) MpMenu.Admin(new AdminRequest(AdminAction.Unban, b.Ban.SteamId)); }, "UnbanPlayer");
         _unlist = OnlineUi.Button("Remove from whitelist", () => { if (_whitelist.SelectedItem is AccessEntry w) MpMenu.Admin(new AdminRequest(AdminAction.WhitelistRemove, w.SteamId)); }, "UnlistPlayer");
+        _addWhitelist = OnlineUi.Button("Add to whitelist", AddById, "WhitelistAddById");
+        _addId.MinWidth = 520;
         _invite = OnlineUi.Button("Invite selected friend", () => { if (_friends.SelectedItem is FriendHost friend) MpMenu.Invite(friend.SteamId); }, "InviteFriend", true);
         _refreshFriends = OnlineUi.Button("Refresh friends", MpMenu.RefreshFriends, "RefreshInviteFriends");
         _whitelistOnly.IsCheckedChanged += (_, _) => { if (!_syncingToggle) MpMenu.Admin(new AdminRequest(AdminAction.WhitelistOnly, Value: _whitelistOnly.IsChecked)); };
@@ -89,12 +95,13 @@ public sealed class PlayersScreen : ScreenView
         var moderation = OnlineUi.Stack(OnlineUi.Text("MODERATION", "SubTitle", 30), _selected, _reason, OnlineUi.Row(OnlineUi.Text("Ban length", "SubTitle"), _duration),
             OnlineUi.Row(_kick, _ban), OnlineUi.Row(_admin, _whitelistButton), _moderationNote);
         moderation.Spacing = 14;
-        var banGrid = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*,Auto,Auto,Auto,*,Auto,Auto") };
+        var banGrid = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*,Auto,Auto,Auto,*,Auto,Auto,Auto") };
         void Add(Control c, int row) { Grid.SetRow(c, row); banGrid.Children.Add(c); }
         Add(_whitelistOnly, 0); Add(_accessNote, 1);
         Add(OnlineUi.Cells("*,190,*", "BANNED", "REMAINING", "REASON"), 2); Add(_bans, 3); Add(_unban, 4);
         var whitelistTitle = OnlineUi.Text("WHITELIST", "SubTitle", 26); whitelistTitle.Margin = new Thickness(0, 16, 0, 0);
         Add(whitelistTitle, 5); Add(OnlineUi.Cells("*,300", "PLAYER", "STEAMID"), 6); Add(_whitelist, 7); Add(_unlist, 8);
+        Add(OnlineUi.Row(_addId, _addWhitelist), 9); Add(_addNote, 10);
         var friends = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto,Auto") };
         friends.Children.Add(OnlineUi.Row(OnlineUi.Text("INVITE FRIENDS", "SubTitle", 30), _refreshFriends));
         var friendHeaders = OnlineUi.Cells("*,230", "FRIEND", "STATUS"); Grid.SetRow(friendHeaders, 1); friends.Children.Add(friendHeaders);
@@ -127,6 +134,41 @@ public sealed class PlayersScreen : ScreenView
         _page.Content = _pages[index];
         for (int i = 0; i < _tabs.Length; i++) { if (i == index) _tabs[i].Classes.Add("Selected"); else _tabs[i].Classes.Remove("Selected"); }
         RefreshControls();
+    }
+
+    private void AddById()
+    {
+        if (!AccessList.TryParsePlayerId(_addId.Text, out ulong id)) { _addNote.Text = "Enter a player's SteamID64 (17 digits starting 7656119) or a steamcommunity.com/profiles/ link."; return; }
+        if (Listed(id)) { _addNote.Text = Display(_state.Whitelist.First(w => w.SteamId == id).Name, id) + " is already on the whitelist."; return; }
+        _lookup = (id, MpClock.NowMs() + 3000);
+        _addNote.Text = "Looking up the Steam name...";
+        SendLookup();
+    }
+
+    // Steam fills a stranger's persona name asynchronously; wait briefly so the entry gets a name, not just the id.
+    private void SendLookup()
+    {
+        if (_lookup is not { } l) return;
+        string name = _state.Players.FirstOrDefault(p => p.SteamId == l.Id)?.Name;
+        if (name == null && !SteamName(l.Id, out name) && MpClock.NowMs() < l.UntilMs) return;
+        _lookup = null;
+        MpMenu.Admin(new AdminRequest(AdminAction.WhitelistAdd, l.Id, Name: name ?? ""));
+        _addId.Text = ""; _addNote.Text = "";
+    }
+
+    private static bool SteamName(ulong id, out string name)
+    {
+        name = null;
+        if (!MpPlugin.SteamAvailable) return true;
+        try
+        {
+            var steamId = new CSteamID(id);
+            if (SteamFriends.RequestUserInformation(steamId, true)) return false;
+            string persona = SteamFriends.GetFriendPersonaName(steamId);
+            if (!string.IsNullOrWhiteSpace(persona) && persona != "[unknown]") name = persona;
+        }
+        catch (Exception ex) { GameLog.Instance.WarnOnce("whitelist-persona", "players screen: Steam name lookup failed: " + ex.Message); }
+        return true;
     }
 
     private void Moderate(AdminAction action)
@@ -183,6 +225,7 @@ public sealed class PlayersScreen : ScreenView
             _bans.ItemsSource = bans; _bans.SelectedItem = bans.FirstOrDefault(b => b.Ban.SteamId == ban);
             _whitelist.ItemsSource = _state.Whitelist; _whitelist.SelectedItem = _state.Whitelist.FirstOrDefault(w => w.SteamId == listed);
         }
+        SendLookup();
         _syncingToggle = true; _whitelistOnly.IsChecked = _state.WhitelistOnly; _syncingToggle = false;
         _accessNote.Text = (_state.HasPassword ? "This server is password protected." : "No join password is set.") + " Set the password in Multiplayer > Host" + (_state.Dedicated ? " (server.json Network.Password on dedicated servers)." : ".");
         if (!ReferenceEquals(_lastFriends, MpMenu.Friends))
@@ -213,6 +256,8 @@ public sealed class PlayersScreen : ScreenView
         _whitelistOnly.IsEnabled = admin && !busy;
         _unban.IsEnabled = admin && !busy && _bans.SelectedItem is BanRow;
         _unlist.IsEnabled = admin && !busy && _whitelist.SelectedItem is AccessEntry;
+        _addId.IsEnabled = admin;
+        _addWhitelist.IsEnabled = admin && !busy && _lookup == null;
         _invite.IsEnabled = !busy && hosting && NetSession.Current?.IsDedicated != true && MpPlugin.SteamAvailable && MpPlugin.Controller?.Current?.HostIp == null && _friends.SelectedItem is FriendHost;
         _selected.Text = p == null ? "Select a player in the roster." : p.Name + "  /  " + RoleText(p.Role) + (p.SteamId != 0 ? "  /  " + p.SteamId : "");
         _moderationNote.Text = !AdminAccess.InSession ? "Moderation is available in a multiplayer session."

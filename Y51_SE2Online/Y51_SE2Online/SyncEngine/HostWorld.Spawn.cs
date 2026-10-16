@@ -31,6 +31,7 @@ internal sealed partial class HostWorld
     private const long ShipSpawnTimeoutMs = 30_000;
     private readonly ConcurrentDictionary<long, long> _shipReadyAt = new();
     private readonly ConcurrentDictionary<ushort, RespawnShip> _shipChosen = new();
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<Joiner, Entity> _shipSeats = new();
 
     private static OnlineSettings? ShipSettings => Dedicated.DedicatedRuntime.Config?.Network ?? (Dedicated.DedicatedRuntime.Headless ? null : MpMenu.Settings);
 
@@ -268,6 +269,12 @@ internal sealed partial class HostWorld
     {
         if (j.ShipSettle is { } settling)
         {
+            // A tick after the pilot was made, so every client has it before it is told it sits down.
+            if (_shipSeats.TryGetValue(j, out var seat))
+            {
+                _shipSeats.Remove(j);
+                SeatShipPilot(j, seat);
+            }
             Settle(settling);
             bool done = MpClock.NowMs() > j.ShipSettleUntil;
             HoldPins(j, done);
@@ -318,7 +325,12 @@ internal sealed partial class HostWorld
         var at = main.Data.GetWorldTransform();
         var up = WorldTransform.TransformDirection(new Vector3D(0, 1, 0), at);
         var character = CreateAt(respawn, identity, beside ?? new WorldTransform(at.Position + up * 12, at.Orientation));
-        if (character != null) _shipReadyAt[identity] = MpClock.NowMs() + ShipCooldownMs;
+        _shipSeats.Remove(j);
+        if (character != null)
+        {
+            _shipReadyAt[identity] = MpClock.NowMs() + ShipCooldownMs;
+            if (PilotSeat(grids.OrderBy(g => g != main)) is { } cockpit) _shipSeats.AddOrUpdate(j, cockpit.Entity);
+        }
         Assign(host, j, character, identity, null, "a respawn ship (" + ship.Count + " entities)");
     }
 }

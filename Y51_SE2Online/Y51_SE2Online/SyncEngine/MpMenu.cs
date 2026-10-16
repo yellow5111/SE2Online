@@ -47,6 +47,8 @@ internal static class MpMenu
     private static MainMenuScreenViewModel _mainMenu;
     private static FriendFinder _finder;
     private static long _nextScan;
+    private static ServerPinger _pinger;
+    private static long _nextPing;
     private static bool _chatDown, _playersDown, _adminDown;
     private static long _nextSharedFind;
     private static IObservableDisposable _adminScreen;
@@ -142,6 +144,12 @@ internal static class MpMenu
         _playersScreen.OnDisposed += _ => _playersScreen = null;
     });
     public static void JoinAddress(string address) => Activate(Settings.JoinAddressOptions(address));
+
+    private static bool SameEndpoint(System.Net.IPEndPoint current, string address)
+    {
+        try { return ServerEndpoint.Parse(address).Equals(current); }
+        catch (FormatException) { return false; }
+    }
     public static void JoinListing(DirectoryListing listing)
     {
         listing.Validate();
@@ -205,8 +213,9 @@ internal static class MpMenu
         _shared = JoinStatusUi.FindShared(MpPlugin.App);
         if (_shared == null) { Message = "The game's menu is still loading."; return; }
         _screen = _shared.CreateScreen<OnlineScreen>(new OnlineScreenViewModel(), showCursor: true, ScreenLayer.Top);
-        _screen.OnDisposed += _ => { _screen = null; };
+        _screen.OnDisposed += _ => { _screen = null; _pinger?.Dispose(); _pinger = null; };
         _nextScan = 0;
+        if (MpPlugin.SteamAvailable) SteamPing.Start();
         RefreshDirectory();
     }
 
@@ -234,13 +243,33 @@ internal static class MpMenu
             if (_finder.TakePresenceChanged()) _nextScan = 0;
             while (_finder.TryTakeJoinRequest(out _, out var connect))
             {
-                if (MpPlugin.Controller?.Current?.Join == true || Busy) continue;
-                if (ConnectString.TryParse(connect, out var id, out var port)) Activate(Settings.JoinOptions(id, false, port ?? MpOptions.DefaultVirtualPort));
-                else if (ConnectString.TryParseAddress(connect, out var address)) JoinAddress(address);
+                // A join from Steam while on another server switches servers (Activate asks before leaving); the same server is a no-op.
+                var current = MpPlugin.Controller?.Current;
+                if (Busy) continue;
+                if (ConnectString.TryParse(connect, out var id, out var port))
+                {
+                    if (current?.Join == true && current.JoinSteamId == id) continue;
+                    Activate(Settings.JoinOptions(id, false, port ?? MpOptions.DefaultVirtualPort));
+                }
+                else if (ConnectString.TryParseAddress(connect, out var address))
+                {
+                    if (current?.Join == true && current.JoinIp != null && SameEndpoint(current.JoinIp, address)) continue;
+                    JoinAddress(address);
+                }
             }
         }
         long now = MpClock.NowMs();
         if (_screen != null && now >= _nextDirectory && !DirectoryBusy) RefreshDirectory();
+        if (_screen != null && now >= _nextPing)
+        {
+            _nextPing = now + 3000;
+            try
+            {
+                _pinger ??= new ServerPinger();
+                _pinger.Ping(Servers.Where(e => e.Kind == "dedicated" && !string.IsNullOrEmpty(e.Address)).Select(e => e.Address).Distinct().Take(256));
+            }
+            catch (Exception ex) when (ex is System.Net.Sockets.SocketException or InvalidOperationException) { GameLog.Instance.WarnOnce("server-ping", "server browser: live ping is off: " + ex.Message); _nextPing = long.MaxValue; }
+        }
         if ((_screen == null && _playersScreen == null) || now < _nextScan) return;
         _nextScan = now + 3000;
         try
@@ -338,6 +367,33 @@ internal static class MpMenu
     }
 
     public static void Report(string message) => Queue(() => Message = message);
+
+    /// <summary>
+    /// Round trip to a listed server for the browser: measured for dedicated servers that answer Steam's server query,
+    /// otherwise Steam's estimate from the host's published ping location (shown with ~). "" when neither is known.
+    /// </summary>
+    public static string Ping(DirectoryListing e)
+    {
+        int ms = e.Kind == "dedicated" ? _pinger?.Get(e.Address) ?? -1 : -1;
+        if (ms >= 0) return ms + " ms";
+        return Estimate(e.PingLocation);
+    }
+
+    public static string Ping(FriendHost friend) => Estimate(friend.PingLocation);
+
+    /// <summary>Milliseconds for sorting; unknown pings sort last.</summary>
+    public static int PingSort(DirectoryListing e)
+    {
+        int ms = e.Kind == "dedicated" ? _pinger?.Get(e.Address) ?? -1 : -1;
+        if (ms < 0 && MpPlugin.SteamAvailable) ms = SteamPing.Estimate(e.PingLocation, MpClock.NowMs());
+        return ms < 0 ? int.MaxValue : ms;
+    }
+
+    private static string Estimate(string location)
+    {
+        int ms = MpPlugin.SteamAvailable ? SteamPing.Estimate(location, MpClock.NowMs()) : -1;
+        return ms >= 0 ? "~" + ms + " ms" : "";
+    }
 
     public static void RefreshFriends() => Queue(() => _nextScan = 0);
 

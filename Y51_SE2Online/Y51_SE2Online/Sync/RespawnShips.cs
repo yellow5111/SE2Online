@@ -44,6 +44,19 @@ public static class RespawnShips
     public static RespawnShip[] ForPlanet(IReadOnlyCollection<string>? allowed, double gravity, double airDensity)
         => Offered(allowed).Where(s => LanderKeys.Contains(s.Key) && s.Lift >= gravity * LiftMargin && (!s.Ion || airDensity <= IonAirDensity)).ToArray();
 
+    /// <summary>
+    /// Gap under a piloted lander's hull at the spawn: clear of the terrain bumps a site may still have, and the dampeners
+    /// (kept on by the spawn) hold it there under its pilot: an offered lander lifts at least <see cref="LiftMargin"/> times the planet's gravity.
+    /// </summary>
+    public const double LanderHoverMeters = 20;
+
+    /// <summary>Gap for a lander nobody sits in: it settles onto its gear, so the player standing beside it can board.</summary>
+    public const double LanderRestMeters = 1.5;
+
+    /// <summary>How far the lander's grid origin goes above the site ground: the ground rise under its footprint, the gap, and the hull below the origin (<paramref name="boxMinY"/>, the grid box bottom in grid space).</summary>
+    public static double LanderOriginHeight(double groundRise, double boxMinY, bool piloted)
+        => groundRise + (piloted ? LanderHoverMeters : LanderRestMeters) - boxMinY;
+
     public const int MaxCooldownMinutes = 1440;
 
     /// <summary>The ships a host offers: every catalog ship, or only the ones its settings name.</summary>

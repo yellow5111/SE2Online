@@ -98,7 +98,8 @@ internal sealed class FriendFinder : IDisposable
 				}
 				string friendRichPresence = SteamFriends.GetFriendRichPresence(friendByIndex, "y51online_host");
 				HostPresence.TryDecode(friendRichPresence, out HostPresence presence);
-				list.Add(new FriendHost(friendByIndex.m_SteamID, SteamFriends.GetFriendPersonaName(friendByIndex) ?? "?", presence, string.IsNullOrEmpty(friendRichPresence) ? null : friendRichPresence));
+				string ping = presence == null ? "" : SteamFriends.GetFriendRichPresence(friendByIndex, HostAdvertiser.PingKey) ?? "";
+				list.Add(new FriendHost(friendByIndex.m_SteamID, SteamFriends.GetFriendPersonaName(friendByIndex) ?? "?", presence, string.IsNullOrEmpty(friendRichPresence) ? null : friendRichPresence, ping.Length <= DirectoryListing.MaxPingLocation ? ping : ""));
 			}
 		}
 		return list;
