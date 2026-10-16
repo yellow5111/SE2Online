@@ -252,14 +252,23 @@ internal sealed partial class HostWorld
         // The box centre (not the grid origin, which can sit far off the hull) goes over the site.
         var position = site.Ground - (Vector3D)Vector3.Transform(new Vector3(box.Center.X, 0, box.Center.Z), orientation) + site.Up * (highest - groundRadius + 1.5 - box.Min.Y);
         var rotation = orientation * Quaternion.Conjugate(old.Orientation);
+        var pins = new List<(Entity Grid, WorldTransform At)>();
         foreach (var grid in keep)
         {
             var t = grid.Data.GetWorldTransform();
             var offset = t.Position - old.Position;
-            grid.Data.Set(new WorldTransform(position + Vector3D.Transform(in offset, rotation), rotation * t.Orientation));
-            if (grid.Data.TryGet<RigidBodyData>(out _)) grid.Data.Set(new RigidBodyData(Vector3.Zero, Vector3.Zero));
-            grid.TryGet<GridPhysicsComponent>()?.SetGridMotion(false);
+            var at = new WorldTransform(position + Vector3D.Transform(in offset, rotation), rotation * t.Orientation);
+            Pin(grid, at);
+            pins.Add((grid, at));
         }
+        // The contract prefab spawns static. Moving it and switching it to dynamic in the same frame went wrong about one
+        // time in four: the dynamic body was built at the contract's spot while the grid entity moved, so the lander
+        // either snapped back there (km away, ~95 m up) or, put back on the site, turned about that far-away body (the
+        // mouse swung the ship across the world and it hit terrain it was nowhere near). HoldPins moves it while still
+        // static and switches it to dynamic a few ticks later, from where it stands.
+        j.ShipPins = pins;
+        j.ShipPinHeld = j.ShipPinFixes = 0;
+        j.ShipPinsDynamic = false;
         // The player stands on the ground beside the ship, facing it.
         var side = Vector3.Transform(Vector3.Right, orientation);
         double sideReach = halfX + 6;
@@ -271,6 +280,51 @@ internal sealed partial class HostWorld
         return keep;
     }
 
+    private static void Pin(Entity grid, WorldTransform at)
+    {
+        grid.Data.Set(at);
+        if (grid.Data.TryGet<RigidBodyData>(out _)) grid.Data.Set(new RigidBodyData(Vector3.Zero, Vector3.Zero));
+    }
+
+    /// <summary>
+    /// Server thread while a lander settles: keeps its grids static on the site until they have been there for
+    /// <see cref="PinStaticTicks"/> ticks, then makes them dynamic and watches <see cref="PinHeldTicks"/> more ticks;
+    /// a grid that jumps away after the switch is made static and placed again.
+    /// </summary>
+    private void HoldPins(Joiner j, bool last)
+    {
+        if (j.ShipPins is not { } pins) return;
+        bool held = true;
+        foreach (var (grid, at) in pins)
+        {
+            if (EngineCodec.IsDead(grid) || Vector3D.Distance(grid.Data.GetWorldTransform().Position, at.Position) <= (j.ShipPinsDynamic ? PinSlackMeters : 0.5)) continue;
+            held = false;
+            j.ShipPinFixes++;
+            if (j.ShipPinsDynamic) grid.TryGet<GridPhysicsComponent>()?.SetGridMotion(true);
+            Pin(grid, at);
+        }
+        if (!held) j.ShipPinsDynamic = false;
+        j.ShipPinHeld = held ? j.ShipPinHeld + 1 : 0;
+        if (!j.ShipPinsDynamic && (j.ShipPinHeld >= PinStaticTicks || last))
+        {
+            foreach (var (grid, _) in pins)
+                if (!EngineCodec.IsDead(grid)) grid.TryGet<GridPhysicsComponent>()?.SetGridMotion(false);
+            j.ShipPinsDynamic = true;
+            j.ShipPinHeld = 0;
+        }
+        if (!j.ShipPinsDynamic || (j.ShipPinHeld < PinHeldTicks && !last)) return;
+        j.ShipPins = null;
+        if (j.ShipPinFixes > 0 || !held)
+            _log.Info($"host world sync: lander for ClientId {j.ClientId} {(held ? "stays on its site" : "did NOT stay on its site")} after {j.ShipPinFixes} correction(s)");
+    }
+
+    private const int PinStaticTicks = 5, PinHeldTicks = 30;
+
+    // Once dynamic, settling onto its gear (it is placed 1.5 m up) moves it a few metres and is left to the physics;
+    // pulling it back up every tick shook it into the ground and broke blocks off. A lost move is km.
+    private const double PinSlackMeters = 50;
+
+#if !PULSAR
     /// <summary>Rig probe: spawns each encounter prefab (comma-separated GUIDs) the game's way and writes every grid it holds to <paramref name="path"/>.</summary>
     internal static async void ProbeEncounterGrids(Session session, string guids, string path)
     {
@@ -295,6 +349,7 @@ internal sealed partial class HostWorld
         }
         System.IO.File.AppendAllText(path, "PROBE DONE\n");
     }
+#endif
 
     private static string DescribeGrid(Session session, Entity grid)
     {

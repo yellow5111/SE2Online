@@ -17,7 +17,7 @@
 
         Includes chat, a players list, admin tools (kick, ban, whitelist, PvP, PCU limit, sun control, safe zones), factions and grid sharing, a respawn menu and name tags. Everyone in a session needs the same plugin version. Open the Multiplayer screen from the main menu or this plugin's config button.
 
-        Network use: checks se2-online.yellow51.dev for updates at game start (can be turned off). Listing a hosted session in the public browser is opt-in and sends your SteamID64, session and world name and player counts to se2-online-sessions.yellow51.dev every 30 s.
+        Network use: checks se2-online.yellow51.dev for updates at game start (can be turned off). Listing a hosted session in the public browser is opt-in and sends your SteamID64, session and world name and player counts to se2-online-sessions.yellow51.dev every 30 s. Joining a server whose world runs Steam Workshop mods you don't have downloads them from Steam, but only after the join shows them with their sizes and you agree (at most 10 GiB per server by default).
 
         Server owners: the host sends the whole world state to every joined player (no per-player visibility filtering), so a modified client could see all of it.
     </Description>

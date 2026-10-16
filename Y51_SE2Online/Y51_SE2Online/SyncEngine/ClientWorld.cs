@@ -100,6 +100,8 @@ internal sealed class ClientWorld
 
 	private System.Threading.Tasks.Task<string> _modsReady;
 
+	private readonly CancellationTokenSource _modsStop = new();
+
 	private readonly MpOptions _o;
 
 	private readonly ProxyMap _proxies = new ProxyMap();
@@ -748,7 +750,7 @@ internal sealed class ClientWorld
 
 	public static void Reset()
 	{
-		if (Current != null) { Current._retired = true; Current._session?.Detach(); }
+		if (Current != null) { Current._retired = true; Current._modsStop.Cancel(); Current._session?.Detach(); }
 		Current = null;
 		StringIdTable.Client = null;
 		Progress.Set(JoinStage.Idle, MpClock.NowMs());
@@ -790,14 +792,16 @@ internal sealed class ClientWorld
 
 	public void NetTick(long now)
 	{
-		// Workshop mods download while the world streams in; the client game waits for them before it loads.
+		// Workshop mods download, once the player agrees, while the world streams in; the client game waits for them before it loads.
 		if (_session?.Accept is { } accept && !ReferenceEquals(accept, _modsFor))
 		{
 			_modsFor = accept;
 			if (accept.Mods.Count > 0) _log.Info("client: the host's world runs mods: " + WorldMods.Summary(accept.Mods));
+			string server = _o.JoinIp?.ToString() ?? _session.Host?.ToString();
+			int maxGiB = MpMenu.Settings?.MaxModDownloadGiB ?? ModDownloads.DefaultMaxGiB;
 			_modsReady = accept.ModsError != null ? System.Threading.Tasks.Task.FromResult(accept.ModsError)
 				: accept.Mods.Count == 0 ? System.Threading.Tasks.Task.FromResult<string>(null)
-				: System.Threading.Tasks.Task.Run(() => WorkshopMods.DownloadAsync(accept.Mods, _log, Progress.SetMods, CancellationToken.None));
+				: System.Threading.Tasks.Task.Run(() => WorkshopMods.PrepareAsync(accept.Mods, server, maxGiB, _log, Progress.SetMods, _modsStop.Token));
 		}
 		if (_startRequested && !_startIssued && !_mainThreadSeen && now - _startRequestedMs > 10000 && _startRequestedMs > 0)
 		{
@@ -3843,7 +3847,7 @@ internal sealed class ClientWorld
 					// stops growing, so the body waits with the server and carries on from there.
 					long leadNow = MpClock.NowMs();
 					if (_ownHostLocalMs is double sampleAt && leadNow - sampleAt > StallLeadMs) leadNow = (long)(sampleAt + StallLeadMs);
-					var lead = move.Lead(leadNow, look.LagMs);
+					var lead = LeadClamp.Clamp(_ownCharacter, x, y, z, quaternion, move.Lead(leadNow, look.LagMs));
 					OwnLeadProbe?.Invoke(leadNow, x, y, z, lead, look.LagMs);
 					leadShown = lead;
 					if (_ownHostLocalMs is double sampleLocal) ageShown = MpClock.NowMs() - sampleLocal;
@@ -3968,6 +3972,7 @@ internal sealed class ClientWorld
 		if (!(_left || _retired || _lostReason != null || Progress.Stage == JoinStage.Rejected))
 		{
 			_lostReason = string.IsNullOrWhiteSpace(reason) ? "connection closed" : reason;
+			_modsStop.Cancel();
 		}
 	}
 
@@ -4100,6 +4105,7 @@ internal sealed class ClientWorld
 			return;
 		}
 		_retired = true;
+		_modsStop.Cancel();
 		var next = Current = new ClientWorld(_log, _o)
 		{
 			_mainQueue = _mainQueue,

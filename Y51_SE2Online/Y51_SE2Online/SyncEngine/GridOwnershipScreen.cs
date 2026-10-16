@@ -244,10 +244,9 @@ internal static class ControlPanelOwnership
                 GameLog.Instance.Warn("grid ownership: the control panel layout was not recognised; ownership and block access controls are unavailable");
                 return;
             }
-            string gridName = null;
             Guid gridId = Guid.Empty;
             long askedMs = 0;
-            var grids = new GridOwnershipView(() => gridName != null && SocialUi.Snapshot.Focus is { } focus && focus.Name == gridName ? focus : null);
+            var grids = new GridOwnershipView(() => gridId != Guid.Empty && SocialUi.Snapshot.Focus is { } focus && focus.Secure == gridId ? focus : null);
             var blocks = new BlockAccessView();
             grids.DialogHost = (__instance.Content as Panel) ?? controls;
             var gridPanel = grids.Focused;
@@ -298,7 +297,6 @@ internal static class ControlPanelOwnership
                 var selection = model?.BlockTerminalSelection;
                 var block = online && grid == null && selection is { Count: 1 } && selection[0] is ControlPanelEntityViewModel entity ? entity : null;
                 gridPanel.IsVisible = grid != null;
-                gridName = grid == null ? null : SocialState.Clean(grid.DisplayName, 100);
                 var id = grid?.EntityId.EntityGuid ?? Guid.Empty;
                 if (id != gridId) askedMs = 0;
                 gridId = id;
@@ -320,7 +318,7 @@ internal static class ControlPanelOwnership
                 {
                     long now = Core.MpClock.NowMs();
                     // The host drops requests over five a second; ask again until this grid is the focus.
-                    if ((SocialUi.Snapshot.Focus?.Name != gridName) && now - askedMs > 1000) { askedMs = now; SocialUi.Send(new SocialRequest(SocialAction.Refresh, Secure: gridId)); }
+                    if (SocialUi.Snapshot.Focus?.Secure != gridId && now - askedMs > 1000) { askedMs = now; SocialUi.Send(new SocialRequest(SocialAction.Refresh, Secure: gridId)); }
                     grids.QueueRefresh();
                 }
                 if (toggle.IsVisible) blocks.Refresh();

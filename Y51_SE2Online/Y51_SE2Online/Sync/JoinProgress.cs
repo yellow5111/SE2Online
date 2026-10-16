@@ -125,6 +125,18 @@ public sealed class JoinProgress
 		}
 	}
 
+	/// <summary>Whether the host's Workshop mods are being fetched or asked about, when the join can still be called off.</summary>
+	public bool ModsActive
+	{
+		get
+		{
+			lock (_sync)
+			{
+				return _mods != null;
+			}
+		}
+	}
+
 	public bool Advance(JoinStage from, JoinStage to, long now, string? detail = null)
 	{
 		lock (_sync)
@@ -394,6 +406,7 @@ public sealed class JoinProgress
 				percent = got * 40;
 				string eta = _expected > 0 && rate > 1024 && _received < _expected ? "  /  " + Clock((long)((_expected - _received) / rate * 1000)) + " left" : "";
 				what = $"{Mib(Math.Min(_received, Math.Max(_expected, _received)))} of {Mib(_expected)} MiB from {Cut(_host, 32)}  /  {Mib((long)rate)} MiB/s{eta}";
+				if (_mods != null) what += "\n" + _mods;
 				break;
 			}
 			case JoinStage.Loading:

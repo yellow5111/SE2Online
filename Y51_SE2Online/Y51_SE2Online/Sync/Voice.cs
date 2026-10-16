@@ -106,3 +106,26 @@ public sealed class VoiceRelay
 
 	public static bool InRange(Vec3D speaker, Vec3D listener, double radius) => radius > 0 && (speaker - listener).Length <= radius;
 }
+
+/// <summary>Listener-side loudness of decoded voice; pure so it can be unit tested.</summary>
+public static class VoiceLevel
+{
+	/// <summary>Steam's decoded voice sits well below the game's mix: +6 dB at the default 100 % volume.</summary>
+	public const float MakeUpGain = 2f;
+
+	/// <summary>Full volume within this distance of the speaker; it fades to silence at the voice radius.</summary>
+	public const float FullVolumeMeters = 4f;
+
+	private const float Knee = 0.7f;
+
+	/// <summary>The sample gain for the player's 0-200 % voice volume.</summary>
+	public static float Gain(int volumePercent) => MakeUpGain * Math.Clamp(volumePercent, 0, 200) / 100f;
+
+	/// <summary>Scales one sample, soft-clipping above the knee so loud speech compresses instead of distorting.</summary>
+	public static short Apply(short sample, float gain)
+	{
+		float x = sample / 32768f * gain, a = Math.Abs(x);
+		if (a > Knee) a = Knee + (1 - Knee) * MathF.Tanh((a - Knee) / (1 - Knee));
+		return (short)MathF.Round(MathF.CopySign(a, x) * 32767f);
+	}
+}

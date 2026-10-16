@@ -19,7 +19,9 @@ namespace Y51_SE2Online.SyncEngine;
 internal sealed partial class HostWorld
 {
     private readonly System.Collections.Concurrent.ConcurrentQueue<ushort> _notSeated = new();
+#if !PULSAR
     private readonly System.Collections.Generic.Dictionary<string, Entity> _rigSeats = new();
+#endif
 
     /// <summary>The player's client has its character standing although it rejoined seated: it could not build that seat.</summary>
     public void OnNotSeated(ushort clientId) => _notSeated.Enqueue(clientId);
@@ -69,6 +71,7 @@ internal sealed partial class HostWorld
         _log.Info($"host world sync: ClientId {j.ClientId} '{j.Name}' stood up from {seat.Entity.GetComposition()?.DebugNameShort}: {why}");
     }
 
+#if !PULSAR
     // SE2's Ransacked Station space encounter: the nearest vanilla content with Seat, Toilet and Bed blocks.
     private static readonly Guid SeatProbePrefab = new("7ed22360-5637-4fdd-9903-672b58bb17e0");
 
@@ -156,4 +159,5 @@ internal sealed partial class HostWorld
         }
         catch (Exception ex) { GameLog.Instance.Warn("seat probe: " + ex); }
     }
+#endif
 }

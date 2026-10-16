@@ -51,6 +51,7 @@ public sealed class OnlineScreen : ScreenView
     private readonly TextBox _name = OnlineUi.Input("Use Steam name", 32);
     private readonly TextBox _sessionName = OnlineUi.Input("My SE2 session", 80);
     private readonly TextBox _description = OnlineUi.Input("Describe your world", 500);
+    private readonly TextBox _country = OnlineUi.Input("auto", 4);
     private readonly (Slider S, Control Row) _limit = OnlineUi.Slider(2, 32, 1, v => v + " players");
     private readonly TextBox _bind = OnlineUi.Input("0.0.0.0", 100);
     private readonly TextBox _port = OnlineUi.Input("7742", 5);
@@ -65,8 +66,8 @@ public sealed class OnlineScreen : ScreenView
     private readonly OnlineToggle _nametags = new OnlineToggle("Show player name tags");
     private readonly (Slider S, Control Row) _range = OnlineUi.Slider(50, 10000, 50, v => v + " m");
     private readonly OnlineToggle _spawn = new OnlineToggle("Spawn new players near the host");
-    private readonly OnlineToggle _hacking = new OnlineToggle("Hacking: players can take over grids from a terminal or control block");
-    private readonly OnlineToggle _hackPlayers = new OnlineToggle("Players' grids can be hacked too (only with PvP on, never in safe zones)");
+    private readonly OnlineToggle _hacking = new OnlineToggle("Hacking (opt-in): players take over grids at a terminal or control block, never in safe zones");
+    private readonly OnlineToggle _hackPlayers = new OnlineToggle("Players' grids can be hacked too (opt-in; only with PvP on)");
     private readonly (Slider S, Control Row) _hackTime = OnlineUi.Slider(1, 100, 1, v => "x" + (v / 10.0).ToString("0.0", CultureInfo.InvariantCulture));
     private readonly KeyBindButton _hackKey = new();
     private readonly OnlineToggle _reconnect = new OnlineToggle("Automatically reconnect after connection loss");
@@ -82,6 +83,8 @@ public sealed class OnlineScreen : ScreenView
     private readonly (Slider S, Control Row) _voiceRadius = OnlineUi.Slider(0, 500, 5, v => v == 0 ? "Off" : v + " m");
     // Tenths: the slider shows whole steps, the setting keeps one decimal.
     private readonly (Slider S, Control Row) _energyUse = Usage(), _hydrogenUse = Usage(), _oxygenUse = Usage();
+    private readonly (Slider S, Control Row) _playerInventory = SizeSlider(), _cargoInventory = SizeSlider();
+    private static (Slider, Control) SizeSlider() => OnlineUi.Slider(InventoryMultipliers.Min * 10, InventoryMultipliers.Max * 10, 1, v => ResourceMultipliers.Format(v / 10.0));
     private static (Slider, Control) Usage() => OnlineUi.Slider(0, ResourceMultipliers.Max * 10, 1, v => ResourceMultipliers.Format(v / 10.0));
     private readonly Button _host, _joinAddress, _joinId, _leave, _load, _create, _save, _hostSave, _players;
     private readonly Button[] _navigation;
@@ -110,7 +113,7 @@ public sealed class OnlineScreen : ScreenView
         _hostSave = OnlineUi.Button("Apply host settings", Save, "SaveHostSettings");
         var hosting = OnlineUi.Scroll(OnlineUi.Stack(
             OnlineUi.Section("HOST A SESSION", OnlineUi.Text("Host your current world, or start hosting and then load or create a world."),
-                OnlineUi.Row(_host, _load, _create), OnlineUi.Field("Session name", _sessionName), OnlineUi.Field("Description", _description),
+                OnlineUi.Row(_host, _load, _create), OnlineUi.Field("Session name", _sessionName), OnlineUi.Field("Description", _description), OnlineUi.Field("Country", _country, "auto finds it from your IP, or a 2-letter code like US, GB, DE"),
                 OnlineUi.Field("Maximum players", _limit.Row, "2-32 players, including you"), OnlineUi.Field("Join password", _password, "Optional. Admins can join without it."), _friendsOnly, _advertise,
                 _waterSync, OnlineUi.Text("Experimental: sends debug-menu water to players. Costs bandwidth and performance; not meant for full-time use yet.", "SubtleNotice", 20)),
             OnlineUi.Section("DIRECT IP CONNECTIONS", _directIp, OnlineUi.Field("Bind address", _bind, "0.0.0.0 listens on all IPv4 interfaces"),
@@ -124,6 +127,8 @@ public sealed class OnlineScreen : ScreenView
                 OnlineUi.Field("Energy usage", _energyUse.Row, "Suit energy, jetpack and tools, and block power use. x1 is normal, x0 uses none"),
                 OnlineUi.Field("Hydrogen usage", _hydrogenUse.Row, "Jetpack boost and hydrogen thrusters and engines"),
                 OnlineUi.Field("Oxygen usage", _oxygenUse.Row, "Breathing and blocks that use oxygen. Changes apply live while hosting"),
+                OnlineUi.Field("Player inventory size", _playerInventory.Row, "How much each player can carry. x1 is normal"),
+                OnlineUi.Field("Cargo container size", _cargoInventory.Row, "Cargo containers, crates, lockers and barrels. x1 is normal"),
                 _hacking, _hackPlayers, OnlineUi.Field("Hack time", _hackTime.Row, "x1 is 30 s plus 0.25 s per block, at most 5 min; powered grids take 1.5x")),
             OnlineUi.Section("KEYBINDS", OnlineUi.Text("Click a binding, then press the new key or combination. Esc cancels.", "SubtleNotice", 21),
                 OnlineUi.Field("Open chat", _chatKey), OnlineUi.Field("Players list", _playersKey), OnlineUi.Field("Admin panel", _adminKey), OnlineUi.Field("Suit broadcast", _broadcastKey, "Hides or shows your name tag to other players"),
@@ -207,13 +212,14 @@ public sealed class OnlineScreen : ScreenView
     private void ReadSettings()
     {
         var s = MpMenu.Settings;
-        _name.Text = s.PlayerName; _sessionName.Text = s.SessionName; _description.Text = s.Description;
+        _name.Text = s.PlayerName; _sessionName.Text = s.SessionName; _description.Text = s.Description; _country.Text = s.Country;
         _limit.S.Value = Math.Clamp(s.MaxPlayers, 2, 32); _friendsOnly.IsChecked = s.FriendsOnly;
         _advertise.IsChecked = s.Advertise; _directIp.IsChecked = s.AllowDirectIp; _waterSync.IsChecked = s.WaterSync;
         _bind.Text = s.BindAddress; _port.Text = s.ListenPort.ToString(CultureInfo.InvariantCulture); _publicAddress.Text = s.PublicAddress;
         _team.IsChecked = s.TeamGrids; _research.IsChecked = s.SharedResearch; _turrets.IsChecked = s.Pvp; _nametags.IsChecked = s.Nametags;
         _range.S.Value = Math.Clamp(s.NametagRange, 50, 10000); _spawn.IsChecked = s.SpawnNearHost;
         _energyUse.S.Value = Math.Clamp(s.EnergyUsageMultiplier * 10, 0, ResourceMultipliers.Max * 10); _hydrogenUse.S.Value = Math.Clamp(s.HydrogenUsageMultiplier * 10, 0, ResourceMultipliers.Max * 10); _oxygenUse.S.Value = Math.Clamp(s.OxygenUsageMultiplier * 10, 0, ResourceMultipliers.Max * 10);
+        _playerInventory.S.Value = Math.Clamp(s.PlayerInventoryMultiplier * 10, InventoryMultipliers.Min * 10, InventoryMultipliers.Max * 10); _cargoInventory.S.Value = Math.Clamp(s.CargoInventoryMultiplier * 10, InventoryMultipliers.Min * 10, InventoryMultipliers.Max * 10);
         _password.Text = s.Password; _chatKey.Binding = s.ChatKey; _playersKey.Binding = s.PlayersKey; _adminKey.Binding = s.AdminKey; _broadcastKey.Binding = s.BroadcastKey; _voiceKey.Binding = s.VoiceKey; _emoteKey.Binding = s.EmoteKey; _hackKey.Binding = s.HackKey;
         _hacking.IsChecked = s.Hacking; _hackPlayers.IsChecked = s.AllowHackingPlayerGrids; _hackTime.S.Value = Math.Clamp(s.HackTimeMultiplier * 10, 1, 100);
         _voice.IsChecked = s.VoiceEnabled; _openMic.IsChecked = s.VoiceOpenMic; _voiceVolume.S.Value = Math.Clamp(s.VoiceVolume, 0, 200); _voiceRadius.S.Value = Math.Clamp(s.VoiceRadiusMeters, 0, 500);
@@ -230,7 +236,7 @@ public sealed class OnlineScreen : ScreenView
         var settings = new OnlineSettings
         {
             ServersDirectory = MpMenu.Settings.ServersDirectory, SessionsDirectory = MpMenu.Settings.SessionsDirectory,
-            PlayerName = _name.Text ?? "", SessionName = _sessionName.Text ?? "", Description = _description.Text ?? "", MaxPlayers = limit,
+            PlayerName = _name.Text ?? "", SessionName = _sessionName.Text ?? "", Description = _description.Text ?? "", Country = _country.Text ?? "", MaxPlayers = limit,
             FriendsOnly = _friendsOnly.IsChecked == true, Advertise = _advertise.IsChecked == true, AdvertiseChosen = true, AllowDirectIp = _directIp.IsChecked == true, WaterSync = _waterSync.IsChecked == true,
             BindAddress = _bind.Text ?? "", ListenPort = port, PublicAddress = _publicAddress.Text ?? "",
             TeamGrids = _team.IsChecked == true, SharedResearch = _research.IsChecked == true, Pvp = _turrets.IsChecked == true, Nametags = _nametags.IsChecked == true, NametagRange = range,
@@ -243,7 +249,7 @@ public sealed class OnlineScreen : ScreenView
             MutedVoices = MpMenu.Settings.MutedVoices,
             Hacking = _hacking.IsChecked == true, AllowHackingPlayerGrids = _hackPlayers.IsChecked == true, HackTimeMultiplier = Math.Round(_hackTime.S.Value) / 10, HackKey = _hackKey.Binding,
             HackLockdownSeconds = MpMenu.Settings.HackLockdownSeconds, HackLockdownCooldownSeconds = MpMenu.Settings.HackLockdownCooldownSeconds,
-            EnergyUsageMultiplier = Math.Round(_energyUse.S.Value) / 10, HydrogenUsageMultiplier = Math.Round(_hydrogenUse.S.Value) / 10, OxygenUsageMultiplier = Math.Round(_oxygenUse.S.Value) / 10
+            EnergyUsageMultiplier = Math.Round(_energyUse.S.Value) / 10, HydrogenUsageMultiplier = Math.Round(_hydrogenUse.S.Value) / 10, OxygenUsageMultiplier = Math.Round(_oxygenUse.S.Value) / 10, PlayerInventoryMultiplier = Math.Round(_playerInventory.S.Value) / 10, CargoInventoryMultiplier = Math.Round(_cargoInventory.S.Value) / 10
         };
         string error = settings.Validate();
         if (error != null) { MpMenu.Report(error); return null; }

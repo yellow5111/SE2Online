@@ -74,6 +74,12 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 
 		public long ShipSettleUntil;
 
+		public List<(Entity Grid, WorldTransform At)>? ShipPins;
+
+		public int ShipPinHeld, ShipPinFixes;
+
+		public bool ShipPinsDynamic;
+
 		public long ShipDeadline;
 
 		public volatile bool ShipQueued;
@@ -313,6 +319,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		ApplyPcuLimit(session);
 		ApplySun(session);
 		ResourceMultiplierRules.Apply(session);
+		InventoryMultiplierRules.Apply(session);
 		BlockSizeFilter.EnsureHost();
 		var social = Social;
 		if (social == null || _host == null) return;
@@ -626,6 +633,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			Interlocked.Increment(ref AdminGuard.Refused);
 			return "Only admins can do that on this server.";
 		}
+		if (!AdminGuard.IsAdminStory(box.GetType()) && ForeignCharacterGate(clientId, box) is string foreign) return foreign;
 		if (box.GetType().DeclaringType?.Namespace?.Contains(".Ownership", StringComparison.Ordinal) == true || box.GetType().DeclaringType == typeof(GridPermissionsComponent))
 			return "Use the grid ownership controls to change ownership or sharing.";
 		if (_identityOf.TryGetValue(clientId, out long actor))

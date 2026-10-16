@@ -73,7 +73,7 @@ public sealed class EntityBundleMessage
 				deflate.Write(raw, 0, raw.Length);
 			}
 			// Compressed body is prefixed with the raw length; only used when it actually saves bytes.
-			if (ms.Length + 4 < raw.Length)
+			if (ms.Length + 4 < raw.Length && !BulkCompression.OverRatio(raw.Length, (int)ms.Length + 4))
 			{
 				byte[] compressed = new byte[4 + ms.Length];
 				BinaryPrimitives.WriteInt32LittleEndian(compressed, raw.Length);
@@ -145,21 +145,12 @@ public sealed class EntityBundleMessage
 		{
 			msg.Kind &= 127;
 			int rawLength = BinaryPrimitives.ReadInt32LittleEndian(body);
-			if (rawLength < 0 || rawLength > 536870912)
+			if (rawLength < 0 || rawLength > 536870912 || BulkCompression.OverRatio(rawLength, body.Length))
 			{
-				throw new InvalidDataException($"bundle body {rawLength} B");
+				throw new InvalidDataException($"bundle body {rawLength} B from {body.Length} B");
 			}
-			inflated = new byte[rawLength];
-			using var deflate = new DeflateStream(new MemoryStream(body.Slice(4).ToArray()), CompressionMode.Decompress);
-			int read;
-			for (int pos = 0; pos < rawLength; pos += read)
-			{
-				read = deflate.Read(inflated, pos, rawLength - pos);
-				if (read <= 0)
-				{
-					throw new InvalidDataException($"bundle body ended at {pos} of {rawLength} B");
-				}
-			}
+			byte[] deflated = body.Slice(4).ToArray();
+			inflated = BulkCompression.Inflate(deflated, 0, deflated.Length, default, rawLength) ?? throw new InvalidDataException($"bundle body is not {rawLength} B of deflated data");
 			msg.WireBodyBytes = body.Length;
 			body = inflated;
 		}

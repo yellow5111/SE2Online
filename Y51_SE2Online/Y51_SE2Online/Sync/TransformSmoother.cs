@@ -22,6 +22,13 @@ public sealed class TransformSmoother
 
 		public Vec3D LastRaw, LastShown, Velocity, Offset;
 
+		// Speed and heading along the real (not extrapolated) track: a body held at the end of its extrapolation has Velocity 0.
+		public double Speed;
+
+		public Vec3D Heading;
+
+		public long PaybackUntilMs;
+
 		public bool HasOut;
 	}
 
@@ -331,14 +338,17 @@ public sealed class TransformSmoother
 				else if (playTime >= newest.T)
 				{
 					double ahead = playTime - newest.T;
-					if (samples.Count >= 2 && ahead <= MaxExtrapolateMs)
+					if (samples.Count >= 2)
 					{
 						var previous = samples[samples.Count - 2];
 						double interval = newest.T - previous.T;
 						if (interval > 0.0 && interval <= 250.0)
 						{
-							output.Add((netId, Settle(track, localNowMs, Lerp(previous.V, newest.V, 1.0 + (double)ahead / interval, 1.0 + (double)MaxExtrapolateMs / interval), extrapolated: true)));
-							Extrapolated++;
+							// Past the extrapolation window (a server stall) the body waits where the window ended: going
+							// back to the newest sample there snapped fast ships tens of metres back and then froze them.
+							output.Add((netId, Settle(track, localNowMs, Lerp(previous.V, newest.V, 1.0 + Math.Min(ahead, MaxExtrapolateMs) / interval, 1.0 + (double)MaxExtrapolateMs / interval), extrapolated: true)));
+							if (ahead <= MaxExtrapolateMs) Extrapolated++;
+							else Held++;
 							continue;
 						}
 					}
@@ -407,7 +417,7 @@ public sealed class TransformSmoother
 	/// <summary>
 	/// Extrapolation guesses past the newest sample; when the next sample lands the true path is somewhere else and
 	/// the body snapped there (ships rubberbanded, and whoever stood on or piloted them with it). The gap is carried
-	/// as an offset that decays over about 100 ms instead. Gaps over 5 m are real teleports and are shown at once.
+	/// as an offset that decays over about 100 ms instead. Gaps over <see cref="TeleportMeters"/> are real teleports and are shown at once.
 	/// </summary>
 	private static byte[] Settle(Track track, long now, byte[] raw, bool extrapolated)
 	{
@@ -419,14 +429,29 @@ public sealed class TransformSmoother
 			if (track.WasExtrapolating && !extrapolated)
 			{
 				Vec3D jump = track.LastShown + track.Velocity * dt - position;
-				track.Offset = jump.Length > 5.0 ? default : jump;
+				track.Offset = jump.Length > TeleportMeters(track.Speed) ? default : jump;
+				track.PaybackUntilMs = now + PaybackMs;
 			}
 			else
 			{
 				track.Velocity = (position - track.LastRaw) * (1.0 / dt);
+				if (!extrapolated)
+				{
+					track.Speed = track.Velocity.Length;
+					// The playout can wobble right after a stall; the heading from before it is the one not to go back on.
+					if (track.Speed > 1.0 && now >= track.PaybackUntilMs) track.Heading = track.Velocity * (1.0 / track.Speed);
+				}
 			}
 		}
 		if (track.Offset.Length < 1e-4) track.Offset = default;
+		// Paying back an overshoot (extrapolated through a server stall) must not drive the body backwards: it waits
+		// until the real track catches up instead.
+		if (track.Offset != default && track.HasOut && now < track.PaybackUntilMs && track.Heading != default)
+		{
+			Vec3D step = position + track.Offset - track.LastShown;
+			double back = step.X * track.Heading.X + step.Y * track.Heading.Y + step.Z * track.Heading.Z;
+			if (back < 0.0) track.Offset -= track.Heading * back;
+		}
 		track.WasExtrapolating = extrapolated;
 		track.LastRaw = position;
 		track.LastShown = position + track.Offset;
@@ -439,6 +464,11 @@ public sealed class TransformSmoother
 		BinaryPrimitives.WriteDoubleLittleEndian(shown.AsSpan(16), track.LastShown.Z);
 		return shown;
 	}
+
+	private const long PaybackMs = 500;
+
+	/// <summary>A gap larger than this is a teleport; a fast ship's extrapolation error (its speed over a quarter second) is not.</summary>
+	public static double TeleportMeters(double speed) => 5.0 + speed * 0.25;
 
 	public static byte[] Lerp(byte[] a, byte[] b, double t) => Lerp(a, b, t, 2.0);
 

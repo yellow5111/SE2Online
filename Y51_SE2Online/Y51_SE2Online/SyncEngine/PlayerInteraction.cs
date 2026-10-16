@@ -47,6 +47,13 @@ internal static class PlayerInteraction
     private static string _lastStage = "";
     private static long _nextStageLogMs;
 
+    /// <summary>A new session gets a fresh try: a failure while the last world was unloading must not switch this off for good.</summary>
+    internal static void Reset()
+    {
+        _failed = false;
+        Clear();
+    }
+
     internal static void Tick()
     {
         if (_failed) return;

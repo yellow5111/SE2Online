@@ -131,7 +131,8 @@ internal sealed class NetSession
 		_o.Advertise = after.Advertise;
 		_o.SessionName = after.SessionName.Trim();
 		_o.Description = after.Description.Trim();
-		_o.PublicAddress = after.PublicAddress ?? "";
+		_o.PublicAddress = after.PublishedAddress;
+		_o.Country = Countries.Normalize(after.Country) ?? "";
 		_o.Password = after.Password ?? "";
 		_o.Pvp = after.Pvp;
 		_o.OfflineRaidProtection = after.OfflineRaidProtection;
@@ -143,34 +144,36 @@ internal sealed class NetSession
 		_o.WaterSync = after.WaterSync;
 		_o.UsageMultipliers = after.UsageMultipliers;
 		ResourceMultipliers.Current = after.UsageMultipliers;
+		_o.InventorySizes = after.InventorySizes;
+		InventoryMultipliers.Current = after.InventorySizes;
 		_host?.ApplySettings(before, after, changes);
 		_log.Info("host: settings applied without restarting hosting" + (changes.Count > 0 ? ": " + string.Join(", ", changes) : ""));
 	}
 
 	internal static string AccessPath(bool dedicated) => dedicated && Y51_SE2Online.Dedicated.DedicatedRuntime.Config != null
 		? System.IO.Path.Combine(Y51_SE2Online.Dedicated.DedicatedRuntime.Config.Directory, "access.json")
-		: WorldAccessPath(HostWorld.Current?.WorldKey);
+		: WorldAccessPath(HostWorld.Current?.WorldKey, HostWorld.Current?.WorldName);
 
 	// A listen host keeps admins, bans, whitelist and runtime choices per world; one shared file made every
-	// player promoted in any hosted world an admin in all of them. The old shared file only seeds bans.
+	// player promoted in any hosted world an admin in all of them. The old shared file seeds bans and the whitelist.
 	private AccessList LoadAccess(string path)
 	{
 		_log.Info("host: admins, bans and whitelist from " + path);
 		return AccessList.Load(path);
 	}
 
-	internal static string WorldAccessPath(string? worldKey)
+	internal static string WorldAccessPath(string? worldKey, string? worldName)
 	{
 		string legacy = PluginPaths.Data("Y51_SE2Online.access.json");
 		if (string.IsNullOrWhiteSpace(worldKey) || worldKey == "?") return legacy;
-		string safe = string.Concat(worldKey.Select(c => char.IsLetterOrDigit(c) || c is '-' or '_' ? c : '_'));
-		if (safe.Length > 80) safe = safe[..80];
-		string path = PluginPaths.Data("Y51_SE2Online.access." + safe + ".json");
-		if (!System.IO.File.Exists(path) && System.IO.File.Exists(legacy))
+		static string Keyed(string key)
 		{
-			try { AccessList.Load(legacy).BansOnlyCopy(path); }
-			catch (Exception) { }
+			string safe = string.Concat(key.Select(c => char.IsLetterOrDigit(c) || c is '-' or '_' ? c : '_'));
+			return PluginPaths.Data("Y51_SE2Online.access." + (safe.Length > 80 ? safe[..80] : safe) + ".json");
 		}
+		string path = Keyed(worldKey);
+		try { AccessList.PrepareWorldFile(path, string.IsNullOrWhiteSpace(worldName) || worldName == "?" ? null : Keyed(worldName), legacy); }
+		catch (Exception) { }
 		return path;
 	}
 
@@ -382,7 +385,7 @@ internal sealed class NetSession
 	private void RunCore()
 	{
 		// Before Steam: a dedicated server whose network fails still runs its world with the configured rules.
-		if (_o.Host) ResourceMultipliers.Current = _o.UsageMultipliers;
+		if (_o.Host) { ResourceMultipliers.Current = _o.UsageMultipliers; InventoryMultipliers.Current = _o.InventorySizes; }
 		SteamLink? steamLink = null;
 		using var dedicatedSteam = _o.Dedicated ? new SteamDedicatedSession() : null;
 		TcpLink? tcpLink = null;
@@ -564,7 +567,7 @@ internal sealed class NetSession
 				_log.Warn("net: error while disconnecting: " + ex.Message);
 			}
 			link.Dispose();
-			if (_o.Host) ResourceMultipliers.Current = ResourceMultipliers.Default;
+			if (_o.Host) { ResourceMultipliers.Current = ResourceMultipliers.Default; InventoryMultipliers.Current = InventoryMultipliers.Default; }
 			_log.Info("net: stopped (" + _stopReason + ")");
 		}
 	}
@@ -590,7 +593,7 @@ internal sealed class NetSession
 				Kind = _o.Dedicated ? "dedicated" : "session", Name = _o.SessionName, WorldName = (world.WorldName ?? "World").Length > 100 ? world.WorldName.Substring(0, 100) : world.WorldName ?? "World",
 				Description = _o.Description, SteamId = _localIdentity.ToString(System.Globalization.CultureInfo.InvariantCulture), Address = _o.PublicAddress,
 				VirtualPort = _o.VirtualPort, Players = (_host?.Players().Count(p => p.Peer.HasValue) ?? 0) + (_o.Dedicated ? 0 : 1), MaxPlayers = _o.MaxPlayers,
-				PluginVersion = _pluginVersion, GameVersion = _gameVersion, SyncVersion = SyncProtocol.Version, FriendsOnly = _o.FriendsOnly,
+				PluginVersion = _pluginVersion, GameVersion = _gameVersion, SyncVersion = SyncProtocol.Version, FriendsOnly = _o.FriendsOnly, Country = _o.Country,
 				Tags = _host != null ? ServerInfoUi.ListingTags(_host) : new[] { string.IsNullOrEmpty(_o.Password) ? null : "Password" }.Where(t => t != null).ToArray()
 			};
 		}

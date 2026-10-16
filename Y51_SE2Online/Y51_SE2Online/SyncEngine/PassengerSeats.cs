@@ -186,6 +186,7 @@ internal static class PassengerSeats
         return new RelativeTransformWithEulerHint(new Vector3(box.Center.X, box.Min.Y + block.SeatHeight, box.Center.Z) + back * block.SeatBack, facing);
     }
 
+#if !PULSAR
     /// <summary>Rig: "tune &lt;block&gt; &lt;height&gt; &lt;back&gt; &lt;yaw&gt;" moves that block's seat dummy; sitting down again uses it.</summary>
     internal static string Tune(string args)
     {
@@ -198,6 +199,7 @@ internal static class PassengerSeats
         dummy.Transform = SeatAt(model, block);
         return $"{block.Name} seat at {dummy.Transform.Transform.Position}, yaw {block.Yaw}";
     }
+#endif
 
     // Placed blocks, blueprints and the save loader's migration of older saves all start from the prefab's object
     // builders, which have to line up with the composite's components.
@@ -443,6 +445,7 @@ internal static class PassengerSeats
         _seat = null;
     }
 
+#if !PULSAR
     /// <summary>Diagnostics: every passenger seat in a session with its occupant.</summary>
     internal static string Describe(Keen.VRage.Core.Game.Systems.Session session)
     {
@@ -524,4 +527,5 @@ internal static class PassengerSeats
                 return FormattableString.Invariant($"me at {at.X:0.00},{at.Y:0.00},{at.Z:0.00} {where}, controlling {top?.GetType().Name ?? "nothing"} | {Describe(session)}");
         }
     }
+#endif
 }

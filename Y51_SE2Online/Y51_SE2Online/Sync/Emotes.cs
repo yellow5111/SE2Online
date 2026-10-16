@@ -63,8 +63,23 @@ public static class PunchRules
     public const long LockSafetyMs = 15000;
     /// <summary>Time the scene gets to start before "no emote playing" ends the lock.</summary>
     public const long LockGraceMs = 750;
+    /// <summary>A lock someone else put on a player (fight scene or hit reaction) never outlives this.</summary>
+    public const long VictimLockMs = 5000;
+    /// <summary>After a lock ends, nobody can lock that player again for this long, so they can flee or fight back.</summary>
+    public const long ReleaseImmunityMs = 3000;
+    /// <summary>Punches still waiting on the host per client; the swing cooldown makes more than this useless.</summary>
+    public const int MaxPendingPerClient = 2;
 
     public static bool Ready(long lastMs, long nowMs) => nowMs - lastMs >= CooldownMs;
+
+    /// <summary>
+    /// Whether a new lock may start. A running lock is never renewed, so repeated hits can't hold a player for good,
+    /// and someone else can't lock a player during the immunity window after their last lock (null: never locked).
+    /// </summary>
+    public static bool MayLock(bool held, bool byOther, long? releasedMs, long nowMs)
+        => !held && !(byOther && releasedMs is long released && nowMs - released < ReleaseImmunityMs);
+
+    public static long LockUntil(bool byOther, long nowMs) => nowMs + (byOther ? VictimLockMs : LockSafetyMs);
 
     /// <summary>Why a player may not fight another, for the refusal notice.</summary>
     public static string Refusal(PlayerRelation relation, bool pvp) => !pvp ? "PvP is off on this server" : relation switch

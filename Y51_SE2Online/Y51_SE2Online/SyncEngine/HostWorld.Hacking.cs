@@ -18,6 +18,7 @@ using Keen.VRage.Core.Game.Systems;
 using Keen.VRage.DCS.Components;
 using Keen.VRage.Library.Definitions;
 using Keen.VRage.Library.Mathematics;
+using Keen.VRage.Library.Memory;
 using Keen.VRage.Library.Utils;
 using Y51_SE2Online.Core;
 using Y51_SE2Online.Sync;
@@ -53,6 +54,7 @@ internal sealed partial class HostWorld
 
     private readonly Dictionary<uint, Hack> _hacks = new();
     private readonly HackCooldowns _hackCooldowns = new(), _lockdownCooldowns = new();
+    private readonly Dictionary<long, long> _hackRetryMs = new();
     private readonly List<(List<Entity> Grids, long Until)> _hackSettles = new();
     private long _nextHackTick;
 
@@ -104,6 +106,28 @@ internal sealed partial class HostWorld
     private static bool InSafeZone(Session session, Vector3D at)
         => session.GetEntitiesOfType<SafeZoneComponent>().Any(z => Alive(z) && z.Get<SafeZoneComponent>().IsInSafeZone(in at));
 
+    /// <summary>Working terminal and control blocks within <paramref name="range"/> of a spot, nearest first: a cell query per grid, not a scan of every block.</summary>
+    private static List<Entity> TerminalsNear(Session session, Vector3D at, double range)
+    {
+        // Reach is measured to a sphere around the block, so look a few metres wider for big blocks.
+        float r = (float)range + 5;
+        var found = new HashSet<Entity>();
+        foreach (var entity in session.GetEntitiesOfType<CubeGridComponent>())
+        {
+            if (!Alive(entity)) continue;
+            var local = CubeGridCoords.WorldToLocal(at, entity.Data.GetWorldTransform());
+            using Buffer<CubeBlockComponent> blocks = default;
+            entity.Get<CubeGridComponent>().CubeBlockStorage.GetCubeBlocks(CubeGridCoords.LocalToGrid(new BoundingBox(local - new Vector3(r, r, r), local + new Vector3(r, r, r))), blocks);
+            foreach (var block in blocks.Data)
+                if (block?.Entity is { } e && e.TryGet<BlockPermissionsComponent>() != null) found.Add(e);
+        }
+        return found.Where(b => Working(b) && Gap(b, at) <= range).OrderBy(b => Gap(b, at)).ToList();
+    }
+
+    private HackRules.Check HackCheck(Session session, OnlineSettings settings, long owner, IEnumerable<long> online, Entity block, bool hasTerminal, long cooldownMs, bool alreadyHacked)
+        => new(settings.Hacking, settings.AllowHackingPlayerGrids, _host.Pvp, _host.OfflineRaidProtection,
+            online.Any(p => p == owner || Relation(owner, p) == PlayerRelation.Faction), InSafeZone(session, At(block)), hasTerminal, cooldownMs, alreadyHacked);
+
     private static PlayerRelation Relation(long self, long other) => TurretRelations.Table.Of(self, other);
     private static bool Defends(long player, long owner) => HackRules.Defends(player, owner, Relation(owner, player));
 
@@ -136,10 +160,13 @@ internal sealed partial class HostWorld
             }
         if (request.Offset != 1) return;
         if (mine != null) { Tell(clientId, $"You are already hacking {mine.GridName}."); return; }
+        if (_hackRetryMs.TryGetValue(actor, out long retry) && now < retry) return;
+        if (_hackRetryMs.Count > 1024) _hackRetryMs.Clear();
+        _hackRetryMs[actor] = now + HackRules.RetryMs;
         var settings = HackSettings;
         var online = host.PlayerTable().Where(p => p.Connected).Select(p => p.Identity).ToHashSet();
         string refusal = null;
-        foreach (var block in session.GetEntitiesOfType<BlockPermissionsComponent>().Where(b => Working(b) && Gap(b, at) <= HackRules.RangeMeters).OrderBy(b => Gap(b, at)))
+        foreach (var block in TerminalsNear(session, at, HackRules.RangeMeters))
         {
             var grid = WorldSocial.GridOf(block);
             if (grid?.TryGet<OwnershipComponent>() == null) continue;
@@ -148,10 +175,9 @@ internal sealed partial class HostWorld
             uint id = _ids.GetOrAssign(grid);
             var ship = ShipOf(grid, owner);
             var terminals = TerminalsOf(ship);
-            refusal = HackRules.Refusal(actor, owner, Relation(actor, owner), new HackRules.Check(settings.Hacking, settings.AllowHackingPlayerGrids, host.Pvp,
-                host.OfflineRaidProtection, online.Any(p => p == owner || Relation(owner, p) == PlayerRelation.Faction), InSafeZone(session, At(block)),
-                terminals.Count > 0, _hackCooldowns.LeftMs(id, now), _hacks.ContainsKey(id)));
+            refusal = HackRules.Refusal(actor, owner, Relation(actor, owner), HackCheck(session, settings, owner, online, block, terminals.Count > 0, _hackCooldowns.LeftMs(id, now), _hacks.ContainsKey(id)));
             if (refusal != null) continue;
+            _hackRetryMs.Remove(actor);
             StartHack(session, id, grid, block, owner, actor, clientId, ship, terminals, now);
             return;
         }
@@ -262,16 +288,12 @@ internal sealed partial class HostWorld
         RemoveHackMarkers(h);
         long now = MpClock.NowMs();
         _hackCooldowns.Start(h.Id, now, HackRules.CooldownMs);
-        var permissions = Singleton<DefinitionManager>.Instance.GetConfiguration<PermissionsConfiguration>();
         var taken = h.Ship.Where(g => Alive(g) && TeamPermissions.OwnerOf(g) == h.Owner).ToList();
         foreach (var grid in taken)
         {
             WorldSocial.SetOwner(grid, h.Hacker);
             WorldSocial.SetSharing(grid, GridSharing.Private);
-            grid.Get<CubeGridComponent>().VisitAllBlocksWithComponent<BlockPermissionsComponent>(p =>
-            {
-                if (BlockAcl.IsAcl(p.AccessGroup.String) || p.AccessGroup == permissions.EveryoneAccess) p.AccessGroup = permissions.OwnerAccess;
-            }, includeSubgrids: false);
+            WorldSocial.ResetBlockAccess(grid);
         }
         if (!PlayerIdentities.IsHuman(h.Owner))
         {
@@ -323,14 +345,14 @@ internal sealed partial class HostWorld
         bool connected = roster.Any(p => p.Identity == h.Hacker && p.ClientId == h.HackerClient);
         var body = connected ? CharacterOf(h.HackerClient) : null;
         var life = Alive(body) ? body.TryGet<CharacterLifeComponent>() : null;
-        string why = !settings.Hacking ? "hacking was turned off on this server"
-            : !connected ? "the hacker left"
+        string why = !connected ? "the hacker left"
             : life is not { IsAlive: true } ? "the hacker died"
             : life.Health < h.Health - 0.01f ? "the hacker took damage"
             : !Alive(h.Grid) || !Working(h.Block) ? "the terminal was destroyed"
             : TeamPermissions.OwnerOf(h.Grid) != h.Owner ? "the grid changed owner"
             : (At(h.Block) - At(body)).Length() > h.Reach + HackRules.CancelSlackMeters ? "the hacker moved away from the terminal"
-            : null;
+            // PvP, diplomacy, safe zones and raid protection can change while the hack runs.
+            : HackRules.Refusal(h.Hacker, h.Owner, Relation(h.Hacker, h.Owner), HackCheck(session, settings, h.Owner, roster.Select(p => p.Identity), h.Block, h.Terminals.Count > 0, 0, false))?.TrimEnd('.');
         if (why != null) { EndHack(h, why); return; }
         h.Health = life.Health;
         if (now >= h.NextScanMs)

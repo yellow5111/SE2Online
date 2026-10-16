@@ -2,14 +2,20 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using Keen.Game2.Simulation.GameSystems;
+using Keen.Game2.Simulation.WorldObjects.CubeGrids;
+using Keen.Game2.Simulation.WorldObjects.CubeGrids.Physicss;
 using Keen.Game2.Simulation.WorldObjects.Characters.Emotes;
 using Keen.VRage.Core;
 using Keen.VRage.Core.Game.Components;
 using Keen.VRage.Core.Game.Data;
+using Keen.VRage.Core.Game.GameSystems.Queries;
 using Keen.VRage.DCS.Components;
 using Keen.VRage.Library.Definitions;
 using Keen.VRage.Library.Mathematics;
 using Keen.VRage.Library.Utils;
+using Keen.VRage.Physics;
+using Keen.VRage.Physics.Queries;
+using Keen.VRage.Voxels.Components;
 using Y51_SE2Online.Core;
 using Y51_SE2Online.Sync;
 
@@ -18,32 +24,43 @@ namespace Y51_SE2Online.SyncEngine;
 internal sealed partial class HostWorld
 {
     private readonly ConcurrentQueue<(ushort From, ushort To)> _punches = new();
+    private readonly PendingShare _punchShare = new(64, PunchRules.MaxPendingPerClient);
     private readonly ConcurrentDictionary<ushort, long> _lastPunch = new();
     private readonly ConcurrentDictionary<ushort, long> _lastFight = new();
     private readonly ConcurrentDictionary<ushort, long> _lastEmote = new();
     private readonly List<(long DueMs, ushort Attacker, ushort Victim)> _fightHits = new();
     private int _emoteLogs;
-    private readonly ConcurrentDictionary<ushort, (long Since, long Until)> _fightLocks = new();
+    private readonly ConcurrentDictionary<ushort, (long Since, long Until, bool ByOther)> _fightLocks = new();
+    private readonly ConcurrentDictionary<ushort, long> _lockReleased = new();
+    private const double ChestHeight = 1.0;
 
     /// <summary>Whether a player is held still by a fight scene or punch swing (movement, body turning and tools).</summary>
     internal bool FightLocked(ushort clientId) => _fightLocks.ContainsKey(clientId);
 
-    private void LockFighter(ushort clientId)
+    /// <param name="byOther">Someone else's punch or fight holds this player, not their own swing.</param>
+    private void LockFighter(ushort clientId, bool byOther)
     {
         long now = MpClock.NowMs();
-        bool already = _fightLocks.ContainsKey(clientId);
-        _fightLocks[clientId] = (now, now + PunchRules.LockSafetyMs);
-        if (already) return;
+        if (_fightLocks.TryGetValue(clientId, out var held))
+        {
+            // Never extended: a hit during the player's own swing only caps that lock at the victim limit.
+            if (byOther && !held.ByOther) _fightLocks[clientId] = (held.Since, Math.Min(held.Until, PunchRules.LockUntil(true, now)), true);
+            return;
+        }
+        if (!PunchRules.MayLock(false, byOther, Released(clientId), now)) return;
+        _fightLocks[clientId] = (now, PunchRules.LockUntil(byOther, now), byOther);
         _host?.SendFightLock(clientId, true);
         if (CharacterOf(clientId) is Entity body) StopInput(body);
         _log.Info($"punch: ClientId {clientId} input held for the scene");
     }
 
+    private long? Released(ushort clientId) => _lockReleased.TryGetValue(clientId, out long at) ? at : null;
+
     // Ends on scene end (no emote playing on the server any more), death, disconnect (no character) or the safety timeout.
     private void UpdateFightLocks()
     {
         long now = MpClock.NowMs();
-        foreach (var (clientId, (since, until)) in _fightLocks)
+        foreach (var (clientId, (since, until, byOther)) in _fightLocks)
         {
             Entity body = CharacterOf(clientId);
             var emotes = body?.TryGet<EmoteControllerComponent>();
@@ -51,6 +68,7 @@ internal sealed partial class HostWorld
                 : now - since > PunchRules.LockGraceMs && emotes != null && !emotes.IsEmotePlaying ? "scene over" : null;
             if (over == null) { StopInput(body); continue; }
             _fightLocks.TryRemove(clientId, out _);
+            if (byOther) _lockReleased[clientId] = now;
             _host?.SendFightLock(clientId, false);
             _log.Info($"punch: ClientId {clientId} input released ({over})");
         }
@@ -58,7 +76,7 @@ internal sealed partial class HostWorld
 
     public void OnPunch(ushort fromClientId, ushort targetClientId)
     {
-        if (_punches.Count < 64) _punches.Enqueue((fromClientId, targetClientId));
+        if (_punchShare.Admit(fromClientId)) _punches.Enqueue((fromClientId, targetClientId));
     }
 
     /// <summary>
@@ -86,6 +104,7 @@ internal sealed partial class HostWorld
         UpdateFightLocks();
         while (_punches.TryDequeue(out var punch))
         {
+            _punchShare.Release(punch.From);
             try { Punch(punch.From, punch.To); }
             catch (Exception ex) { _log.WarnOnce("host-punch", "punch: ClientId " + punch.From + " failed: " + ex.Message); }
         }
@@ -113,7 +132,7 @@ internal sealed partial class HostWorld
         {
             var a = attacker.Data.GetWorldTransform().Position;
             var b = victim.Data.GetWorldTransform().Position;
-            inReach = PunchRules.InReach(a.X - b.X, a.Y - b.Y, a.Z - b.Z);
+            inReach = PunchRules.InReach(a.X - b.X, a.Y - b.Y, a.Z - b.Z) && Clear(attacker, Chest(attacker.Data.GetWorldTransform()), Chest(victim.Data.GetWorldTransform()));
         }
         if (inReach)
         {
@@ -125,11 +144,12 @@ internal sealed partial class HostWorld
                 _log.Info($"punch: ClientId {from} -> ClientId {to}: refused ({why})");
                 return;
             }
-            if (!(_lastFight.TryGetValue(from, out long fought) && now - fought < PunchRules.FightCooldownMs) && StartFight(attacker, victim))
+            if (!(_lastFight.TryGetValue(from, out long fought) && now - fought < PunchRules.FightCooldownMs)
+                && PunchRules.MayLock(FightLocked(to), true, Released(to), now) && StartFight(attacker, victim))
             {
                 _lastFight[from] = now;
-                LockFighter(from);
-                LockFighter(to);
+                LockFighter(from, false);
+                LockFighter(to, true);
                 foreach (long at in PunchRules.FightHitsMs) _fightHits.Add((now + at, from, to));
                 _log.Info($"punch: ClientId {from} -> ClientId {to}: two-character fight started");
                 return;
@@ -139,14 +159,14 @@ internal sealed partial class HostWorld
         if (Singleton<DefinitionManager>.Instance.TryGetDefinition(Emotes.Punch, out EmoteDefinition swing))
         {
             attacker.TryGet<EmoteControllerComponent>()?.RequestPlay(swing);
-            LockFighter(from);
+            LockFighter(from, false);
         }
         if (!inReach) return;
         bool hurt = PvpRules.Punch(victim, TeamPermissions.OwnerOf(attacker), PunchRules.Damage);
         if (hurt && Singleton<DefinitionManager>.Instance.TryGetDefinition(Emotes.GotHit, out EmoteDefinition hit))
         {
             victim.TryGet<EmoteControllerComponent>()?.RequestPlay(hit);
-            LockFighter(to);
+            LockFighter(to, true);
         }
         _log.Info($"punch: ClientId {from} -> ClientId {to}: swing, {(hurt ? PunchRules.Damage + " damage" : "no damage")}");
     }
@@ -154,8 +174,9 @@ internal sealed partial class HostWorld
     /// <summary>
     /// SE2's own two-character emote: the primary runs CS_PunchEmoteDefinition, which plays its reaction on the entity
     /// named after the reaction's actor ("Punch") and parents that entity to the primary at its current offset. The
-    /// host places the partner, names it for the start only and runs the scene; the animation and parenting signals
-    /// replicate to every client like any other emote.
+    /// host lines the pair up, names the partner for the start only and runs the scene; the animation and parenting
+    /// signals replicate to every client like any other emote. The victim stays where it is and only turns; the attacker
+    /// moves to a spot on its own side of the victim, and only when no grid or voxel lies on the way there.
     /// </summary>
     private bool StartFight(Entity attacker, Entity victim)
     {
@@ -166,13 +187,40 @@ internal sealed partial class HostWorld
         if (names == null || lead == null || partner == null || lead.IsInSeat || partner.IsInSeat || lead.IsEmotePlaying || partner.IsEmotePlaying) return false;
         if (primary.Data.TryGet<EntityParentData>(out _) || secondary.Data.TryGet<EntityParentData>(out _) || names.TryGetNamedEntity(PunchRules.FightRole) != null) return false;
         if (!Singleton<DefinitionManager>.Instance.TryGetDefinition(PunchRules.Fight, out EmoteDefinition fight)) return false;
-        var at = primary.Data.GetWorldTransform();
-        Vector3 forward = at.Orientation.GetForward(), up = at.Orientation.GetUp();
-        secondary.Data.Set(new WorldTransform(at.Position + (Vector3D)forward * PunchRules.FightOffset, Quaternion.CreateFromForwardUp(-forward, up)));
+        WorldTransform a = attacker.Data.GetWorldTransform(), v = victim.Data.GetWorldTransform();
+        Vector3 up = v.Orientation.GetUp(), toAttacker = (Vector3)(a.Position - v.Position);
+        toAttacker -= up * Vector3.Dot(toAttacker, up);
+        if (!(toAttacker.LengthSquared() > 1e-4f)) return false;
+        toAttacker = toAttacker.GetNormalized();
+        Vector3D spot = v.Position + (Vector3D)toAttacker * PunchRules.FightOffset;
+        if (!Clear(attacker, Chest(a), spot + (Vector3D)up * ChestHeight)) return false;
+        // The scene parents the partner at its current offset, so the pair must face each other first.
+        victim.Data.Set(new WorldTransform(v.Position, Quaternion.CreateFromForwardUp(toAttacker, up)));
+        attacker.Data.Set(new WorldTransform(spot, Quaternion.CreateFromForwardUp(-toAttacker, up)));
         names.AssignName(secondary, PunchRules.FightRole);
         try { lead.RequestPlay(fight); }
         finally { names.ClearName(PunchRules.FightRole); }
         return lead.IsEmotePlaying;
+    }
+
+    private static Vector3D Chest(in WorldTransform at) => at.Position + (Vector3D)at.Orientation.GetUp() * ChestHeight;
+
+    /// <summary>No grid or voxel between the two points; characters, tools and loose items do not block.</summary>
+    private static bool Clear(Entity context, Vector3D from, Vector3D to)
+    {
+        var physics = context.GetSession<IPhysics>();
+        var scene = context.Scene;
+        if (physics == null || scene == null) return false;
+        using Keen.VRage.Library.Memory.Buffer<SweepQueryHit> hits = default;
+        var ray = RayCastArgs.CreateFromTo(from, to);
+        physics.CastRay(hits, in ray, CollisionPreset.Default);
+        foreach (var hit in hits)
+        {
+            if (VoxelStorageComponentBase.IsEntityVoxel((Scene: scene, Entity: hit.Body))) return false;
+            var body = Entity.TryGetFromDataEntity((Scene: scene, Entity: hit.Body));
+            if (body != null && (body.TryGet<CubeGridComponent>() != null || body.TryGet<GridPhysicsComponent>() != null)) return false;
+        }
+        return true;
     }
 
     private void FightHit(ushort from, ushort to)

@@ -15,6 +15,9 @@ namespace Y51_SE2Online.SyncEngine;
 internal static class FightLock
 {
     private static readonly List<InputHandlerBaseComponent> Held = new();
+    // SE2's ToolbarInputHandlerComponent.Deactivate closes the HUD toolbar but leaves IsToolbarActive set, so Activate
+    // never opens it again. A blocker is SE2's own way to hide it (VoxelDebugScreen): removing it reopens the toolbar.
+    private static readonly object ToolbarBlocker = new();
 
     internal static bool Active => Sync.FightLockState.Locked || Held.Count > 0;
 
@@ -45,6 +48,7 @@ internal static class FightLock
                 try
                 {
                     Stop(handler);
+                    if (handler is ToolbarInputHandlerComponent toolbar) toolbar.AddBlocker(ToolbarBlocker);
                     handler.Deactivate();
                     Held.Add(handler);
                 }
@@ -65,6 +69,7 @@ internal static class FightLock
             {
                 Stop(handler);
                 handler.Activate();
+                if (handler is ToolbarInputHandlerComponent toolbar) toolbar.RemoveBlocker(ToolbarBlocker);
                 restored++;
             }
             catch (Exception ex) { GameLog.Instance.Info($"punch: could not restore {handler.GetType().Name}: {ex.Message}"); }

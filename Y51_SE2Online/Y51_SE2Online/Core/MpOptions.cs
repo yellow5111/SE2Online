@@ -24,6 +24,8 @@ public sealed class MpOptions
 	public string SessionName { get; internal set; } = "My SE2 session";
 
 	public string Description { get; internal set; } = "";
+	/// <summary>The country to publish, "" to let the directory locate the server by IP.</summary>
+	public string Country { get; internal set; } = "";
 
 	public string PublicAddress { get; internal set; } = "";
 
@@ -39,6 +41,7 @@ public sealed class MpOptions
 	public bool WaterSync { get; internal set; }
 	public double VoiceRadiusMeters { get; internal set; }
 	public Y51_SE2Online.Sync.ResourceMultipliers UsageMultipliers { get; internal set; } = Y51_SE2Online.Sync.ResourceMultipliers.Default;
+	public Y51_SE2Online.Sync.InventoryMultipliers InventorySizes { get; internal set; } = Y51_SE2Online.Sync.InventoryMultipliers.Default;
 
 	public bool? SunRotation { get; internal set; }
 

@@ -1,0 +1,4 @@
+Country flags from svg-country-flags 1.2.10 (https://github.com/hampusborgos/country-flags),
+package license "PD": the flags are in the public domain (rendered from Wikimedia Commons sources).
+Resized to 64 px wide, 8-bit RGBA PNG. File names are lowercase ISO 3166-1 alpha-2 codes
+(plus xk for Kosovo and gb-eng/gb-sct/gb-wls/gb-nir).

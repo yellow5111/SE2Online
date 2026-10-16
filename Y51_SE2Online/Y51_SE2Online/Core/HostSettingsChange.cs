@@ -26,6 +26,7 @@ public static class HostSettingsChange
         if (before.FriendsOnly != after.FriendsOnly) live.Add(after.FriendsOnly ? "Steam friends only" : "open to everyone");
         if (before.Advertise != after.Advertise) live.Add(after.Advertise ? "listed in the public directory" : "removed from the public directory");
         if ((before.PublicAddress ?? "") != (after.PublicAddress ?? "")) live.Add("public address updated");
+        if (Countries.Normalize(before.Country) != Countries.Normalize(after.Country)) live.Add(Countries.Normalize(after.Country) is { Length: 2 } code ? "country " + Countries.Name(code) : "country located by IP");
         if (before.Pvp != after.Pvp) live.Add("PvP " + OnOff(after.Pvp));
         if (before.OfflineRaidProtection != after.OfflineRaidProtection) live.Add("offline raid protection " + OnOff(after.OfflineRaidProtection));
         if (before.PcuLimit != after.PcuLimit) live.Add(after.PcuLimit is int pcu ? (pcu == 0 ? "no PCU limit" : "PCU limit " + pcu.ToString("N0", CultureInfo.InvariantCulture)) : "the world's own PCU limit");
@@ -35,6 +36,7 @@ public static class HostSettingsChange
         if (before.VoiceRadiusMeters != after.VoiceRadiusMeters) live.Add(after.VoiceRadiusMeters > 0 ? "voice range " + Metres(after.VoiceRadiusMeters) : "voice chat off");
         if (before.WaterSync != after.WaterSync) live.Add("water sync " + OnOff(after.WaterSync) + " for players who join from now on");
         if (before.UsageMultipliers != after.UsageMultipliers) live.Add("resource usage " + after.UsageMultipliers.Describe());
+        if (before.InventorySizes != after.InventorySizes) live.Add("inventory size " + after.InventorySizes.Describe());
         if (before.Hacking != after.Hacking || before.AllowHackingPlayerGrids != after.AllowHackingPlayerGrids || before.HackTimeMultiplier != after.HackTimeMultiplier
             || before.HackLockdownSeconds != after.HackLockdownSeconds || before.HackLockdownCooldownSeconds != after.HackLockdownCooldownSeconds)
             live.Add(!after.Hacking ? "hacking off" : "hacking on" + (after.AllowHackingPlayerGrids ? " (player grids with PvP)" : " (NPC and unowned grids only)") + ", hack time x" + after.HackTimeMultiplier.ToString("0.##", CultureInfo.InvariantCulture));

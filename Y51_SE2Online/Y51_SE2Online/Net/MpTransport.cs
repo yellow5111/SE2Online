@@ -172,12 +172,13 @@ public sealed class MpTransport : ITransport, IDisposable
 			_log.WarnOnce($"oversize-{channel}", $"{channel} message of {payload.Length} B exceeds {maxDirect} B; use Channel.Bulk");
 			return 0;
 		}
-		if (channel == Channel.Bulk && payload.Length > _o.MaxBulkMessageBytes)
+		int maxBulk = _o.Role == 0 ? _o.MaxBulkMessageBytes : _o.MaxBulkFromClientBytes;
+		if (channel == Channel.Bulk && payload.Length > maxBulk)
 		{
-			_log.WarnOnce("oversize-bulk", $"bulk message of {payload.Length} B exceeds {_o.MaxBulkMessageBytes} B");
+			_log.Warn($"bulk message (type {(payload.Length > 0 ? payload.Span[0] : 0)}) of {payload.Length} B exceeds the {maxBulk} B the {(_o.Role == 0 ? "client" : "host")} accepts; not sent");
 			return 0;
 		}
-		if (channel == Channel.Bulk && BulkCompression.Pack(payload.Span) is { } packed)
+		if (channel == Channel.Bulk && BulkCompression.Pack(payload.Span, _o.Role == 0 ? _o.MaxInflatedFromHostBytes : _o.MaxInflatedFromClientBytes) is { } packed)
 		{
 			payload = packed;
 		}
@@ -467,7 +468,7 @@ public sealed class MpTransport : ITransport, IDisposable
 					Conn = e.Conn,
 					Id = peerId,
 					LinkConnectedMs = now,
-					Reassembler = new Reassembler(_o.MaxBulkMessageBytes, 8, 536870912L)
+					Reassembler = _o.Role == 0 ? new Reassembler(_o.MaxBulkFromClientBytes, 8, 2L * _o.MaxBulkFromClientBytes) : new Reassembler(_o.MaxBulkMessageBytes, 8, 536870912L)
 				};
 				p.Stats.Peer = peerId;
 				p.Stats.ConnectedMs = now;
@@ -791,6 +792,13 @@ public sealed class MpTransport : ITransport, IDisposable
 		}
 	}
 
+	private void CompressionError(PeerState p, string error)
+	{
+		p.Stats.ProtocolErrors++;
+		_log.Warn($"peer {p.Id}: protocol error: {error}; disconnecting");
+		Close(p, DisconnectCodes.ProtocolError, "bad compressed message", byPeer: false, "local", notifyPeer: true);
+	}
+
 	private void ProtocolError(PeerState p, string error)
 	{
 		p.Stats.ProtocolErrors++;
@@ -887,14 +895,15 @@ public sealed class MpTransport : ITransport, IDisposable
 		if (data.Length > 0 && data[0] == BulkCompression.Marker)
 		{
 			int declared = BulkCompression.DeclaredLength(data);
+			// Honest senders never produce a bad envelope, so the first one ends the connection, either direction.
 			if (ch != Channel.Bulk || (declared > _o.MaxBulkBytesBeforeAdmit && BulkGate is { } gate && !gate(p.Id)))
 			{
-				ProtocolError(p, "compressed message where none is allowed");
+				CompressionError(p, "compressed message where none is allowed");
 				return;
 			}
-			if (BulkCompression.Unpack(data, _o.MaxBulkMessageBytes) is not { } message)
+			if (BulkCompression.Unpack(data, _o.Role == 0 ? _o.MaxInflatedFromClientBytes : _o.MaxInflatedFromHostBytes) is not { } message)
 			{
-				ProtocolError(p, "malformed compressed message");
+				CompressionError(p, $"malformed compressed message ({data.Length} B declaring {declared} B)");
 				return;
 			}
 			data = message;

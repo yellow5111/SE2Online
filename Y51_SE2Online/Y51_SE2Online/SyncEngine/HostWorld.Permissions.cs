@@ -44,7 +44,8 @@ internal sealed partial class HostWorld
             SocialAction.AntennaTag => block?.TryGet<Keen.Game2.Simulation.GameSystems.Antennas.AntennaComponent>() != null ? block : null,
             _ => entity == null ? null : WorldSocial.GridOf(entity)
         };
-        return request with { Grid = target == null ? 0 : _ids.GetOrAssign(target), Secure = Guid.Empty };
+        // A Refresh keeps its id: the snapshot's Focus echoes it so the panel can tell same-named grids apart.
+        return request with { Grid = target == null ? 0 : _ids.GetOrAssign(target), Secure = request.Action == SocialAction.Refresh ? request.Secure : Guid.Empty };
     }
 
     /// <summary>

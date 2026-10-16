@@ -20,6 +20,8 @@ public sealed class DirectoryListing
     public string GameVersion { get; set; } = "";
     public int SyncVersion { get; set; }
     public bool FriendsOnly { get; set; }
+    /// <summary>2-letter country code: configured by the host, or located by the directory from its IP; "" when unknown.</summary>
+    public string Country { get; set; } = "";
     public string[] Tags { get; set; } = Array.Empty<string>();
     public DateTimeOffset UpdatedAt { get; set; }
     public string FavoriteKey => Kind + ":" + (Kind == "dedicated" && !string.IsNullOrEmpty(Address) ? Address : SteamId != "0" ? SteamId : Address);
@@ -34,7 +36,7 @@ public sealed class DirectoryListing
             try { ServerEndpoint.Parse(Address); }
             catch (FormatException) when (id != 0 && ValidHostAddress(Address)) { }
         }
-        if (VirtualPort < 0 || VirtualPort > 65535 || Players < 0 || MaxPlayers < 1 || MaxPlayers > 1024 || Players > MaxPlayers || Tags == null || Tags.Length > 8 || PluginVersion == null || PluginVersion.Length > 100 || GameVersion == null || GameVersion.Length > 100 || SyncVersion < 1) throw new FormatException("The listing contains invalid player or version information.");
+        if (VirtualPort < 0 || VirtualPort > 65535 || Players < 0 || MaxPlayers < 1 || MaxPlayers > 1024 || Players > MaxPlayers || Tags == null || Tags.Length > 8 || PluginVersion == null || PluginVersion.Length > 100 || GameVersion == null || GameVersion.Length > 100 || SyncVersion < 1 || (Country ??= "").Length > 8) throw new FormatException("The listing contains invalid player or version information.");
     }
 
     private static bool ValidHostAddress(string address)

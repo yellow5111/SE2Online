@@ -205,8 +205,7 @@ public sealed class PlayersScreen : ScreenView
         bool canTouchAdmin = hosting || p?.Role != OnlineRole.Admin;
         _kick.IsEnabled = _ban.IsEnabled = !busy && target && p.Connected && canTouchAdmin;
         _ban.IsEnabled = !busy && target && canTouchAdmin;
-        bool self = p != null && PeerAlias.SteamOf(p.SteamId) == PeerAlias.SteamOf(NetSession.Current?.LocalIdentity ?? 0);
-        _admin.IsEnabled = !busy && target && (hosting || !self);
+        _admin.IsEnabled = !busy && target && canTouchAdmin;
         _admin.Content = p?.Role == OnlineRole.Admin ? "Remove admin" : "Make admin";
         _whitelistButton.IsEnabled = !busy && target;
         _whitelistButton.Content = p != null && Listed(p.SteamId) ? "Remove from whitelist" : "Add to whitelist";
@@ -218,7 +217,7 @@ public sealed class PlayersScreen : ScreenView
         _selected.Text = p == null ? "Select a player in the roster." : p.Name + "  /  " + RoleText(p.Role) + (p.SteamId != 0 ? "  /  " + p.SteamId : "");
         _moderationNote.Text = !AdminAccess.InSession ? "Moderation is available in a multiplayer session."
             : !admin ? "Only the host and admins can kick, ban or promote players."
-            : p?.Role == OnlineRole.Admin && !hosting ? "Admins can demote other admins; only the host can kick or ban an admin."
+            : p?.Role == OnlineRole.Admin && !hosting ? "Only the host can demote, kick or ban an admin."
             : "Kicked players can rejoin. Banned players see the reason and remaining time when they try to connect.";
     }
 }

@@ -135,17 +135,17 @@ internal static class VoiceChat
 		var names = Players().ToDictionary(p => p.ClientId, p => p.Name);
 		while (Inbox.TryDequeue(out var item))
 		{
-			names.TryGetValue(item.Speaker, out string name);
-			if (name != null && settings.MutedVoices?.Contains(name, StringComparer.OrdinalIgnoreCase) == true) continue;
+			// Each speaker costs an FMOD stream and a ring buffer, so only ids in the player table get one.
+			if (!names.TryGetValue(item.Speaker, out string name) || name == null) continue;
+			if (settings.MutedVoices?.Contains(name, StringComparer.OrdinalIgnoreCase) == true) continue;
 			var speaker = SpeakerFor(item.Speaker);
 			if (speaker == null) return;
 			speaker.At = item.At;
 			speaker.LastMs = now;
-			speaker.Name = name ?? "Player " + item.Speaker;
-			Decode(speaker, item.Frame);
+			speaker.Name = name;
+			Decode(speaker, item.Frame, VoiceLevel.Gain(settings.VoiceVolume));
 		}
 		if (!TryListener(out WorldTransform listener)) return;
-		float volume = Math.Clamp(settings.VoiceVolume, 0, 200) / 100f;
 		float max = (float)Math.Max(Radius, VoiceRelay.MinRadius);
 		foreach (var (id, speaker) in Speakers.ToList())
 		{
@@ -162,15 +162,14 @@ internal static class VoiceChat
 			var position = new VECTOR { x = (float)relative.X, y = (float)relative.Y, z = (float)relative.Z };
 			var velocity = new VECTOR();
 			speaker.Channel.set3DAttributes(ref position, ref velocity);
-			speaker.Channel.set3DMinMaxDistance(2f, max);
-			speaker.Channel.setVolume(volume);
+			speaker.Channel.set3DMinMaxDistance(VoiceLevel.FullVolumeMeters, max);
 		}
 		var talking = Speakers.Values.Where(s => now - s.LastMs < TalkingShownMs).Select(s => s.Name);
 		if (now - _selfTalkingMs < TalkingShownMs) talking = talking.Prepend("You");
 		Talking = talking.ToArray();
 	}
 
-	private static void Decode(Speaker speaker, byte[] frame)
+	private static void Decode(Speaker speaker, byte[] frame, float gain)
 	{
 		EVoiceResult result;
 		uint written;
@@ -185,7 +184,7 @@ internal static class VoiceChat
 			{
 				// Too far behind (a stall or a burst): drop the oldest audio rather than grow the delay.
 				if (speaker.Count == ring.Length) { speaker.Read = (speaker.Read + 1) % ring.Length; speaker.Count--; }
-				ring[(speaker.Read + speaker.Count) % ring.Length] = (short)(_pcm[2 * i] | _pcm[2 * i + 1] << 8);
+				ring[(speaker.Read + speaker.Count) % ring.Length] = VoiceLevel.Apply((short)(_pcm[2 * i] | _pcm[2 * i + 1] << 8), gain);
 				speaker.Count++;
 			}
 		}
@@ -206,7 +205,9 @@ internal static class VoiceChat
 			decodebuffersize = _rate / 50
 		};
 		info.pcmreadcallback = ReadCallback;
-		RESULT result = core.createSound(IntPtr.Zero, MODE.OPENUSER | MODE.LOOP_NORMAL | MODE.CREATESTREAM | MODE._3D, ref info, out Sound sound);
+		// FMOD's default inverse rolloff halves the level at twice the min distance (-14 dB at 10 m); linear-square
+		// stays at full volume within FullVolumeMeters and fades to silence at the voice radius.
+		RESULT result = core.createSound(IntPtr.Zero, MODE.OPENUSER | MODE.LOOP_NORMAL | MODE.CREATESTREAM | MODE._3D | MODE._3D_LINEARSQUAREROLLOFF, ref info, out Sound sound);
 		if (result != RESULT.OK) throw new InvalidOperationException("FMOD createSound for voice: " + result);
 		lock (BySound) BySound[sound.handle] = speaker;
 		speaker.Sound = sound;

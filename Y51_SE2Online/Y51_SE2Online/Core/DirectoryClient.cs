@@ -63,12 +63,15 @@ public sealed class DirectoryClient : IDisposable
         cancellation = timeout.Token;
         listing.Validate();
         using var request = Request(lease == null ? HttpMethod.Post : HttpMethod.Put, lease);
-        request.Content = new StringContent(JsonSerializer.Serialize(new
+        var body = JsonSerializer.SerializeToNode(new
         {
             listing.Kind, listing.Name, listing.WorldName, listing.Description, listing.SteamId,
             listing.Address, listing.VirtualPort, listing.Players, listing.MaxPlayers,
             listing.PluginVersion, listing.GameVersion, listing.SyncVersion, listing.FriendsOnly, listing.Tags
-        }, Json), Encoding.UTF8, "application/json");
+        }, Json)!.AsObject();
+        // Sent only when configured: the directory locates "auto" servers itself, and directories older than 0.15.2 refuse unknown fields.
+        if (Countries.IsCode(listing.Country)) body["country"] = listing.Country;
+        request.Content = new StringContent(body.ToJsonString(Json), Encoding.UTF8, "application/json");
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellation).ConfigureAwait(false);
         if (lease != null && response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Unauthorized)
             return await PublishAsync(listing, null, cancellation).ConfigureAwait(false);

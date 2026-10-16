@@ -117,8 +117,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		_options = new MpOptions();
 		host.OnBeforeProjectsLoaded += OnBeforeProjectsLoaded;
 		host.OnBeforeEngineInstantiated += OnBeforeEngineInstantiated;
-		AssertHandler.Install();
-		OnlineUi.InstallRawTexts(_harmony);
+		Optional("plugin texts", () => OnlineUi.InstallRawTexts(_harmony));
 		Controller = new OnlineSessionController(new OnlineRuntime(this));
 		var bootstrap = new[]
 		{
@@ -132,18 +131,22 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			if (!hook.Item2) throw new InvalidOperationException(hook.Item1 + ": " + hook.Item3);
 		}
 		DedicatedRuntime.Initialize(LaunchArgs, _harmony);
+		// A dedicated server loads its world before any session starts; clients only change assertions while online.
+		if (DedicatedRuntime.Requested) AssertHandler.Install();
 		AutoUpdateClient.CleanUp();
 		PassengerSeats.Hook();
+		// Ownership, PvP and turret relations enforce the server's rules: without them the plugin stays off.
 		WorldSocial.Install(_harmony);
-		NameSync.Install(_harmony);
 		TurretRelations.Install(_harmony);
 		PvpRules.Install(_harmony);
-		MapGuard.Install(_harmony);
-		JoinStatusUi.Install(_harmony);
-		BlockSizeFilter.Install(_harmony);
-		BackupBlobFix.Install(_harmony);
-		ResourceMultiplierRules.Install(_harmony);
-		BrokenMods.Install(_harmony);
+		Optional("control panel names", () => NameSync.Install(_harmony));
+		Optional("map guard", () => MapGuard.Install(_harmony));
+		Optional("shared discoveries", () => SharedDiscoveries.Install(_harmony));
+		Optional("join status", () => JoinStatusUi.Install(_harmony));
+		Optional("block size names", () => BlockSizeFilter.Install(_harmony));
+		Optional("autosave blob fix", () => BackupBlobFix.Install(_harmony));
+		Optional("resource usage", () => ResourceMultiplierRules.Install(_harmony));
+		Optional("broken mods", () => BrokenMods.Install(_harmony));
 		InstallExitGuards();
 		if (DedicatedRuntime.Headless)
 		{
@@ -154,20 +157,28 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		else
 		{
 			MpMenu.Install(_harmony);
-			GpsShareUi.Install();
-			GunHudGuard.Install(_harmony);
-			AnimatorGuard.Install(_harmony);
-			SoundRange.Install(_harmony);
-			ProceduralVoxelHandoff.Install(_harmony);
-			HostOnlySaves.Install(_harmony);
-			WaterMirror.Install(_harmony);
-			PassengerSeats.Install(_harmony);
-			SeatRestore.Install(_harmony);
-			TradeUi.Install();
-			ReplicationRaceGuards.Install(_harmony);
-			PermissionFeedback.Install(_harmony);
+			Optional("GPS sharing", GpsShareUi.Install);
+			Optional("gun HUD guard", () => GunHudGuard.Install(_harmony));
+			Optional("animator guard", () => AnimatorGuard.Install(_harmony));
+			Optional("sound range", () => SoundRange.Install(_harmony));
+			Optional("procedural voxel handoff", () => ProceduralVoxelHandoff.Install(_harmony));
+			Optional("flora sector fix", () => FloraSectorSpawnFix.Install(_harmony));
+			Optional("host-only saves", () => HostOnlySaves.Install(_harmony));
+			Optional("water sync", () => WaterMirror.Install(_harmony));
+			Optional("passenger seats", () => PassengerSeats.Install(_harmony));
+			Optional("seat restore", () => SeatRestore.Install(_harmony));
+			Optional("trade UI", TradeUi.Install);
+			Optional("replication race guards", () => ReplicationRaceGuards.Install(_harmony));
+			Optional("permission feedback", () => PermissionFeedback.Install(_harmony));
 		}
 		_log.Info(DedicatedRuntime.Headless ? "Y51_SE2Online dedicated bootstrap installed" : "Y51_SE2Online ready: use Multiplayer in the main or pause menu");
+	}
+
+	// A game update that renames a member a feature patches turns off only that feature; patches it made before the throw stay until Dispose.
+	private void Optional(string feature, Action install)
+	{
+		try { install(); }
+		catch (Exception ex) { _log.Warn($"{feature}: not installed for this game build, feature off ({ex.GetType().Name}: {ex.Message})"); }
 	}
 
 	// Installed once: leaving to the menu resets mode patches, and quitting from the menu afterwards still needs them.
@@ -207,6 +218,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		bool joining = _options.Networking && _options.Join && _options.Sync;
 		if (hosting | joining)
 		{
+			AssertHandler.Install();
 			hooks.AddRange(ReplicationProbe.Install(_modeHarmony, _log));
 		}
 		if (hosting)
@@ -370,6 +382,10 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		if (!NetSession.ClearStopped()) throw new InvalidOperationException("The previous network thread is still running.");
 		_modeHarmony.UnpatchAll(_modeHarmony.Id);
 		ReplicationProbe.Stop();
+		// Leaving a session must not fail on a cleanup step; each logs its own failure instead.
+		try { RestoreHostRules(); } catch (Exception ex) { _log.Warn("host rules: restoring the game's definitions after hosting failed: " + ex); }
+		try { if (!DedicatedRuntime.Requested) AssertHandler.Uninstall(); } catch (Exception ex) { _log.Warn("asserts: restoring the game's handler failed: " + ex); }
+		PlayerInteraction.Reset();
 		HostWorld.Reset();
 		ClientWorld.Reset();
 		HostIdentities.Reset();
@@ -389,6 +405,27 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		_installingMode = false;
 	}
 
+	// The usage and inventory rules rewrite global definitions, which outlive hosting: without this a single-player world
+	// played after hosting ran with the host's x0/x10 until the game restarted.
+	private void RestoreHostRules()
+	{
+		bool resources = ResourceMultiplierRules.Restore();
+		bool inventories = InventoryMultiplierRules.Restore();
+		var server = App?.ServerSession;
+		var hostClient = HostWorld.Current?.HostClientSession?.SessionComponents.TryGet<Keen.VRage.Multiplayer.Replications.InProcess.InProcessReplicationSessionComponent>();
+		if (!(resources | inventories) || server == null || hostClient == null || hostClient.IsUnloading) return;
+		// The world stays loaded after "stop hosting": its blocks and inventories are refreshed on its own server thread.
+		hostClient.PostInvoke(_ =>
+		{
+			try
+			{
+				if (resources) ResourceMultiplierRules.Refresh(server);
+				if (inventories) InventoryMultiplierRules.Refresh(server);
+			}
+			catch (Exception ex) { _log.Warn("host rules: could not refresh the loaded world after hosting: " + ex.Message); }
+		});
+	}
+
 	private sealed class OnlineRuntime : IOnlineRuntime
 	{
 		private readonly MpPlugin _plugin;
@@ -398,7 +435,11 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		public bool NetworkingStopped => (NetSession.Current == null || NetSession.Current.HasStopped) && (!HasWorld || !HostWorld.CleanupPending);
 		public void StopNetworking() => NetSession.Current?.Stop("multiplayer mode changed", 0);
 		public void ReturnToMenu() => App.Disconnect();
-		public void ResetMode() => _plugin.ResetMode();
+		public void ResetMode()
+		{
+			try { _plugin.ResetMode(); }
+			catch (Exception ex) { _plugin._log.Warn("session: leaving the multiplayer mode failed: " + ex); throw; }
+		}
 		public void StartMode(MpOptions options)
 		{
 			try
@@ -543,6 +584,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			ReplicationProbe.Stop();
 			_modeHarmony.UnpatchAll(_modeHarmony.Id);
 			_harmony.UnpatchAll(_harmony.Id);
+			AssertHandler.Uninstall();
 		}
 		catch (Exception ex)
 		{

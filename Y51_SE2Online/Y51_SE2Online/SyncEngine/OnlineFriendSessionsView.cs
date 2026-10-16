@@ -47,7 +47,7 @@ internal sealed class OnlineFriendSessionsView : UserControl
         var note = OnlineUi.Text("Steam presence finds friends even when they do not publish their session in the public directory.", "SubtleNotice", 22);
         note.Margin = new Thickness(0, 16, 0, 0); Grid.SetRow(note, 4); roster.Children.Add(note);
         _join = OnlineUi.Button("Join friend's world", Join, "JoinFriendSession", true);
-        var details = OnlineUi.Stack(_title, _world, _build,
+        var details = OnlineUi.Stack(OnlineUi.Fit(_title), OnlineUi.Fit(_world), OnlineUi.Fit(_build),
             OnlineUi.Text("Game version and available player slots are not published through Steam presence. They are checked when connecting.", "SubtleNotice", 22), _reason, _join);
         Content = OnlineUi.Columns(OnlineUi.Panel(roster), OnlineUi.Panel(OnlineUi.Scroll(details)), "*,24,500");
         Detail();

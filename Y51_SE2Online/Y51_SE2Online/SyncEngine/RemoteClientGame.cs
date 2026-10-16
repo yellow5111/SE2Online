@@ -103,6 +103,7 @@ internal static class RemoteClientGame
 	{
 		await Task.SetLifetime(app.Scene);
 		string modsError = modsReady == null ? null : await modsReady;
+		if (modsError == WorkshopMods.Cancelled) { log.Info("client: the join was called off during the Workshop download; not loading the host's world"); return; }
 		if (modsError != null) throw new InvalidOperationException(modsError);
 		// Without this the client keeps whatever mods the last single-player world loaded.
 		app.GameData.SetRequiredProjects(WorkshopMods.ToModList(mods));

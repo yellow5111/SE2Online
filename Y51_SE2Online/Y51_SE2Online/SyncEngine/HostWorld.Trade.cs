@@ -28,13 +28,14 @@ internal sealed partial class HostWorld
 {
     private const double TradeRangeMeters = 30;
     private readonly ConcurrentQueue<(ushort ClientId, byte[] Data)> _tradeInbox = new();
+    private readonly PendingShare _tradeShare = new(256, TradeBook.MaxActionsPerSecond);
     private readonly TradeBook _trades = new();
     private readonly Dictionary<(long Trade, int Side), string> _tradeHaveSent = new();
     private long _nextTradeScan;
 
     public void OnTrade(ushort clientId, byte[] data)
     {
-        if (_tradeInbox.Count < 256) _tradeInbox.Enqueue((clientId, data));
+        if (_tradeShare.Admit(clientId)) _tradeInbox.Enqueue((clientId, data));
     }
 
     private void UpdateTrades(Session session)
@@ -44,6 +45,7 @@ internal sealed partial class HostWorld
         long now = MpClock.NowMs();
         while (_tradeInbox.TryDequeue(out var item))
         {
+            _tradeShare.Release(item.ClientId);
             try { HandleTrade(session, host, item.ClientId, item.Data, now); }
             catch (Exception ex) { _log.WarnOnce("trade-failed-" + ex.GetType().Name, "trade: request from ClientId " + item.ClientId + " failed: " + ex.Message); }
         }
@@ -133,6 +135,9 @@ internal sealed partial class HostWorld
         for (int side = 0; side < 2; side++)
             foreach (var (item, raw) in trade.Offers[side])
                 if (Owned(session, trade.Players[side], item) < raw) return TradeName(host, trade.Players[side]) + " no longer has everything offered.";
+        for (int side = 0; side < 2; side++)
+            if (trade.Offers[side].TryGetValue(Guid.Empty, out long offered) && offered > 0 && Credits(session, trade.Players[1 - side]) == null)
+                return TradeName(host, trade.Players[1 - side]) + " has no credit account yet.";
         var moves = new List<(InventoryComponent From, InventoryComponent To, ItemDefinition Item, FixedPoint Amount)>();
         string failure = null;
         for (int side = 0; side < 2 && failure == null; side++)
@@ -156,8 +161,10 @@ internal sealed partial class HostWorld
         {
             if (!trade.Offers[side].TryGetValue(Guid.Empty, out long credits) || credits <= 0) continue;
             var amount = new FixedPoint { RawValue = credits };
-            Credits(session, trade.Players[side])?.ModifyCredits(-amount);
-            Credits(session, trade.Players[1 - side])?.ModifyCredits(amount);
+            PlayerCreditsData giver = Credits(session, trade.Players[side]), taker = Credits(session, trade.Players[1 - side]);
+            if (giver == null || taker == null) continue;
+            giver.ModifyCredits(-amount);
+            taker.ModifyCredits(amount);
         }
         _log.Info($"trade: {TradeName(host, trade.Players[0])} gave [{Describe(trade.Offers[0])}] for {TradeName(host, trade.Players[1])}'s [{Describe(trade.Offers[1])}]");
         return null;

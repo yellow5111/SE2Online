@@ -185,6 +185,7 @@ public sealed partial class HostSession
 			{
 				if (account == PeerAlias.SteamOf(actorId)) return "You cannot demote yourself.";
 				if (account == _o.HostSteamId) return "You cannot demote the host.";
+				if (_o.Access.IsAdmin(account)) return "Only the host can demote another admin.";
 			}
 			result = _o.Access.SetAdmin(account, name, r.Action == AdminAction.Promote); break;
 		case AdminAction.WhitelistAdd: result = _o.Access.SetWhitelisted(account, name, true); break;

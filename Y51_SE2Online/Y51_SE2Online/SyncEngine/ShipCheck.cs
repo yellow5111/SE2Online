@@ -138,6 +138,7 @@ internal static class ShipCheck
         return changes;
     }
 
+#if !PULSAR
     /// <summary>The rig probe's ships by candidate key (see <see cref="HostWorld.ProbeShips"/>).</summary>
     internal static readonly Dictionary<string, List<Entity>> Probed = new();
 
@@ -161,4 +162,5 @@ internal static class ShipCheck
         if (path != null) System.IO.File.AppendAllText(path, text.ToString());
         return text.ToString();
     }
+#endif
 }

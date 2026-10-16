@@ -59,14 +59,19 @@ public static class WaterGridsMessage
 		return messages;
 	}
 
+	private const int EntryHeader = 4 + 12 + 1 + 1 + 4;
+
+	/// <summary>The grids, or FormatException for anything malformed or truncated.</summary>
 	public static List<Grid> Decode(ReadOnlySpan<byte> data)
 	{
+		if (data.Length < 3) throw new FormatException("short water grids message");
 		var r = new WireReader(data.Slice(1));
 		int count = r.U16();
 		if (count > MaxGrids) throw new FormatException("too many water grids");
 		var grids = new List<Grid>(count);
 		for (int i = 0; i < count; i++)
 		{
+			if (r.Remaining < EntryHeader) throw new FormatException("truncated water grid entry");
 			uint domain = r.U32();
 			int x = r.I32(), y = r.I32(), z = r.I32();
 			byte lod = r.U8(), resolution = r.U8();

@@ -74,8 +74,9 @@ internal static class WaterMirror
 		{
 			List<WaterGridsMessage.Grid> grids;
 			try { grids = WaterGridsMessage.Decode(data); }
-			catch (Exception ex) when (ex is FormatException or ArgumentOutOfRangeException)
+			catch (Exception)
 			{
+				// A bad message from the host is dropped; letting it escape would stop world sync for the session.
 				Skipped++;
 				continue;
 			}

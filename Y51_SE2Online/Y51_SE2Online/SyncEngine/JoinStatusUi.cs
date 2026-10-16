@@ -43,6 +43,10 @@ internal sealed class JoinStatusUi
 
 	private LoadingDialogViewModel? _download;
 
+	private bool _downloadAbortable;
+
+	private WorkshopMods.Prompt? _prompt;
+
 	private static readonly System.Reflection.MethodInfo NotifyChanged = HarmonyLib.AccessTools.Method(typeof(LoadingDialogViewModel), "OnPropertyChanged", new[] { typeof(string) });
 
 	private string? _noticeKey;
@@ -107,7 +111,13 @@ internal sealed class JoinStatusUi
 			ReleaseHold(shared, progress, now);
 			bool loading = UpdateLoading(shared, progress.LoadingScreen(now));
 			// Cancelling leaves the join; never reopen a dialog for a session that is going away.
-			UpdateDialog(shared, loading || MpPlugin.Controller?.Current?.Join != true ? default : progress.Dialog(now));
+			bool joining = MpPlugin.Controller?.Current?.Join == true;
+			if (joining && WorkshopMods.Pending is { Answer.Task.IsCompleted: false } ask)
+			{
+				ShowModPrompt(shared, ask);
+				return;
+			}
+			UpdateDialog(shared, loading || !joining ? default : progress.Dialog(now), progress.ModsActive);
 		}
 		catch (Exception ex)
 		{
@@ -164,11 +174,11 @@ internal sealed class JoinStatusUi
 		return true;
 	}
 
-	private void UpdateDialog(SharedUIComponent shared, (JoinProgress.DialogKind Kind, string Title, string Text, string Key) view)
+	private void UpdateDialog(SharedUIComponent shared, (JoinProgress.DialogKind Kind, string Title, string Text, string Key) view, bool modsActive)
 	{
 		if (view.Kind == JoinProgress.DialogKind.Download)
 		{
-			ShowDownload(shared, view.Title, view.Text);
+			ShowDownload(shared, view.Title, view.Text, modsActive);
 			return;
 		}
 		if (view.Kind != JoinProgress.DialogKind.Progress)
@@ -238,13 +248,13 @@ internal sealed class JoinStatusUi
 	}
 
 	/// <summary>
-	/// The world download at the menu: a native modal dialog with no cancel button, so nothing else can be clicked
-	/// until the loading screen takes over. Its text changes in place instead of the dialog being reopened.
+	/// The world download at the menu: a native modal dialog, so nothing else can be clicked until the loading screen
+	/// takes over. It can be cancelled only while the host's Workshop mods download. Its text changes in place instead of the dialog being reopened.
 	/// </summary>
-	private void ShowDownload(SharedUIComponent shared, string title, string text)
+	private void ShowDownload(SharedUIComponent shared, string title, string text, bool abortable)
 	{
 		text = JoinProgress.Sanitize(text, 400);
-		if (_download != null && _dialog != null)
+		if (_download != null && _dialog != null && _downloadAbortable == abortable)
 		{
 			if (text == _dialogText) return;
 			_dialogText = text;
@@ -254,12 +264,14 @@ internal sealed class JoinStatusUi
 		}
 		CloseDialog();
 		_dialogText = text;
+		_downloadAbortable = abortable;
 		_download = new LoadingDialogViewModel(new LoadingDialogDefinition
 		{
 			Title = OnlineUi.Raw(JoinProgress.Sanitize(title, 80)),
 			Content = OnlineUi.Raw(text),
-			AllowAbort = false
-		});
+			AllowAbort = abortable,
+			AbortOption = OnlineUi.Raw("Cancel")
+		}) { AbortAction = abortable ? MpMenu.Leave : null };
 		_dialog = shared.ShowDialog(_download);
 		IObservableDisposable dialog = _dialog;
 		dialog.OnDisposed += _ =>
@@ -269,6 +281,31 @@ internal sealed class JoinStatusUi
 				_dialog = null;
 				_download = null;
 			}
+		};
+		DialogsShown++;
+	}
+
+	/// <summary>Asks before the host's Workshop mods download; Cancel (or Escape) leaves the server.</summary>
+	private void ShowModPrompt(SharedUIComponent shared, WorkshopMods.Prompt ask)
+	{
+		if (ask == _prompt && _dialog != null) return;
+		CloseDialog();
+		_prompt = ask;
+		_dialog = shared.ShowDialog(new Keen.Game2.Client.UI.Library.Dialogs.TwoOptionsDialog.TwoOptionsDialogViewModel(new Keen.Game2.Client.UI.Library.Dialogs.TwoOptionsDialog.TwoOptionsDialogDefinition
+		{
+			Title = OnlineUi.Raw("Download Workshop mods"),
+			Content = OnlineUi.Raw(JoinProgress.Sanitize(ask.Text, 1200)),
+			ConfirmOption = OnlineUi.Raw("Download and join"),
+			CancelOption = OnlineUi.Raw("Cancel")
+		})
+		{
+			ConfirmAction = () => ask.Answer.TrySetResult(true),
+			CancelAction = () => { if (ask.Answer.TrySetResult(false)) MpMenu.Leave(); }
+		});
+		IObservableDisposable dialog = _dialog;
+		dialog.OnDisposed += _ =>
+		{
+			if (_dialog == dialog) _dialog = null;
 		};
 		DialogsShown++;
 	}

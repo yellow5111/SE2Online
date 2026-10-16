@@ -36,7 +36,25 @@ public sealed class OnlineSettings
     public int InterpolationMs { get; set; } = 60;
     public int StateBudgetKiB { get; set; } = 1024;
     public string Password { get; set; } = "";
+    /// <summary>Hosting: the country shown with this server in the directory, as a 2-letter code (US, DE, ...), or "auto" to use the location of its IP.</summary>
+    public string Country { get; set; } = Countries.Auto;
+
+    /// <summary>The public address as listed: one typed without a port gets this host's listen port (the directory requires one).</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string PublishedAddress
+    {
+        get
+        {
+            string text = PublicAddress?.Trim() ?? "";
+            if (text.Length == 0) return "";
+            if (System.Net.IPAddress.TryParse(text, out var ip))
+                return (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 ? "[" + ip + "]" : ip.ToString()) + ":" + ListenPort.ToString(CultureInfo.InvariantCulture);
+            return text.Contains(':') ? text : text + ":" + ListenPort.ToString(CultureInfo.InvariantCulture);
+        }
+    }
     public string SkippedUpdate { get; set; } = "";
+    /// <summary>Joining: the most Workshop mod data, in GiB, this game downloads for one server; a server needing more is refused.</summary>
+    public int MaxModDownloadGiB { get; set; } = ModDownloads.DefaultMaxGiB;
     /// <summary>Players can damage each other and turrets/sensors treat players outside your faction as enemies.</summary>
     public bool Pvp { get; set; } = true;
     public bool OfflineRaidProtection { get; set; } = true;
@@ -60,6 +78,10 @@ public sealed class OnlineSettings
     public double EnergyUsageMultiplier { get; set; } = 1;
     public double HydrogenUsageMultiplier { get; set; } = 1;
     public double OxygenUsageMultiplier { get; set; } = 1;
+    /// <summary>Hosting: how much the player inventory and cargo containers (crates, lockers, barrels too) hold; 1 is the game's size.</summary>
+    public double PlayerInventoryMultiplier { get; set; } = 1;
+    public double CargoInventoryMultiplier { get; set; } = 1;
+    [System.Text.Json.Serialization.JsonIgnore] public InventoryMultipliers InventorySizes => new(PlayerInventoryMultiplier, CargoInventoryMultiplier);
     [System.Text.Json.Serialization.JsonIgnore] public ResourceMultipliers UsageMultipliers => new(EnergyUsageMultiplier, HydrogenUsageMultiplier, OxygenUsageMultiplier);
     /// <summary>This player's own voice: whether to talk and listen at all.</summary>
     public bool VoiceEnabled { get; set; } = true;
@@ -80,12 +102,12 @@ public sealed class OnlineSettings
     public string EmoteKey { get; set; } = "N";
     /// <summary>Whether other players see this player's name tag (the suit antenna broadcast).</summary>
     public bool SuitBroadcast { get; set; } = true;
-    /// <summary>Hosting: players can take over grids by hacking a terminal or control block (Alt+H by default).</summary>
-    public bool Hacking { get; set; } = true;
+    /// <summary>Hosting: players can take over grids by hacking a terminal or control block (Alt+H by default). Off unless the host opts in.</summary>
+    public bool Hacking { get; set; }
     /// <summary>Hosting: scales every hack's duration (0.1-10).</summary>
     public double HackTimeMultiplier { get; set; } = 1;
-    /// <summary>Hosting: other players' grids can be hacked too (still only with PvP on and never inside safe zones).</summary>
-    public bool AllowHackingPlayerGrids { get; set; } = true;
+    /// <summary>Hosting: other players' grids can be hacked too (still only with PvP on and never inside safe zones). Off unless the host opts in.</summary>
+    public bool AllowHackingPlayerGrids { get; set; }
     /// <summary>Hosting: how long an owner's remote lockdown freezes a hack; 0 turns lockdown off.</summary>
     public int HackLockdownSeconds { get; set; } = 60;
     /// <summary>Hosting: wait before the same grid can be locked down again.</summary>
@@ -111,14 +133,17 @@ public sealed class OnlineSettings
         if (SunPeriodMinutes is double day && !(day >= 1 && day <= 10080)) return "Day length must be between 1 minute and 7 days (10080 minutes).";
         if (!Sync.StreamingRules.Valid(StreamingRadiusMeters)) return $"Streaming radius must be 0 (off) or between {Sync.StreamingRules.MinRadius:0} and {Sync.StreamingRules.MaxRadius:0} metres.";
         if (ResourceMultipliers.Validate(EnergyUsageMultiplier, HydrogenUsageMultiplier, OxygenUsageMultiplier) is string usage) return usage;
+        if (InventoryMultipliers.Validate(PlayerInventoryMultiplier, CargoInventoryMultiplier) is string sizes) return sizes;
         if (!Sync.VoiceRelay.ValidRadius(VoiceRadiusMeters)) return $"Voice radius must be 0 (off) or between {Sync.VoiceRelay.MinRadius:0} and {Sync.VoiceRelay.MaxRadius:0} metres.";
         if (VoiceVolume < 0 || VoiceVolume > 200) return "Voice volume must be between 0 and 200 percent.";
         if (Sync.RespawnShips.Validate(RespawnShips, RespawnShipCooldownMinutes) is { } ships) return ships;
-        if (MutedVoices == null || MutedVoices.Count > 200) return "Too many muted players.";
+        if (MaxModDownloadGiB < 1 || MaxModDownloadGiB > ModDownloads.MaxGiBLimit) return $"Workshop download limit must be between 1 and {ModDownloads.MaxGiBLimit} GiB.";
+        if (MutedVoices == null|| MutedVoices.Count > 200) return "Too many muted players.";
         if (HackRules.Validate(this) is string hacking) return hacking;
         if (InterpolationMs < 0 || InterpolationMs > 250) return "Motion smoothing must be between 0 and 250 milliseconds.";
         if (StateBudgetKiB < 32 || StateBudgetKiB > 4096) return "Update bandwidth must be between 32 and 4096 KiB/s.";
         if (PlayerName == null || PlayerName.Trim().Length > 32 || PlayerName.IndexOfAny(new[] { '\r', '\n', '\0' }) >= 0) return "Player name must be at most 32 characters on one line.";
+        if (Countries.Normalize(Country) == null) return "Country must be auto or a 2-letter country code such as US, GB or DE.";
         if (Password == null || Password.Length > 64 || Password.Any(char.IsControl)) return "Password must be at most 64 characters on one line.";
         foreach (var (label, key) in new[] { ("Chat", ChatKey), ("Players", PlayersKey), ("Admin panel", AdminKey), ("Suit broadcast", BroadcastKey), ("Push to talk", VoiceKey), ("Emotes", EmoteKey), ("Hack", HackKey) })
             if (!KeyBinding.TryParse(key, out _)) return label + " key binding '" + key + "' is not a valid key.";
@@ -165,7 +190,8 @@ public sealed class OnlineSettings
         options.Advertise = Advertise;
         options.SessionName = SessionName.Trim();
         options.Description = Description.Trim();
-        options.PublicAddress = PublicAddress ?? "";
+        options.Country = Countries.Normalize(Country) ?? "";
+        options.PublicAddress = PublishedAddress;
         options.Password = Password ?? "";
         options.Pvp = Pvp;
         options.OfflineRaidProtection = OfflineRaidProtection;
@@ -176,6 +202,7 @@ public sealed class OnlineSettings
         options.WaterSync = WaterSync;
         options.VoiceRadiusMeters = VoiceRadiusMeters;
         options.UsageMultipliers = UsageMultipliers;
+        options.InventorySizes = InventorySizes;
         options.ServersDirectory = ServersDirectory;
         options.SessionsDirectory = SessionsDirectory;
         return options;

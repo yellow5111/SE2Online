@@ -73,14 +73,26 @@ internal static class OnlineUi
         return LocKey.FromString(text);
     }
 
-    internal static void InstallRawTexts(HarmonyLib.Harmony harmony) => harmony.Patch(
-        HarmonyLib.AccessTools.Method(typeof(LocalizationPackage), nameof(LocalizationPackage.GetText), new[] { typeof(StringId) }),
-        prefix: new HarmonyLib.HarmonyMethod(typeof(OnlineUi), nameof(RawTextPrefix)));
+    internal static void InstallRawTexts(HarmonyLib.Harmony harmony)
+    {
+        harmony.Patch(HarmonyLib.AccessTools.Method(typeof(LocalizationPackage), nameof(LocalizationPackage.GetText), new[] { typeof(StringId) }),
+            prefix: new HarmonyLib.HarmonyMethod(typeof(OnlineUi), nameof(RawTextPrefix)));
+        harmony.Patch(HarmonyLib.AccessTools.Method(typeof(LocKey), nameof(LocKey.ToString)), prefix: new HarmonyLib.HarmonyMethod(typeof(OnlineUi), nameof(RawToStringPrefix)));
+    }
+
+    // LocKey.ToString logs a warning for every {...} in the text before evaluating it; a plugin text needs no evaluation.
+    private static bool RawToStringPrefix(ref LocKey __instance, ref string __result)
+    {
+        if (!RawTexts.ContainsKey(__instance.TextId) || Singleton<TextManager>.Instance.HasText(__instance)) return true;
+        __result = __instance.TextId.ToString();
+        return false;
+    }
 
     private static bool RawTextPrefix(LocalizationPackage __instance, StringId id, ref string __result)
     {
         if (!RawTexts.ContainsKey(id) || __instance.HasText(id)) return true;
-        __result = id.ToString();
+        // The text source's result goes through TextManager's {filter:...} parser; host and player names are not filters.
+        __result = TextManager.EscapeInputString(id.ToString());
         return false;
     }
 
@@ -258,9 +270,49 @@ internal static class OnlineUi
 
     private static Grid Cells(string widths, string[] values, bool inheritForeground)
     {
+        var cells = new Control[values.Length];
+        for (int i = 0; i < values.Length; i++) cells[i] = Fit(Text(values[i], i == 0 ? "Bright" : null, 24, inheritForeground));
+        return CellRow(widths, cells);
+    }
+
+    public static Grid CellRow(string widths, params Control[] cells)
+    {
         var grid = new Grid { ColumnDefinitions = new ColumnDefinitions(widths), MinHeight = 64, Margin = new Thickness(12, 4) };
-        for (int i = 0; i < values.Length; i++) { var cell = Text(values[i], i == 0 ? "Bright" : null, 24, inheritForeground); cell.TextWrapping = TextWrapping.NoWrap; cell.TextTrimming = TextTrimming.CharacterEllipsis; cell.Margin = new Thickness(10, 0); Grid.SetColumn(cell, i); grid.Children.Add(cell); }
+        for (int i = 0; i < cells.Length; i++) { cells[i].Margin = new Thickness(6, 0); Grid.SetColumn(cells[i], i); grid.Children.Add(cells[i]); }
         return grid;
+    }
+
+    /// <summary>One line of text that shrinks its font to fit its space instead of being cut off.</summary>
+    public static Control Fit(TextBlock text)
+    {
+        text.TextWrapping = TextWrapping.NoWrap;
+        text.TextTrimming = TextTrimming.None;
+        return new FitText { Child = text, VerticalAlignment = VerticalAlignment.Center };
+    }
+
+    /// <summary>
+    /// Shrinks one line of text to its space, anchored left. It asks for no width of its own, so a long name never widens
+    /// its grid column or row (a Viewbox does, and Avalonia centres a stretched control that renders narrower than its slot).
+    /// </summary>
+    internal sealed class FitText : Decorator
+    {
+        protected override Size MeasureOverride(Size availableSize)
+        {
+            if (Child == null) return default;
+            Child.Measure(Size.Infinity);
+            return new Size(0, Child.DesiredSize.Height);
+        }
+
+        protected override Size ArrangeOverride(Size finalSize)
+        {
+            if (Child == null) return finalSize;
+            var natural = Child.DesiredSize;
+            double scale = natural.Width > finalSize.Width && natural.Width > 0 ? finalSize.Width / natural.Width : 1;
+            Child.RenderTransformOrigin = new RelativePoint(0, 0, RelativeUnit.Relative);
+            Child.RenderTransform = scale < 1 ? new ScaleTransform(scale, scale) : null;
+            Child.Arrange(new Rect(0, Math.Max(0, (finalSize.Height - natural.Height * scale) / 2), natural.Width, natural.Height));
+            return finalSize;
+        }
     }
 
 }

@@ -43,6 +43,7 @@ public sealed partial class HostSession
 		Add("Rules", "PCU per player", _o.PcuInForce == 0 ? "Unlimited" : _o.PcuInForce.ToString("N0", CultureInfo.InvariantCulture));
 		if (_o.Access.WorldPcu is int world) Add("Rules", "World PCU setting", world.ToString("N0", CultureInfo.InvariantCulture));
 		var usage = ResourceMultipliers.Current;
+		if (!InventoryMultipliers.Current.IsDefault) Add("Rules", "Inventory size", $"Player {ResourceMultipliers.Format(InventoryMultipliers.Current.Player)}, cargo containers {ResourceMultipliers.Format(InventoryMultipliers.Current.Cargo)}");
 		if (!usage.IsDefault) Add("Rules", "Resource usage", $"Energy {ResourceMultipliers.Format(usage.Energy)}, hydrogen {ResourceMultipliers.Format(usage.Hydrogen)}, oxygen {ResourceMultipliers.Format(usage.Oxygen)}");
 		var sun = _o.SunInForce;
 		Add("World", "Sun", sun.Rotation ? $"Moving, one day = {sun.PeriodMinutes:0.#} min" : "Fixed");

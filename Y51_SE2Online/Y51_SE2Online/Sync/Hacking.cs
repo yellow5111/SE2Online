@@ -22,6 +22,8 @@ public static class HackRules
     public const double RangeMeters = 3, CancelSlackMeters = 1, DefenderRadiusMeters = 25;
     public const double BaseSeconds = 30, SecondsPerBlock = 0.25, CapSeconds = 300, PoweredFactor = 1.5, ContestSpeed = 0.25, DefenderNearSpeed = 0.5;
     public const long CooldownMs = 120_000, ContestHaltMs = 5_000, ClashMs = 18_000, GlitchMs = 3_000;
+    /// <summary>A player waits this long after an attempt that started nothing before the host looks for terminals again.</summary>
+    public const long RetryMs = 2_000;
     public const double MinMultiplier = 0.1, MaxMultiplier = 10;
 
     /// <summary>Seconds at full speed for a ship of this many blocks; a powered grid resists 1.5x longer.</summary>
@@ -40,6 +42,7 @@ public static class HackRules
         if (c.AlreadyHacked) return "Someone is already hacking this grid.";
         if (c.CooldownLeftMs > 0) return $"This grid's security is still resetting; try again in {(c.CooldownLeftMs + 999) / 1000} s.";
         if (!c.HasWorkingTerminal) return "This grid has no working terminal or control block to hack into.";
+        if (c.InSafeZone) return "That grid is inside a safe zone.";
         if (!PlayerIdentities.IsHuman(owner)) return null;
         if (!c.AllowPlayerGrids) return "Hacking other players' grids is turned off on this server.";
         if (!c.Pvp) return "PvP is off, so other players' grids can't be hacked.";
@@ -49,7 +52,6 @@ public static class HackRules
             case PlayerRelation.Allied: return "That grid belongs to an allied faction.";
             case PlayerRelation.Peace: return "Your factions are at peace.";
         }
-        if (c.InSafeZone) return "That grid is inside a safe zone.";
         if (c.OfflineRaidProtection && !c.OwnerSideOnline) return "Its owner and their faction are offline (offline raid protection).";
         return null;
     }

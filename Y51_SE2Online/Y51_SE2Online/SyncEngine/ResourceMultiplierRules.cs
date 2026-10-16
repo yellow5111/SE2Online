@@ -45,13 +45,33 @@ internal static class ResourceMultiplierRules
 		int definitions = ScaleDefinitions(defs, current);
 		_applied = current;
 		_appliedTo = defs;
+		int blocks = Refresh(session);
+		GameLog.Instance.Info($"resource usage: {current.Describe()} ({definitions} suit/tool definitions, {blocks} powered blocks updated)");
+	}
+
+	/// <summary>
+	/// Hosting ended: puts the game's own rates back so single player afterwards is unchanged. The definitions are plain
+	/// field writes; a world that stays loaded needs <see cref="Refresh"/> on its server thread. False if nothing was scaled.
+	/// </summary>
+	internal static bool Restore()
+	{
+		var defs = _appliedTo;
+		if (_applied.IsDefault || defs == null) return false;
+		ScaleDefinitions(defs, ResourceMultipliers.Default);
+		_applied = ResourceMultipliers.Default;
+		GameLog.Instance.Info("resource usage: hosting ended, game defaults restored");
+		return true;
+	}
+
+	internal static int Refresh(Session session)
+	{
 		int blocks = 0;
 		foreach (var entity in session.GetEntitiesOfType<PowerableBlockComponent>().ToList())
 		{
 			entity.Get<PowerableBlockComponent>().UpdateConsumedResource();
 			blocks++;
 		}
-		GameLog.Instance.Info($"resource usage: {current.Describe()} ({definitions} suit/tool definitions, {blocks} powered blocks updated)");
+		return blocks;
 	}
 
 	private static int ScaleDefinitions(DefinitionManager defs, ResourceMultipliers m)

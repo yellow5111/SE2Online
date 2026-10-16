@@ -179,6 +179,10 @@ internal sealed class HostIdentities
 				}
 			}
 		}
+		if (Settings.Research == ResearchMode.Shared && SharedDiscoveries.CatchUp(server, ppd, identityId) is > 0 and int shared)
+		{
+			notes.Add($"{shared} discover{(shared == 1 ? "y" : "ies")} of other players shared");
+		}
 		notes.Add($"{created} per-player record(s) created");
 		Registered++;
 		return new Result(identity, player._id, newPlayer, string.Join(", ", notes));

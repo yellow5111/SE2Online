@@ -98,6 +98,7 @@ internal sealed class WorldSocial
     internal void InitializeGrids(WorldSessionComponent world)
     {
         if (_initialized || world.OwnedSession == null) return;
+        WatchTransfers(world.OwnedSession);
         bool shared = MpPlugin.Controller?.Current?.Grids == GridPermissionMode.Team
             || (MpPlugin.Controller?.Current == null && MpMenu.Settings.TeamGrids);
         foreach (var entity in world.OwnedSession.Entities)
@@ -113,6 +114,17 @@ internal sealed class WorldSocial
             }
             if (IsExplicit(permissions.BuildPermissions)) continue;
             SetSharing(entity, shared ? GridSharing.Everyone : SharingOf(entity));
+        }
+        if (!State.AclOwners)
+        {
+            // Lists written before 0.15.2 name no owner; they belong to the grid's owner when the world first hosts.
+            foreach (var block in world.OwnedSession.GetEntitiesOfType<BlockPermissionsComponent>())
+            {
+                var permissions = block.Get<BlockPermissionsComponent>();
+                if (!BlockAcl.IsAcl(permissions.AccessGroup.String) || BlockAcl.Parse(permissions.AccessGroup.String) is not { Owner: 0 } acl) continue;
+                permissions.AccessGroup = StringId.Get((acl with { Owner = TeamPermissions.OwnerOf(GridOf(block)) }).ToString());
+            }
+            State.AclOwners = true;
         }
         _initialized = true;
     }
@@ -140,10 +152,12 @@ internal sealed class WorldSocial
     }
     // ponytail: parsed lists cached by their exact text, never evicted; a world has at most a few thousand distinct lists.
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, BlockAcl> Acls = new(StringComparer.Ordinal);
+    /// <summary>The block's lists in force for its grid's current owner.</summary>
     internal static BlockAcl AclOf(Entity entity)
     {
-        string group = BlockOf(entity)?.TryGet<BlockPermissionsComponent>()?.AccessGroup.String;
-        return BlockAcl.IsAcl(group) ? Acls.GetOrAdd(group, BlockAcl.Parse) : BlockAcl.Empty;
+        var block = BlockOf(entity);
+        string group = block?.TryGet<BlockPermissionsComponent>()?.AccessGroup.String;
+        return BlockAcl.IsAcl(group) ? Acls.GetOrAdd(group, BlockAcl.Parse).For(TeamPermissions.OwnerOf(GridOf(block))) : BlockAcl.Empty;
     }
     private static bool EveryoneMayUse(Entity entity)
         => BlockOf(entity)?.TryGet<BlockPermissionsComponent>()?.AccessGroup is { } group && group == Singleton<DefinitionManager>.Instance.GetConfiguration<PermissionsConfiguration>().EveryoneAccess;
@@ -161,8 +175,48 @@ internal sealed class WorldSocial
     internal static void SetOwner(Entity grid, long owner)
     {
         var to = new IdentityId(owner);
-        if ((grid.Scene?.UserObject as Session)?.SessionComponents.TryGet<OwnershipSessionComponent>() is { } ownership) ownership.TryTransferOwnership(grid, to);
+        if ((grid.Scene?.UserObject as Session)?.SessionComponents.TryGet<OwnershipSessionComponent>() is { } ownership)
+        {
+            _ownTransfer = true;
+            try { ownership.TryTransferOwnership(grid, to); }
+            finally { _ownTransfer = false; }
+        }
         else grid.Get<OwnershipComponent>().Owner = to;
+    }
+
+    // Our own transfers reset block access themselves (after setting the new sharing).
+    [ThreadStatic] private static bool _ownTransfer;
+    private static readonly ConditionalWeakTable<Entity, object> Watched = new();
+
+    /// <summary>
+    /// Server: SE2's own transfers (accepted transfer requests, mission triggers, NPC handovers) reset block access as
+    /// ours do. Through its ownership signal, not a patch on TryTransferOwnership, which R2R may inline into its callers.
+    /// </summary>
+    private static void WatchTransfers(Session session)
+    {
+        if (session.SessionComponents.TryGet<OwnershipSessionComponent>()?.Entity is not { } entity || Watched.TryGetValue(entity, out _)) return;
+        Watched.Add(entity, new object());
+        OwnershipSessionComponent.OnOwnershipTransferredSignal.Subscribe(entity, Transferred);
+    }
+
+    private static void Transferred(Entity session, Entity target, IdentityId from, IdentityId to)
+    {
+        if (_ownTransfer || (long)from == (long)to || target == null || EngineCodec.IsDead(target) || target.TryGet<CubeGridComponent>() == null) return;
+        try { ResetBlockAccess(target); }
+        catch (Exception ex) { GameLog.Instance.Warn("grid ownership: resetting block access after a native transfer failed: " + ex.Message); }
+    }
+
+    /// <summary>After <paramref name="grid"/> changed owner: its blocks that were open to everyone or had block lists go back to owner-only.</summary>
+    internal static void ResetBlockAccess(Entity grid)
+    {
+        var permissions = Singleton<DefinitionManager>.Instance.GetConfiguration<PermissionsConfiguration>();
+        long owner = TeamPermissions.OwnerOf(grid);
+        string everyone = permissions.EveryoneAccess.String;
+        // Subgrids that keep their own owner keep their blocks' access.
+        grid.Get<CubeGridComponent>().VisitAllBlocksWithComponent<BlockPermissionsComponent>(p =>
+        {
+            if (BlockAcl.ResetsOnNewOwner(p.AccessGroup.String, everyone) && TeamPermissions.OwnerOf(GridOf(p.Entity)) == owner) p.AccessGroup = permissions.OwnerAccess;
+        }, includeSubgrids: true);
     }
 
     internal static void SetSharing(Entity grid, GridSharing sharing)
@@ -201,7 +255,7 @@ internal sealed class WorldSocial
         if (request.Action == SocialAction.ClaimGrid)
         {
             if (owner != 0) return "That grid already has an owner.";
-            SetOwner(grid, actor); SetSharing(grid, GridSharing.Private);
+            SetOwner(grid, actor); SetSharing(grid, GridSharing.Private); ResetBlockAccess(grid);
         }
         else
         {
@@ -214,9 +268,9 @@ internal sealed class WorldSocial
                     SetSharing(grid, request.Sharing); break;
                 case SocialAction.TransferGrid:
                     if (!State.Players.Any(p => p.Identity == request.Player) || request.Player == actor) return "Choose another player in this world.";
-                    SetOwner(grid, request.Player); SetSharing(grid, GridSharing.Private); break;
+                    SetOwner(grid, request.Player); SetSharing(grid, GridSharing.Private); ResetBlockAccess(grid); break;
                 case SocialAction.ReleaseGrid:
-                    SetOwner(grid, 0); SetSharing(grid, GridSharing.Everyone); break;
+                    SetOwner(grid, 0); SetSharing(grid, GridSharing.Everyone); ResetBlockAccess(grid); break;
                 default: return "Unknown grid action.";
             }
         }
@@ -233,7 +287,7 @@ internal sealed class WorldSocial
         if (!PlayerIdentities.IsHuman(owner) || owner != actor) return "Only this grid's owner can change who may use its blocks.";
         bool add = request.Offset == 1, deny = request.Action == SocialAction.BlockDeny;
         if (request.Player == actor || (add && !State.Players.Any(p => p.Identity == request.Player))) return "Choose another player in this world.";
-        var acl = AclOf(block).With(request.Player, deny, add);
+        var acl = (AclOf(block) with { Owner = owner }).With(request.Player, deny, add);
         if (add && !(deny ? acl.Deny : acl.Allow).Contains(request.Player)) return $"A block list holds at most {BlockAcl.MaxPerList} players.";
         permissions.AccessGroup = acl.IsEmpty ? Singleton<DefinitionManager>.Instance.GetConfiguration<PermissionsConfiguration>().OwnerAccess : StringId.Get(acl.ToString());
         State.Revision++;
@@ -341,7 +395,7 @@ internal sealed class WorldSocial
         var copy = SocialState.Deserialize(State.Serialize());
         var filtered = grids.Where(g => string.IsNullOrWhiteSpace(view.Name) || g.Name.Contains(view.Name, StringComparison.OrdinalIgnoreCase)).OrderBy(g => g.Name).ThenBy(g => g.NetId).ToArray();
         int offset = Math.Clamp(view.Offset, 0, Math.Max(0, ((filtered.Length - 1) / 100) * 100));
-        var snapshot = new SocialSnapshot { Actor = actor, Revision = State.Revision, Message = message, Players = copy.Players.ToArray(), Factions = copy.Factions.ToArray(), TotalGrids = filtered.Length, Offset = offset, Grids = filtered.Skip(offset).Take(100).ToArray(), Focus = view.Grid == 0 ? null : grids.FirstOrDefault(g => g.NetId == view.Grid), Pacts = copy.Pacts.ToArray(), Proposals = copy.Proposals.ToArray() };
+        var snapshot = new SocialSnapshot { Actor = actor, Revision = State.Revision, Message = message, Players = copy.Players.ToArray(), Factions = copy.Factions.ToArray(), TotalGrids = filtered.Length, Offset = offset, Grids = filtered.Skip(offset).Take(100).ToArray(), Focus = view.Grid == 0 ? null : grids.FirstOrDefault(g => g.NetId == view.Grid) is { } focus ? focus with { Secure = view.Secure } : null, Pacts = copy.Pacts.ToArray(), Proposals = copy.Proposals.ToArray() };
         if (actor == PlayerIdentities.HotfixIdentity) Local = snapshot;
         return snapshot;
     }

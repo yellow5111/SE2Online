@@ -209,6 +209,7 @@ internal sealed partial class HostWorld
         return ship;
     }
 
+#if !PULSAR
     /// <summary>Rig probe: spawns every candidate ship in a row 30 km from the world spawn for <see cref="ShipCheck"/> to inspect.</summary>
     internal static async void ProbeShips(Session session)
     {
@@ -233,6 +234,7 @@ internal sealed partial class HostWorld
             }
         }
     }
+#endif
 
     private static readonly Type? CargoSpeed = typeof(Keen.Game2.Simulation.GameSystems.Encounters.CargoShips.CargoShipEncounterComponent).GetNestedType("TargetSpeedData", System.Reflection.BindingFlags.NonPublic);
 
@@ -267,7 +269,9 @@ internal sealed partial class HostWorld
         if (j.ShipSettle is { } settling)
         {
             Settle(settling);
-            if (MpClock.NowMs() > j.ShipSettleUntil) j.ShipSettle = null;
+            bool done = MpClock.NowMs() > j.ShipSettleUntil;
+            HoldPins(j, done);
+            if (done) j.ShipSettle = null;
             return;
         }
         var host = _host;

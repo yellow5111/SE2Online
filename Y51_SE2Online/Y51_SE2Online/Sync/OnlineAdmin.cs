@@ -111,12 +111,23 @@ public sealed class AccessList
         return list;
     }
 
-    /// <summary>Writes a new list at <paramref name="path"/> holding only this list's bans.</summary>
-    public void BansOnlyCopy(string path)
+    /// <summary>Writes a new list at <paramref name="path"/> with this list's bans, whitelist and whitelist-only switch; never its admins.</summary>
+    public void SeedCopy(string path)
     {
-        List<BanEntry> bans;
-        lock (_sync) bans = Bans.ToList();
-        new AccessList { Bans = bans, _path = path }.Save();
+        AccessList copy;
+        lock (_sync) copy = new AccessList { Bans = Bans.ToList(), Whitelist = Whitelist.ToList(), WhitelistOnly = WhitelistOnly, _path = path };
+        copy.Save();
+    }
+
+    /// <summary>
+    /// Creates a listen host's per-world file on first use. A world hosted before its first save was keyed by its
+    /// name: that file moves to the container key. Otherwise the old shared file seeds it (<see cref="SeedCopy"/>).
+    /// </summary>
+    public static void PrepareWorldFile(string path, string nameKeyed, string legacy)
+    {
+        if (File.Exists(path)) return;
+        if (nameKeyed != null && nameKeyed != path && File.Exists(nameKeyed)) File.Move(nameKeyed, path);
+        else if (File.Exists(legacy)) Load(legacy).SeedCopy(path);
     }
 
     private void Save()

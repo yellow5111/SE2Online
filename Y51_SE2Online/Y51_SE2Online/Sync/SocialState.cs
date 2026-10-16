@@ -34,7 +34,8 @@ public enum SocialAction
 public sealed record SocialRequest(SocialAction Action, string FactionId = "", long Player = 0,
     uint Grid = 0, GridSharing Sharing = GridSharing.Private, string Name = "", string Tag = "", int Offset = 0, Guid Secure = default);
 public sealed record SocialPlayer(long Identity, string Name);
-public sealed record SocialGrid(uint NetId, string Name, long Owner, GridSharing Sharing);
+/// <param name="Secure">On a snapshot's Focus: the control panel id the Refresh asked for, so a panel never shows another grid of the same name.</param>
+public sealed record SocialGrid(uint NetId, string Name, long Owner, GridSharing Sharing, Guid Secure = default);
 /// <summary>A saved antenna faction-tag switch: SE2 entities keep no id across a save, so the antenna is found again by its grid cell and position.</summary>
 public sealed record TaggedAntenna(int X, int Y, int Z, double PX, double PY, double PZ);
 /// <param name="Lists">False for block types SE2 gives no per-block access (lights, doors, thrusters...): they follow the grid.</param>
@@ -94,6 +95,8 @@ public sealed class SocialState
     public List<FactionProposal> Proposals { get; set; } = new();
     /// <summary>Antennas whose HUD marker shows their owner's faction tag (SE2 antennas have no block permissions to keep the flag in).</summary>
     public List<TaggedAntenna> TaggedAntennas { get; set; } = new();
+    /// <summary>The world's block lists carry their owner (<see cref="BlockAcl.Owner"/>); older lists were stamped once.</summary>
+    public bool AclOwners { get; set; }
     public const int MaxMotd = 300;
 
     public static bool CanAccess(long owner, long actor, GridSharing sharing, IEnumerable<OnlineFaction> factions)
