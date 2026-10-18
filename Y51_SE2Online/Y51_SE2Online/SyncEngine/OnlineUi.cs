@@ -448,8 +448,11 @@ internal static class OnlineUi
         return holder;
     }
 
-    public static readonly Geometry LockShape = Geometry.Parse("M6,10 V7.5 A6,6 0 0 1 18,7.5 V10 H15.6 V7.5 A3.6,3.6 0 0 0 8.4,7.5 V10 Z M4,10 H20 V22 H4 Z");
-    public static readonly Geometry ShieldShape = Geometry.Parse("F0 M12,2 L20,5 V11 C20,16.5 16.6,20.7 12,22 C7.4,20.7 4,16.5 4,11 V5 Z M10.6,15.6 L7.2,12.2 L8.6,10.8 L10.6,12.8 L15.4,8 L16.8,9.4 Z");
+    // Lazy: Geometry.Parse needs Avalonia's render platform, which a headless dedicated server never starts, and a
+    // static field would make every OnlineUi use there (Raw texts in host notifications) throw TypeInitializationException.
+    private static Geometry _lockShape, _shieldShape;
+    public static Geometry LockShape => _lockShape ??= Geometry.Parse("M6,10 V7.5 A6,6 0 0 1 18,7.5 V10 H15.6 V7.5 A3.6,3.6 0 0 0 8.4,7.5 V10 Z M4,10 H20 V22 H4 Z");
+    public static Geometry ShieldShape => _shieldShape ??= Geometry.Parse("F0 M12,2 L20,5 V11 C20,16.5 16.6,20.7 12,22 C7.4,20.7 4,16.5 4,11 V5 Z M10.6,15.6 L7.2,12.2 L8.6,10.8 L10.6,12.8 L15.4,8 L16.8,9.4 Z");
 
     /// <summary>
     /// A join button for one row. The list's item style recolours every TextBlock in a row, so the label follows the

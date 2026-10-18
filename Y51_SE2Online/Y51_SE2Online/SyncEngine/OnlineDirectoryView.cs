@@ -120,7 +120,8 @@ internal sealed class OnlineDirectoryView : UserControl
         ToolTip.SetTip(holder, MpMenu.Busy ? "Wait for the current connection to finish." : Reason(e));
     }
 
-    private static readonly Geometry StarShape = Geometry.Parse("M12,2 L14.9,8.6 L22,9.3 L16.6,14 L18.2,21 L12,17.3 L5.8,21 L7.4,14 L2,9.3 L9.1,8.6 Z");
+    private static Geometry _starShape;
+    private static Geometry StarShape => _starShape ??= Geometry.Parse("M12,2 L14.9,8.6 L22,9.3 L16.6,14 L18.2,21 L12,17.3 L5.8,21 L7.4,14 L2,9.3 L9.1,8.6 Z");
     private static readonly IBrush StarOn = new SolidColorBrush(Color.FromRgb(0xE5, 0x8C, 0x12)), StarOff = new SolidColorBrush(Color.FromRgb(0x8E, 0xA3, 0xB0));
 
     /// <summary>The favorite toggle at the start of a row: a filled amber star when saved, an outline when not.</summary>
