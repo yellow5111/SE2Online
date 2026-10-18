@@ -31,6 +31,10 @@ public sealed class MpOptions
 
 	public string Password { get; internal set; } = "";
 
+	public string Motd { get; internal set; } = "";
+
+	public string MotdTitle { get; internal set; } = "";
+
 	public bool Pvp { get; internal set; } = true;
 
 	public bool OfflineRaidProtection { get; internal set; } = true;

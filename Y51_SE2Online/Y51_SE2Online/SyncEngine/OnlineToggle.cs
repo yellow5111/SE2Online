@@ -22,10 +22,9 @@ internal sealed class OnlineToggle : Grid
         foreach (string line in new[] { help, warning })
         {
             if (line == null) continue;
-            // The warning skips the theme's foreground binding, which would override its red.
-            var hint = OnlineUi.Text(line, "SubtleNotice", 17, inheritForeground: line == warning);
+            if (line == warning) { caption.Children.Add(OnlineUi.Warning(line)); continue; }
+            var hint = OnlineUi.Text(line, "SubtleNotice", 17);
             hint.HorizontalAlignment = HorizontalAlignment.Left; hint.TextAlignment = TextAlignment.Left;
-            if (line == warning) { hint.Foreground = new SolidColorBrush(Color.FromRgb(0xFF, 0x4D, 0x4D)); hint.FontWeight = FontWeight.Bold; }
             caption.Children.Add(hint);
         }
         Children.Add(caption);

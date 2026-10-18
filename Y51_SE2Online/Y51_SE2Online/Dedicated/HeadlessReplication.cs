@@ -167,7 +167,8 @@ internal static class HeadlessReplication
     {
         if (!Active) return true;
         // Harmony skips every later prefix once one returns false, so a joiner's stories are routed from here.
-        if (client.ClientId.Id > 1 && !HostIdentities.MoveToClientPrefix(context, stateMachine, client)) return false;
+        // Id 0 names no client: HostIdentities may still route it to the player whose story started it.
+        if (client.ClientId.Id != 1 && !HostIdentities.MoveToClientPrefix(context, stateMachine, client)) return false;
         if (!context.Skipped) context.SkipStory();
         return false;
     }
@@ -190,12 +191,17 @@ internal static class HeadlessReplication
         DrainEntities(context);
         var outgoing = __instance.Buffer;
         lock (__instance._exchangeSync) __instance.Buffer = InProcessReplicationSessionComponent.AllocateCB();
+        long started = ServerProfiler.Now;
         try
         {
             Publish(outgoing);
             FramesPublished++;
         }
-        finally { InProcessReplicationSessionComponent.ReturnCB(outgoing); }
+        finally
+        {
+            InProcessReplicationSessionComponent.ReturnCB(outgoing);
+            ServerProfiler.Lap(ServerSection.Forward, started);
+        }
         HostWorld.Current?.HeadlessServerWork(__instance);
         return false;
     }

@@ -31,6 +31,7 @@
       <Private>False</Private>
     </Reference>
     <Publicize Include="Game2.Client;Game2.Simulation;SpaceEngineers2;VRage.Multiplayer;VRage.Water" IncludeVirtualMembers="false" />
+    <Publicize Include="VRage.Physics" IncludeVirtualMembers="false" />
   </ItemGroup>
 
   <ItemGroup>

@@ -99,6 +99,8 @@ public sealed class ClientSession
 
 	private long _adminMessageMs = long.MinValue / 2;
 
+	private bool _adminSeen;
+
 	public void SendChat(string text)
 	{
 		if (Host.HasValue && CurrentPhase == Phase.Accepted)
@@ -122,6 +124,12 @@ public sealed class ClientSession
 			_t.Send(Host.Value, Channel.State, VoiceMessage.EncodeUp(++_voiceSeq, frame));
 	}
 
+	public void SendBuildGhost(BuildGhost ghost)
+	{
+		if (Host.HasValue && CurrentPhase == Phase.Accepted)
+			_t.Send(Host.Value, Channel.Control, BuildGhostMessage.EncodeUp(ghost));
+	}
+
 	public void SendTrade(byte[] data)
 	{
 		if (Host.HasValue && CurrentPhase == Phase.Accepted)
@@ -138,6 +146,15 @@ public sealed class ClientSession
 	{
 		if (Host.HasValue && CurrentPhase == Phase.Accepted)
 			_t.Send(Host.Value, Channel.Control, SocialMessage.Encode(SyncMsg.GpsShare, share));
+	}
+
+	public void SendDesyncReport(uint checkId, IReadOnlyList<DesyncMismatch> mismatches)
+	{
+		if (Host.HasValue && CurrentPhase == Phase.Accepted && mismatches.Count > 0)
+		{
+			byte[] msg = DesyncReportMessage.Encode(checkId, mismatches);
+			_t.Send(Host.Value, msg.Length > 8192 ? Channel.Bulk : Channel.Control, msg);
+		}
 	}
 
 	public void SendAdmin(AdminRequest request)
@@ -260,12 +277,14 @@ public sealed class ClientSession
 			progress.SetHost(stats.RemoteName);
 		}
 		_o.Progress?.Set(JoinStage.Connecting, _clock(), "Connected, asking to join...");
+		_docs.Clear();
 		var request = new JoinRequest
 		{
 			PluginVersion = _o.PluginVersion,
 			GameVersion = _o.GameVersion,
 			PlayerName = _o.PlayerName,
-			Password = _o.Password ?? ""
+			Password = _o.Password ?? "",
+			Features = JoinRequest.RosterPatches | JoinRequest.TradeView | JoinRequest.BuildGhosts
 		};
 		_t.Send(peer, Channel.Control, request.Encode());
 		_log.Info($"sync(client): join request sent to {peer}");
@@ -304,6 +323,48 @@ public sealed class ClientSession
 		{
 			_log.Warn($"sync(client): malformed {(SyncMsg)data[0]} ({data.Length} B on {ch}): {ex.Message}; disconnecting");
 			_t.Disconnect(peer, DisconnectCodes.ProtocolError, $"malformed {(SyncMsg)data[0]}");
+		}
+	}
+
+	// Roster documents the host keeps up to date with patches, by message kind (RosterDocs.cs).
+	private readonly Dictionary<byte, DocInbox> _docs = new();
+
+	private static T Typed<T>(System.Text.Json.Nodes.JsonObject doc)
+	{
+		try { return System.Text.Json.JsonSerializer.Deserialize<T>(doc) ?? throw new ArgumentException("Empty roster document."); }
+		catch (System.Text.Json.JsonException e) { throw new ArgumentException("Invalid roster document.", e); }
+	}
+
+	private void OnPlayerTable(List<PlayerInfo> players)
+	{
+		Players = players;
+		PlayersVersion++;
+		_log.Info("sync(client): player table: " + DescribePlayers(Players));
+	}
+
+	private void OnSocial(SocialSnapshot snapshot)
+	{
+		if (snapshot.Actor != IdentityId || snapshot.Players == null || snapshot.Factions == null || snapshot.Grids == null) return;
+		try { new SocialState { Players = snapshot.Players.ToList(), Factions = snapshot.Factions.ToList() }.Validate(); }
+		catch (InvalidOperationException error) { throw new ArgumentException("Invalid social snapshot.", error); }
+		Social = snapshot;
+	}
+
+	private void OnAdmin(AdminState state, long now)
+	{
+		// Roster updates carry no message; keep the last action's feedback readable for a while.
+		if (!string.IsNullOrEmpty(state.Message)) _adminMessageMs = now;
+		else if (now - _adminMessageMs < 10000) state.Message = Admin.Message;
+		if (!_adminSeen || state.Role != Admin.Role) _log.Info($"admin(client): this player's role on the server is {state.Role}");
+		_adminSeen = true;
+		Admin = state;
+	}
+
+	private void OnNames(uint version, List<PlayerTag> tags)
+	{
+		if (Names.Accept(version, tags))
+		{
+			_log.Info($"nametags(client): player list v{version} from the host: {PlayerNamesMessage.Describe(tags)}");
 		}
 	}
 
@@ -418,10 +479,11 @@ public sealed class ClientSession
 			});
 			break;
 		case SyncMsg.DataRemove:
+		case SyncMsg.DataTag:
 			var (removeSeq, removes) = DataRemoveMessage.Decode(data);
 			Offer(removeSeq, new LifecycleItem
 			{
-				Type = SyncMsg.DataRemove,
+				Type = (SyncMsg)data[0],
 				Removes = removes,
 				WireBytes = data.Length
 			});
@@ -471,17 +533,34 @@ public sealed class ClientSession
 			});
 			break;
 		case SyncMsg.PlayerTable:
-			Players = PlayerTableMessage.Decode(data);
-			PlayersVersion++;
-			_log.Info("sync(client): player table: " + DescribePlayers(Players));
+			// A host that sends patches never sends this; one that overtook them would be older.
+			if (!_docs.ContainsKey(data[0])) OnPlayerTable(PlayerTableMessage.Decode(data));
 			break;
 		case SyncMsg.SocialSnapshot:
+			if (!_docs.ContainsKey(data[0])) OnSocial(SocialMessage.Decode<SocialSnapshot>(data));
+			break;
+		case SyncMsg.RosterSync:
 		{
-			var snapshot = SocialMessage.Decode<SocialSnapshot>(data);
-			if (snapshot.Actor != IdentityId || snapshot.Players == null || snapshot.Factions == null || snapshot.Grids == null) break;
-			try { new SocialState { Players = snapshot.Players.ToList(), Factions = snapshot.Factions.ToList() }.Validate(); }
-			catch (InvalidOperationException error) { throw new ArgumentException("Invalid social snapshot.", error); }
-			Social = snapshot;
+			if (data.Length < 12 || !RosterSync.IsKind(data[1])) break;
+			byte kind = data[1];
+			if (!_docs.TryGetValue(kind, out var inbox)) _docs[kind] = inbox = new DocInbox();
+			var doc = inbox.Receive(data);
+			if (inbox.TakeFullRequest())
+			{
+				_log.Warn($"sync(client): lost the host's {(SyncMsg)kind}; asking for it whole");
+				_t.Send(Host.Value, Channel.Control, RosterSync.Request(kind));
+			}
+			if (doc == null) break;
+			switch ((SyncMsg)kind)
+			{
+			case SyncMsg.PlayerTable: OnPlayerTable(Typed<PlayerTableDoc>(doc).Players ?? new List<PlayerInfo>()); break;
+			case SyncMsg.SocialSnapshot: OnSocial(Typed<SocialSnapshot>(doc)); break;
+			case SyncMsg.AdminState: OnAdmin(Typed<AdminState>(doc), now); break;
+			case SyncMsg.PlayerNames:
+				var names = Typed<PlayerNamesDoc>(doc);
+				OnNames(names.Version, names.Tags ?? new List<PlayerTag>());
+				break;
+			}
 			break;
 		}
 		case SyncMsg.ChatLine:
@@ -490,6 +569,9 @@ public sealed class ClientSession
 			ChatLog.Add(line with { From = SocialState.Clean(line.From, 80), Text = SocialState.Clean(line.Text, ChatLog.MaxText) }, now);
 			break;
 		}
+		case SyncMsg.BuildGhost:
+			if (BuildGhostMessage.TryDecodeDown(data, out ushort builder, out BuildGhost ghost)) BuildGhostMessage.Received?.Invoke(builder, ghost);
+			break;
 		case SyncMsg.VoiceDown:
 			if (VoiceMessage.TryDecodeDown(data, out ushort speaker, out Vec3D at, out byte[] frame)) VoiceMessage.Received?.Invoke(speaker, at, frame);
 			break;
@@ -541,14 +623,8 @@ public sealed class ClientSession
 			break;
 		}
 		case SyncMsg.AdminState:
-		{
-			var state = SocialMessage.Decode<AdminState>(data);
-			// Roster updates carry no message; keep the last action's feedback readable for a while.
-			if (!string.IsNullOrEmpty(state.Message)) _adminMessageMs = now;
-			else if (now - _adminMessageMs < 10000) state.Message = Admin.Message;
-			Admin = state;
+			if (!_docs.ContainsKey(data[0])) OnAdmin(SocialMessage.Decode<AdminState>(data), now);
 			break;
-		}
 		case SyncMsg.PlayerStatus:
 		{
 			var (_, pcu, maxPcu) = PlayerStatusMessage.Decode(data);
@@ -634,12 +710,18 @@ public sealed class ClientSession
 			break;
 		}
 		case SyncMsg.PlayerNames:
-			var (namesVersion, tags) = PlayerNamesMessage.Decode(data);
-			if (Names.Accept(namesVersion, tags))
+			if (!_docs.ContainsKey(data[0]))
 			{
-				_log.Info($"nametags(client): player list v{namesVersion} from the host: {PlayerNamesMessage.Describe(tags)}");
+				var (namesVersion, tags) = PlayerNamesMessage.Decode(data);
+				OnNames(namesVersion, tags);
 			}
 			break;
+		case SyncMsg.DesyncCheck:
+		{
+			var check = DesyncCheckMessage.Decode(data);
+			Offer(check.LifeSeq, new LifecycleItem { Type = SyncMsg.DesyncCheck, Check = check, WireBytes = data.Length });
+			break;
+		}
 		default:
 			_log.WarnOnce($"client-unexpected-{data[0]}", $"sync(client): unexpected {(SyncMsg)data[0]} on {ch}");
 			break;

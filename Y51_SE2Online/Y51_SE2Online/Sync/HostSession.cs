@@ -36,11 +36,22 @@ public sealed partial class HostSession : IStorySink
 
 		public bool AdminStateSent;
 
+		/// <summary>Takes <see cref="SyncMsg.RosterSync"/> patches (said so in its join request).</summary>
+		public bool Patches;
+
+		public bool TradeView;
+
+		public bool BuildGhosts;
+
+		public readonly DocState AdminDoc = new(), SocialDoc = new(), TableDoc = new();
+
+		public long NextFullMs;
+
 		public bool Removed;
 
 		public uint NextLifeSeq = 1u;
 
-		public StateCoalescer State;
+		public StateFanout.Client State;
 
 		public long JoinedMs;
 
@@ -176,6 +187,16 @@ public sealed partial class HostSession : IStorySink
 
 	private readonly ConcurrentQueue<StateEntry> _stateIn = new();
 
+	// Data removals and tag additions ride _stateIn with these as Bytes, so the net thread sees them in the game's order
+	// with the values: a removal then drops the fan-out's last value before anyone gets it again.
+	private static readonly byte[] RemovedMark = new byte[0], TagMark = new byte[0];
+
+	private readonly List<(SyncMsg Type, List<(uint, ushort)> Items)> _dataEdits = new();
+
+	private readonly StateFanout _fan;
+
+	private readonly List<StateFanout.Client> _fanClients = new();
+
 	private readonly ConcurrentQueue<uint> _despawnedIn = new();
 
 	private readonly Dictionary<string, PlayerRecord> _players = new();
@@ -225,6 +246,7 @@ public sealed partial class HostSession : IStorySink
 		Keys = keys;
 		_o = options;
 		_clock = clock ?? new Func<long>(MpClock.NowMs);
+		_fan = new StateFanout(IntervalFor);
 		_t.PeerConnected += OnConnected;
 		_t.PeerDisconnected += OnDisconnected;
 		_t.MessageReceived += OnMessage;
@@ -271,7 +293,7 @@ public sealed partial class HostSession : IStorySink
 			{
 				Peer = peer,
 				Status = ClientStatus.Connected,
-				State = new StateCoalescer(IntervalFor, _o.StateBudgetBytesPerSec),
+				State = new StateFanout.Client(_o.StateBudgetBytesPerSec),
 				JoinedMs = _clock()
 			};
 		}
@@ -350,9 +372,14 @@ public sealed partial class HostSession : IStorySink
 			case SyncMsg.Punch:
 			case SyncMsg.ServerInfo:
 			case SyncMsg.VoiceUp:
+			case SyncMsg.BuildGhost:
 			case SyncMsg.TradeRequest:
 			case SyncMsg.TradeAction:
+			case SyncMsg.DesyncReport:
 				HandleUpstream(peer, ch, data);
+				break;
+			case SyncMsg.RosterSync:
+				if (data.Length == 2) OnFullRequested(peer, data[1]);
 				break;
 			case SyncMsg.ClientStatus:
 			{
@@ -411,6 +438,9 @@ public sealed partial class HostSession : IStorySink
 			return;
 		}
 		client.Name = req.PlayerName;
+		client.Patches = (req.Features & JoinRequest.RosterPatches) != 0;
+		client.TradeView = (req.Features & JoinRequest.TradeView) != 0;
+		client.BuildGhosts = (req.Features & JoinRequest.BuildGhosts) != 0;
 		_log.Info($"sync(host): join request from {peer} '{req.PlayerName}' (plugin {req.PluginVersion}, game {req.GameVersion}, sync v{req.SyncVersion})");
 		if (req.SyncVersion != SyncProtocol.Version)
 		{
@@ -543,6 +573,9 @@ public sealed partial class HostSession : IStorySink
 		}
 	}
 
+	/// <summary>The host player's stable identity key, the one its identity would be derived from as a client.</summary>
+	public string HostKey => PlayerIdentities.KeyFor(new PeerId(_o.HostSteamId), string.IsNullOrWhiteSpace(_o.HostName) ? "?" : _o.HostName.Trim());
+
 	public List<PlayerInfo> PlayerTable()
 	{
 		var table = new List<PlayerInfo>();
@@ -561,27 +594,73 @@ public sealed partial class HostSession : IStorySink
 		return table;
 	}
 
-	public void SendSocial(PeerId peer, SocialSnapshot snapshot)
+	private readonly DocDiffCache _socialDiffs = new(), _tableDiffs = new();
+
+	/// <summary>Bumped on every player table change (joins, identities, leaving).</summary>
+	public long PlayerTableVersion;
+
+	/// <summary>One social publish: each player's snapshot, sent only where it changed and as a patch where the player takes them.</summary>
+	public void SendSocial(IReadOnlyList<(PeerId Peer, JsonDoc Doc)> docs)
 	{
+		var targets = new List<(RemoteClient, JsonDoc)>(docs.Count);
 		lock (_sync)
-			if (!_clients.TryGetValue(peer, out var client) || client.Status != ClientStatus.Synced) return;
-		byte[] data = SocialMessage.Encode(SyncMsg.SocialSnapshot, snapshot);
-		_t.Send(peer, data.Length > 8192 ? Channel.Bulk : Channel.Control, data);
+			foreach (var (peer, doc) in docs)
+				if (_clients.TryGetValue(peer, out var client) && client.Status == ClientStatus.Synced) targets.Add((client, doc));
+		lock (_socialDiffs)
+		{
+			_socialDiffs.Clear();
+			foreach (var (client, doc) in targets) SendDoc(client, client.SocialDoc, SyncMsg.SocialSnapshot, doc, _socialDiffs);
+			_socialDiffs.Clear();
+		}
+	}
+
+	/// <summary>Whether <paramref name="peer"/> takes roster patches.</summary>
+	public bool TakesPatches(PeerId peer)
+	{
+		lock (_sync) return _clients.TryGetValue(peer, out var client) && client.Patches;
+	}
+
+	private bool SendDoc(RemoteClient client, DocState state, SyncMsg kind, JsonDoc doc, DocDiffCache diffs, Func<byte[]>? legacy = null)
+	{
+		byte[]? data = client.Patches ? state.Next((byte)kind, doc, diffs) : state.Changed(doc, diffs) ? legacy?.Invoke() ?? doc.Encode(kind) : null;
+		if (data == null) return false;
+		// Older clients got the player table on the direct lane whatever its size.
+		_t.Send(client.Peer, kind == SyncMsg.PlayerTable && !client.Patches ? Channel.Control : RosterSync.LaneOf(data), data);
+		return true;
+	}
+
+	// A client lost its copy (a patch it could not apply); at most one whole document a second each.
+	private void OnFullRequested(PeerId peer, byte kind)
+	{
+		RemoteClient client;
+		lock (_sync) _clients.TryGetValue(peer, out client);
+		long now = _clock();
+		if (client == null || !client.Patches || now < client.NextFullMs) return;
+		client.NextFullMs = now + 1000;
+		_log.Info($"sync(host): {peer} '{client.Name}' asked for the whole {(SyncMsg)kind} again");
+		switch ((SyncMsg)kind)
+		{
+		case SyncMsg.AdminState: client.AdminDoc.RequestFull(); _nextAdminPushMs = 0; break;
+		case SyncMsg.SocialSnapshot: client.SocialDoc.RequestFull(); break;
+		case SyncMsg.PlayerTable: client.TableDoc.RequestFull(); PushPlayerTable(); break;
+		}
 	}
 
 	private void PushPlayerTable()
 	{
-		byte[] msg = PlayerTableMessage.Encode(PlayerTable());
-		lock (_sync)
+		Interlocked.Increment(ref PlayerTableVersion);
+		// Built under the lock so two threads pushing at once cannot send an older table last.
+		lock (_tableDiffs)
 		{
-			foreach (RemoteClient client in _clients.Values)
-			{
-				if (client.Status == ClientStatus.Synced)
-				{
-					_t.Send(client.Peer, Channel.Control, msg);
-					PlayerTablesSent++;
-				}
-			}
+			var table = PlayerTable();
+			var doc = JsonDoc.Of(new PlayerTableDoc { Players = table });
+			byte[]? legacy = null;
+			List<RemoteClient> clients;
+			lock (_sync) clients = _clients.Values.Where(c => c.Status == ClientStatus.Synced).ToList();
+			_tableDiffs.Clear();
+			foreach (RemoteClient client in clients)
+				if (SendDoc(client, client.TableDoc, SyncMsg.PlayerTable, doc, _tableDiffs, () => legacy ??= PlayerTableMessage.Encode(table))) PlayerTablesSent++;
+			_tableDiffs.Clear();
 		}
 	}
 
@@ -632,6 +711,9 @@ public sealed partial class HostSession : IStorySink
 		}
 		switch ((SyncMsg)data[0])
 		{
+		case SyncMsg.DesyncReport:
+			HandleDesyncReport(client, data);
+			break;
 		case SyncMsg.ChatSend:
 			HandleChat(client, data);
 			break;
@@ -646,6 +728,9 @@ public sealed partial class HostSession : IStorySink
 			break;
 		case SyncMsg.VoiceUp:
 			HandleVoice(client, data);
+			break;
+		case SyncMsg.BuildGhost:
+			HandleBuildGhost(client, data);
 			break;
 		case SyncMsg.TradeRequest:
 		case SyncMsg.TradeAction:
@@ -1081,7 +1166,10 @@ public sealed partial class HostSession : IStorySink
 	public void PublishSignals(uint hostTick, IReadOnlyList<WireCommand> commands) => PublishSignals(hostTick, commands, null);
 
 	/// <summary><paramref name="roots"/>, when given, holds per command the root NetIds it refers to; a joiner that has streamed one of them out skips the command.</summary>
-	public void PublishSignals(uint hostTick, IReadOnlyList<WireCommand> commands, IReadOnlyList<uint[]>? roots)
+	public void PublishSignals(uint hostTick, IReadOnlyList<WireCommand> commands, IReadOnlyList<uint[]>? roots) => PublishSignals(hostTick, commands, roots, null);
+
+	/// <summary><paramref name="only"/>, when given, is the one player these signals are for (a popup addressed to them).</summary>
+	public void PublishSignals(uint hostTick, IReadOnlyList<WireCommand> commands, IReadOnlyList<uint[]>? roots, PeerId? only)
 	{
 		if (commands.Count == 0 || _syncedCount == 0)
 		{
@@ -1089,10 +1177,16 @@ public sealed partial class HostSession : IStorySink
 		}
 		AnnounceSignalKeys();
 		byte[] batch = SignalBatchMessage.Encode(0u, hostTick, commands);
+		// Deflated once for every client; LifeSeq sits in the envelope's uncompressed head and is patched per copy.
+		byte[]? packed = batch.Length > 8192 && _t is MpTransport mp ? BulkCompression.Pack(batch, mp.MaxInflatedOut) : null;
 		lock (_sync)
 		{
 			foreach (RemoteClient client in _clients.Values)
 			{
+				if (only.HasValue && !client.Peer.Equals(only.Value))
+				{
+					continue;
+				}
 				// Signals can carry StringHash values; the joiner needs their names before the batch that uses them.
 			if (client.Status == ClientStatus.Synced && client.P2.StringsSent < _hostStrings.Count)
 				{
@@ -1114,7 +1208,7 @@ public sealed partial class HostSession : IStorySink
 		{
 			foreach (RemoteClient client in _clients.Values)
 			{
-				if (client.Status != ClientStatus.Synced)
+				if (client.Status != ClientStatus.Synced || (only.HasValue && !client.Peer.Equals(only.Value)))
 				{
 					continue;
 				}
@@ -1123,10 +1217,11 @@ public sealed partial class HostSession : IStorySink
 				var streamedOut = client.StreamedOut;
 				if (roots != null && streamedOut.Count > 0)
 				{
+					Predicate<uint> isOut = streamedOut.Contains;
 					var kept = new List<WireCommand>(commands.Count);
 					for (int i = 0; i < commands.Count; i++)
 					{
-						if (!Array.Exists(roots[i], streamedOut.Contains)) kept.Add(commands[i]);
+						if (!Array.Exists(roots[i], isOut)) kept.Add(commands[i]);
 					}
 					if (kept.Count == 0)
 					{
@@ -1138,14 +1233,24 @@ public sealed partial class HostSession : IStorySink
 						count = kept.Count;
 					}
 				}
-				byte[] copy = mine == batch ? (byte[])batch.Clone() : mine;
-				EntityBundleMessage.SetLifeSeq(copy, client.NextLifeSeq++);
-				_t.Send(client.Peer, copy.Length > 8192 ? Channel.Bulk : Channel.Control, copy);
+				int length = mine.Length;
+				byte[] copy;
+				if (mine == batch && packed != null)
+				{
+					copy = (byte[])packed.Clone();
+					BulkCompression.SetLifeSeq(copy, client.NextLifeSeq++);
+				}
+				else
+				{
+					copy = mine == batch ? (byte[])batch.Clone() : mine;
+					EntityBundleMessage.SetLifeSeq(copy, client.NextLifeSeq++);
+				}
+				_t.Send(client.Peer, length > 8192 ? Channel.Bulk : Channel.Control, copy);
 				client.LifecycleMessages++;
-				client.LifecycleBytes += copy.Length;
+				client.LifecycleBytes += length;
 				client.P2.SignalBatches++;
 				client.P2.SignalsOut += count;
-				client.P2.SignalBytesOut += copy.Length;
+				client.P2.SignalBytesOut += length;
 			}
 		}
 	}
@@ -1545,10 +1650,6 @@ public sealed partial class HostSession : IStorySink
 			}
 			SendLifecycle(client, DespawnMessage.Encode(0u, 0, netIds));
 			SendLifecycle(client, DespawnMessage.Encode(0u, 1, netIds));
-			foreach (uint netId in netIds)
-			{
-				client.State.Remove(netId);
-			}
 		}
 	}
 
@@ -1578,7 +1679,16 @@ public sealed partial class HostSession : IStorySink
 	{
 		lock (_sync)
 		{
-			if (_clients.TryGetValue(peer, out RemoteClient client)) client.StreamedOut = roots.Count == 0 ? NothingStreamedOut : roots;
+			if (_clients.TryGetValue(peer, out RemoteClient client)) client.State.StreamedOut = client.StreamedOut = roots.Count == 0 ? NothingStreamedOut : roots;
+		}
+	}
+
+	/// <summary>Per-root send rates for one player (<see cref="StateBands"/>); roots not listed go at the full rate.</summary>
+	public void SetStateBands(PeerId peer, IReadOnlyDictionary<uint, byte> bands)
+	{
+		lock (_sync)
+		{
+			if (_clients.TryGetValue(peer, out RemoteClient client)) client.State.Bands = bands;
 		}
 	}
 
@@ -1598,8 +1708,13 @@ public sealed partial class HostSession : IStorySink
 	{
 		if (items.Count != 0 && _syncedCount != 0)
 		{
-			PublishLifecycle(DataRemoveMessage.Encode(0u, items));
+			foreach (var (netId, key) in items) _stateIn.Enqueue(new StateEntry(netId, key, 0u, RemovedMark));
 		}
+	}
+
+	public void PublishDataTag(uint netId, ushort key)
+	{
+		if (_syncedCount != 0) _stateIn.Enqueue(new StateEntry(netId, key, 0u, TagMark));
 	}
 
 	public void WorldChanged(string reason)
@@ -1651,23 +1766,31 @@ public sealed partial class HostSession : IStorySink
 				}
 			}
 		}
-		uint netId;
-		while (_despawnedIn.TryDequeue(out netId))
+		while (_despawnedIn.TryDequeue(out uint netId))
 		{
-			foreach (RemoteClient client in synced)
-			{
-				client.State.Remove(netId);
-			}
+			_fan.Remove(netId);
 		}
 		long locked = sw.ElapsedMilliseconds;
-		StateEntry entry;
-		while (_stateIn.TryDequeue(out entry))
+		_dataEdits.Clear();
+		while (_stateIn.TryDequeue(out StateEntry entry))
 		{
-			foreach (RemoteClient client in synced)
+			SyncMsg edit = ReferenceEquals(entry.Bytes, RemovedMark) ? SyncMsg.DataRemove : ReferenceEquals(entry.Bytes, TagMark) ? SyncMsg.DataTag : 0;
+			if (edit == 0)
 			{
-				if (client.Wants(entry.Root)) client.State.Put(in entry, now);
+				_fan.Put(in entry, now);
+				continue;
 			}
+			if (edit == SyncMsg.DataRemove) _fan.Forget(entry.NetId, entry.Key);
+			if (_dataEdits.Count == 0 || _dataEdits[^1].Type != edit) _dataEdits.Add((edit, new List<(uint, ushort)>()));
+			_dataEdits[^1].Items.Add((entry.NetId, entry.Key));
 		}
+		_fan.Flush(now);
+		_fanClients.Clear();
+		foreach (RemoteClient client in synced)
+		{
+			_fanClients.Add(client.State);
+		}
+		_fan.Distribute(_fanClients);
 		List<TypeKeyDef> newKeys = Keys.TakeUnannounced();
 		if (newKeys.Count > 0)
 		{
@@ -1676,6 +1799,11 @@ public sealed partial class HostSession : IStorySink
 			{
 				_t.Send(client.Peer, Channel.Control, msg);
 			}
+		}
+		// After the key announcements: a client resolves a tag's key when it applies it.
+		foreach (var (type, items) in _dataEdits)
+		{
+			PublishLifecycle(DataRemoveMessage.Encode(0u, items, type));
 		}
 		bool emit = now - _lastEmitMs >= _o.StateEmitIntervalMs;
 		if (emit)
@@ -1687,7 +1815,7 @@ public sealed partial class HostSession : IStorySink
 			if (emit)
 			{
 				_out.Clear();
-				client.State.Emit(now, 1100, _out);
+				_fan.Emit(client.State, now, 1100, _out);
 				foreach (byte[] msg in _out)
 				{
 					_t.Send(client.Peer, Channel.State, msg);
@@ -1733,8 +1861,12 @@ public sealed partial class HostSession : IStorySink
 	{
 		double seconds = c.LastStatusMs == 0L ? Math.Max(1.0, (now - c.SyncedMs) / 1000.0) : (now - c.LastStatusMs) / 1000.0;
 		var rates = new List<(string Name, double PerSec)>();
-		foreach (var (key, sent) in c.State.SentByKey)
+		var sentByKey = c.State.SentByKey;
+		for (int k = 0; k < sentByKey.Length; k++)
 		{
+			long sent = sentByKey[k];
+			if (sent == 0) continue;
+			ushort key = (ushort)k;
 			c.SentByKeyAtLastStatus.TryGetValue(key, out var before);
 			if (sent > before)
 			{
@@ -1749,8 +1881,8 @@ public sealed partial class HostSession : IStorySink
 		c.LastStatusMs = now;
 		c.StateBytesAtLastStatus = c.StateBytes;
 		c.SentAtLastStatus = c.State.Sent;
-		StateCoalescer state = c.State;
-		_log.Info($"sync(host) {c.Peer} '{c.Name}': state {stateBytes / 1024.0 / seconds:0.0} KiB/s ({entries / seconds:0}/s entries, {state.Messages} msgs total), in {state.Puts} coalesced {state.Coalesced} capped {state.DeferredByCap} budget-deferred {state.DeferredByBudget} dropped(cap 0) {state.DroppedByCap}, dirty {state.DirtyCount}/{state.EntryCount}; lifecycle {c.LifecycleMessages} msgs {MpLogExtensions.Bytes(c.LifecycleBytes)}; blobs {c.BlobsSent} ({MpLogExtensions.Bytes(c.BlobBytes)}); type keys {Keys.Count}; client phase {c.LastPhase}");
+		StateFanout.Client state = c.State;
+		_log.Info($"sync(host) {c.Peer} '{c.Name}': state {stateBytes / 1024.0 / seconds:0.0} KiB/s ({entries / seconds:0}/s entries, {state.Messages} msgs total), rate-deferred {state.DeferredByRate} budget-deferred {state.DeferredByBudget}, pending {state.PendingCount} roots, bands {state.Bands?.Count ?? 0} roots below full; shared table {_fan.EntryCount} values / {_fan.RootCount} roots, in {_fan.Puts} unchanged {_fan.Unchanged} capped {_fan.DeferredByCap} dropped(cap 0) {_fan.DroppedByCap}; lifecycle {c.LifecycleMessages} msgs {MpLogExtensions.Bytes(c.LifecycleBytes)}; blobs {c.BlobsSent} ({MpLogExtensions.Bytes(c.BlobBytes)}); type keys {Keys.Count}; client phase {c.LastPhase}");
 		_log.Info($"sync(host) {c.Peer} send rates: {topRates}");
 		PlayerRecord player = c.Player;
 		if (player == null)
@@ -1787,6 +1919,15 @@ public sealed partial class HostSession : IStorySink
 		lock (_sync)
 		{
 			return _clients.TryGetValue(peer, out RemoteClient client) ? client.Status : null;
+		}
+	}
+
+	/// <summary>Profiler view of a client's state queue: entries waiting to go out and how often the budget held them back.</summary>
+	public (int Dirty, long DeferredByBudget)? StateBacklog(PeerId peer)
+	{
+		lock (_sync)
+		{
+			return _clients.TryGetValue(peer, out RemoteClient client) && client.State != null ? (client.State.PendingCount, client.State.DeferredByBudget) : null;
 		}
 	}
 }

@@ -29,6 +29,7 @@ internal static class GameKeys
 	{
 		try
 		{
+			if (KeyHook.IsDown(vk)) return true;
 			if (!InputDeviceManager.HasValue) return false;
 			var key = new DigitalInput(vk, GenericDeviceClass.Keyboard);
 			// Every keyboard, not just the default one: a plugin can register its own keyboard as the default (Remote does).

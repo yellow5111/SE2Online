@@ -39,7 +39,8 @@ public sealed class DedicatedConfig
     [JsonObjectCreationHandling(JsonObjectCreationHandling.Populate)]
     public OnlineSettings Network { get; set; } = new OnlineSettings
     {
-        FriendsOnly = false, Advertise = false, SessionName = "Y51 Dedicated Server", AllowDirectIp = true
+        FriendsOnly = false, Advertise = false, SessionName = "Y51 Dedicated Server", AllowDirectIp = true,
+        StreamingRadiusMeters = Y51_SE2Online.Sync.StreamingRules.DedicatedDefaultRadius
     };
     public Dictionary<string, Dictionary<string, JsonElement>> SessionSettings { get; set; } = new();
     public Dictionary<string, Dictionary<string, JsonElement>> DefinitionSettings { get; set; } = new();
@@ -47,6 +48,8 @@ public sealed class DedicatedConfig
     public string DefinitionDumpFile { get; set; } = "native-definitions.json";
     public string ResumeFile { get; set; } = "dedicated-state.json";
     public string CommandFile { get; set; } = "dedicated-command.txt";
+    /// <summary>Opt-in JSONL server frame and network profile (relative to this file's folder); empty is off.</summary>
+    public string ProfileFile { get; set; } = "";
     [JsonIgnore] public string ConfigPath { get; private set; }
     [JsonIgnore] public string Directory => Path.GetDirectoryName(ConfigPath);
     [JsonIgnore] public string DumpPath => Path.GetFullPath(Path.Combine(Directory, SettingsDumpFile));
@@ -89,6 +92,9 @@ public sealed class DedicatedConfig
         if ((config.Motd ?? "").Length > Core.Motd.MaxText) throw new ArgumentException($"Motd can be at most {Core.Motd.MaxText} characters.");
         if ((config.MotdTitle ?? "").Length > Core.Motd.MaxTitle) throw new ArgumentException($"MotdTitle can be at most {Core.Motd.MaxTitle} characters.");
         if (config.Network == null) throw new ArgumentException("Network must be configured.");
+        if (!string.IsNullOrEmpty(config.Network.Motd) || !string.IsNullOrEmpty(config.Network.MotdTitle)) throw new ArgumentException("Set Motd and MotdTitle at the top level of server.json, not under Network.");
+        config.Network.Motd = config.Motd ?? "";
+        config.Network.MotdTitle = config.MotdTitle ?? "";
         if (config.Network.FriendsOnly) throw new ArgumentException("Dedicated Steam servers have no Steam friends. Set Network.FriendsOnly to false.");
         if (!config.Network.AllowDirectIp) throw new ArgumentException("Dedicated servers require Network.AllowDirectIp=true for Steam Game Server IP networking.");
         if (config.Network.Advertise && string.IsNullOrWhiteSpace(config.Network.PublicAddress)) throw new ArgumentException("Set Network.PublicAddress to the public IP or hostname and port before advertising a dedicated server.");

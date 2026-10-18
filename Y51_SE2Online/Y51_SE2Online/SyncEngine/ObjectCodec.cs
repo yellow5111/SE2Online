@@ -37,7 +37,13 @@ internal static class ObjectCodec
 
 	private static readonly ConcurrentDictionary<Type, bool> SerializableCache = new();
 
-	private static readonly HashSet<Type> PlainDataClasses = new() { typeof(BlockPlacerEntityBundle) };
+	// Plain classes copied field by field. The voxel hand brushes are what an admin player's ApplyOperationOnServer
+	// carries; as classes nobody serializes they could not travel, so a player's voxel hand edits never reached the server.
+	private static readonly HashSet<Type> PlainDataClasses = new()
+	{
+		typeof(BlockPlacerEntityBundle), typeof(Keen.Game2.Client.GameSystems.Toolbars.VoxelHand.Brushes.Sphere), typeof(Keen.Game2.Client.GameSystems.Toolbars.VoxelHand.Brushes.Cube),
+		typeof(Keen.Game2.Client.GameSystems.Toolbars.VoxelHand.Brushes.Capsule), typeof(Keen.Game2.Client.GameSystems.Toolbars.VoxelHand.Brushes.Ramp)
+	};
 
 	private static Func<DefinitionManager, Guid, Definition?>? _tryAny;
 
@@ -433,12 +439,13 @@ internal static class ObjectCodec
 		}
 		case WireKind.Definition:
 		{
-			Definition? definition = FindDefinition(v.Guid, Nullable.GetUnderlyingType(declared) ?? declared);
-			if (definition != null)
+			Type slot = Nullable.GetUnderlyingType(declared) ?? declared;
+			Definition? definition = FindDefinition(v.Guid, slot);
+			if (definition != null && slot.IsInstanceOfType(definition))
 			{
 				return definition;
 			}
-			fail = $"definition {v.Guid} is not loaded here";
+			fail = definition == null ? $"definition {v.Guid} is not loaded here" : $"definition {v.Guid} is a {definition.GetType().Name}, not a {slot.Name}";
 			return null;
 		}
 		case WireKind.String:
@@ -692,7 +699,7 @@ internal static class ObjectCodec
 			}
 			return null;
 		}
-		if (IsCompilerGenerated(t) || t.IsValueType || t == typeof(ReplicationEventContext))
+		if (IsCompilerGenerated(t) || t.IsValueType || t == typeof(ReplicationEventContext) || PlainDataClasses.Contains(t))
 		{
 			bool fieldCopyObservables = copyObservables || IsReleaseToServer(t);
 			foreach (FieldInfo field in Fields(t))

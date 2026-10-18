@@ -95,8 +95,14 @@ internal static class DedicatedRuntime
                 prefix: new HarmonyMethod(typeof(DedicatedRuntime), nameof(StartupPrefix)));
             harmony.Patch(AccessTools.Method(typeof(GameApp), nameof(GameApp.Exit)),
                 prefix: new HarmonyMethod(typeof(DedicatedRuntime), nameof(ExitPrefix)));
+            harmony.Patch(AccessTools.Method(typeof(GameAppComponent), "GameUpdate"),
+                postfix: new HarmonyMethod(typeof(DedicatedRuntime), nameof(GameUpdatePostfix)));
+            ServerProfiler.Enabled = true;
+            if (!string.IsNullOrWhiteSpace(Config.ProfileFile))
+                ServerProfiler.StartRecording(Path.Combine(Config.Directory, Config.ProfileFile), GameLog.Instance);
             Status = "Waiting for engine";
             GameLog.Instance.Info("dedicated: configuration loaded from " + Config.ConfigPath + (Headless ? "; headless simulation" : "; unattended server retains native client/renderer"));
+            if (OnlineSettings.Unstable(Config.Network.MaxPlayers)) GameLog.Instance.Warn($"dedicated: Network.MaxPlayers is {Config.Network.MaxPlayers}. {OnlineSettings.UnstablePlayersWarning}");
             WriteStatus(true);
         }
         catch (Exception ex) { Fail("configuration", ex); }
@@ -110,26 +116,33 @@ internal static class DedicatedRuntime
         return false;
     }
 
-    private static long _lastTickMs, _lastSlowLogMs, _statusCostMs;
-    private static int _lastGen0, _lastGen2;
-    private static TimeSpan _lastGcPause;
+    private static long _lastSlowLogMs, _statusCostMs;
     private static readonly object StatusFileLock = new();
 
     private static int _statusFailures;
 
+    private static void GameUpdatePostfix() => ServerProfiler.TickEnd();
+
     public static void Tick(GameAppComponent app)
     {
-        long tickMs = MpClock.NowMs();
+        var frame = Requested ? ServerProfiler.BeginFrame(_saving) : null;
+        long started = ServerProfiler.Now;
         // A stalled server frame pauses every player's and grid's updates; joiners see it as a pop when they resume.
-        int gen0 = GC.CollectionCount(0), gen2 = GC.CollectionCount(2);
-        TimeSpan gcPause = GC.GetTotalPauseDuration();
-        if (Requested && _loaded && _lastTickMs > 0 && tickMs - _lastTickMs > 100 && tickMs - _lastSlowLogMs > 2000)
+        if (frame != null && _loaded && frame.FrameMs > ServerProfiler.SlowFrameMs && MpClock.NowMs() - _lastSlowLogMs > 2000)
         {
-            _lastSlowLogMs = tickMs;
-            GameLog.Instance.Warn($"dedicated: slow server frame {tickMs - _lastTickMs} ms (GC in it: {gen0 - _lastGen0} collections, {gen2 - _lastGen2} full, paused {(gcPause - _lastGcPause).TotalMilliseconds:0} ms; last status write {_statusCostMs} ms, saving {_saving})");
+            _lastSlowLogMs = MpClock.NowMs();
+            GameLog.Instance.Warn($"dedicated: slow server frame {frame.Describe()}; last status write {_statusCostMs} ms");
         }
-        _lastTickMs = tickMs;
-        _lastGen0 = gen0; _lastGen2 = gen2; _lastGcPause = gcPause;
+        try { TickCore(app); }
+        finally
+        {
+            ServerProfiler.Lap(ServerSection.Dedicated, started);
+            ServerProfiler.TickStart();
+        }
+    }
+
+    private static void TickCore(GameAppComponent app)
+    {
         if (Requested) WriteStatus();
         if (Requested && Config == null && Error != null) { app.ExitGame(); return; }
         if (Requested && Config != null && !_exiting)
@@ -206,7 +219,7 @@ internal static class DedicatedRuntime
         bool resumed = false;
         try
         {
-            ContainerId? save = string.IsNullOrWhiteSpace(Config.SaveId) ? null : new ContainerId(Config.SaveId);
+            ContainerId? save = null;
             if (File.Exists(Config.ResumePath))
             {
                 var state = JsonSerializer.Deserialize<ResumeState>(File.ReadAllText(Config.ResumePath), DedicatedConfig.Json);
@@ -217,8 +230,23 @@ internal static class DedicatedRuntime
                     resumed = true;
                 }
             }
-            if (save.HasValue && !(await SaveHelper.TryGetSaveAsync(save.Value)).HasValue)
-                throw new InvalidOperationException("Native save does not exist in this server profile: " + Config.SaveId);
+            if (resumed && !(await SaveHelper.TryGetSaveAsync(save.Value)).HasValue)
+                throw new InvalidOperationException($"The save {save} that {Config.ResumeFile} resumes is missing from {SavesFolder()}. Put it back, or delete {Config.ResumeFile} to start from the configured world again.");
+            if (!resumed && Config.StartWorkshopId == 0 && string.IsNullOrWhiteSpace(Config.StartContent))
+            {
+                var saves = new System.Collections.Generic.List<WorldPick.Save>();
+                await foreach (var container in SaveHelper.IterateAllSavesAsync())
+                    if (!container.IsExternal) saves.Add(new WorldPick.Save(container.Id.ToString(), container.Meta.DisplayName));
+                string gameFolder = GameSavesFolder();
+                var pick = WorldPick.Resolve(Config.SaveId, Config.WorldName, saves, SavesFolder(), gameFolder == null ? null : FolderSaves(gameFolder), gameFolder);
+                if (pick.Error != null) throw new InvalidOperationException(pick.Error);
+                if (pick.Note != null) GameLog.Instance.Warn("dedicated: " + pick.Note);
+                if (pick.Id != null)
+                {
+                    save = new ContainerId(pick.Id);
+                    GameLog.Instance.Info($"dedicated: loading save '{pick.Id}' ({(string.IsNullOrWhiteSpace(Config.SaveId) ? "WorldName" : "SaveId")})");
+                }
+            }
             if (!resumed && Config.StartWorkshopId != 0)
             {
                 if (!Headless) throw new InvalidOperationException("StartWorkshop needs the headless server (runner.json Headless: true).");
@@ -267,6 +295,36 @@ internal static class DedicatedRuntime
             }
         }
         catch (Exception ex) { Fail("world load", !resumed && Config.StartWorkshopId != 0 ? DedicatedMods.ExplainStartFailure(ex, Config.StartWorkshopId) : ex); }
+    }
+
+    private static string SavesFolder() => Path.GetFullPath(Singleton<Keen.VRage.Library.Filesystem.FileSystem>.Instance.GetAppDataFiles().GetAbsolutePath("SaveGames"));
+
+    /// <summary>The game's own saves on this PC, when the server runs from a separate profile; only used to say where a missing save is.</summary>
+    private static string GameSavesFolder()
+    {
+        string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SpaceEngineers2", "AppData", "SaveGames");
+        return Directory.Exists(folder) && !string.Equals(Path.GetFullPath(folder).TrimEnd('\\'), SavesFolder().TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) ? folder : null;
+    }
+
+    private static System.Collections.Generic.List<WorldPick.Save> FolderSaves(string folder)
+    {
+        var saves = new System.Collections.Generic.List<WorldPick.Save>();
+        try
+        {
+            foreach (string dir in Directory.EnumerateDirectories(folder))
+            {
+                string name = null;
+                try
+                {
+                    using var info = JsonDocument.Parse(File.ReadAllText(Path.Combine(dir, ".container-info")));
+                    name = info.RootElement.GetProperty("$Value").GetProperty("Meta").GetProperty("DisplayName").GetString();
+                }
+                catch (Exception) { }
+                saves.Add(new WorldPick.Save(Path.GetFileName(dir), name));
+            }
+        }
+        catch (Exception ex) { GameLog.Instance.Info("dedicated: could not list " + folder + ": " + ex.Message); }
+        return saves;
     }
 
     private static async Keen.VRage.Library.Threading.Task<bool> Save(WorldSessionComponent world, bool exiting)
@@ -397,7 +455,7 @@ internal static class DedicatedRuntime
         if (left > countdown)
         {
             int warn = online ? RestartSchedule.WarnDue(Config.AutoRestart.WarnMinutes, _restartWarned, left) : 0;
-            if (warn > 0 && warn * 60 > countdown) { _restartWarned = warn; Say(_updateVersion != null ? $"Server restart in {warn} min to update Y51_SE2Online to {_updateVersion} - finish up and get somewhere safe." : RestartSchedule.WarnText(warn)); }
+            if (warn > 0 && warn * 60 > countdown) { _restartWarned = warn; Say(_updateVersion != null ? $"Server restart in {warn} min to update Space Engineers 2 Online to {_updateVersion} - finish up and get somewhere safe." : RestartSchedule.WarnText(warn)); }
             return;
         }
         if (_lastSaveFailed || _saving)
@@ -493,8 +551,9 @@ internal static class DedicatedRuntime
                 var invariant = System.Globalization.CultureInfo.InvariantCulture;
                 result = words.Length > 1 && words[1] is "on" or "off" ? host.LocalAdmin(new AdminRequest(AdminAction.SunRotation, Value: words[1] == "on"))
                     : words.Length > 2 && words[1] == "day" && double.TryParse(words[2], System.Globalization.NumberStyles.Float, invariant, out double day) ? host.LocalAdmin(new AdminRequest(AdminAction.SunPeriod, Size: day))
-                    : words.Length > 2 && words[1] == "move" && double.TryParse(words[2], System.Globalization.NumberStyles.Float, invariant, out double deg) ? host.LocalAdmin(new AdminRequest(AdminAction.SunNudge, Size: deg))
-                    : "Sun rotation is " + (host.SunInForce.Rotation ? "on" : "off") + ", one full day every " + AccessList.DayLength(host.SunInForce.PeriodMinutes) + ". Use sun on|off, sun day <minutes>, sun move <degrees>.";
+                    : words.Length > 2 && words[1] == "move" && double.TryParse(words[2], System.Globalization.NumberStyles.Float, invariant, out double deg) ? host.LocalAdmin(new AdminRequest(AdminAction.SunNudge, Value: true, Size: deg))
+                    : words.Length > 2 && words[1] == "set" && double.TryParse(words[2], System.Globalization.NumberStyles.Float, invariant, out double angle) ? host.LocalAdmin(new AdminRequest(AdminAction.SunSet, Value: true, Size: angle))
+                    : "Sun rotation is " + (host.SunInForce.Rotation ? "on" : "off") + ", one full day every " + AccessList.DayLength(host.SunInForce.PeriodMinutes) + $", sun at {host.SunDegrees:0} degrees. Use sun on|off, sun day <minutes>, sun move <degrees>, sun set <0-360>.";
                 break;
             case "usage":
                 string usageError = "";

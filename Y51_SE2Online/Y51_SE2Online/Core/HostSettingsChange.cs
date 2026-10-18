@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 
 namespace Y51_SE2Online.Core;
 
@@ -21,7 +22,7 @@ public static class HostSettingsChange
         var next = new List<string>();
         if (before.SessionName.Trim() != after.SessionName.Trim()) live.Add("session name \"" + after.SessionName.Trim() + "\"");
         if (before.Description.Trim() != after.Description.Trim()) live.Add("description updated");
-        if (before.MaxPlayers != after.MaxPlayers) live.Add("player limit " + after.MaxPlayers);
+        if (before.MaxPlayers != after.MaxPlayers) live.Add("player limit " + after.MaxPlayers + (OnlineSettings.Unstable(after.MaxPlayers) ? " (more than " + OnlineSettings.StablePlayers + " may be unstable)" : ""));
         if ((before.Password ?? "") != (after.Password ?? "")) live.Add(string.IsNullOrEmpty(after.Password) ? "password removed" : "password changed");
         if (before.FriendsOnly != after.FriendsOnly) live.Add(after.FriendsOnly ? "Steam friends only" : "open to everyone");
         if (before.Advertise != after.Advertise) live.Add(after.Advertise ? "listed in the public directory" : "removed from the public directory");
@@ -40,6 +41,10 @@ public static class HostSettingsChange
         if (before.Hacking != after.Hacking || before.AllowHackingPlayerGrids != after.AllowHackingPlayerGrids || before.HackTimeMultiplier != after.HackTimeMultiplier
             || before.HackLockdownSeconds != after.HackLockdownSeconds || before.HackLockdownCooldownSeconds != after.HackLockdownCooldownSeconds)
             live.Add(!after.Hacking ? "hacking off" : "hacking on" + (after.AllowHackingPlayerGrids ? " (player grids with PvP)" : " (NPC and unowned grids only)") + ", hack time x" + after.HackTimeMultiplier.ToString("0.##", CultureInfo.InvariantCulture));
+        if ((before.Motd ?? "") != (after.Motd ?? "") || (before.MotdTitle ?? "") != (after.MotdTitle ?? "")) live.Add("message of the day updated");
+        if (!(before.RespawnShips ?? new()).SequenceEqual(after.RespawnShips ?? new(), System.StringComparer.OrdinalIgnoreCase) || before.RespawnShipCooldownMinutes != after.RespawnShipCooldownMinutes)
+            live.Add("respawn ships " + (after.RespawnShips is { Count: > 0 } ships ? string.Join(", ", ships) : "all") + ", cooldown " + after.RespawnShipCooldownMinutes + " min");
+        if (before.BuildGhosts != after.BuildGhosts) live.Add("build previews " + OnOff(after.BuildGhosts));
         if (before.TeamGrids != after.TeamGrids) next.Add("grid sharing");
         if (before.SharedResearch != after.SharedResearch) next.Add("shared research");
         if (before.Nametags != after.Nametags || before.NametagRange != after.NametagRange) next.Add("name tags");

@@ -29,6 +29,10 @@ public sealed class DirectoryListing
     public string[] Tags { get; set; } = Array.Empty<string>();
     public DateTimeOffset UpdatedAt { get; set; }
     public string FavoriteKey => Kind + ":" + (Kind == "dedicated" && !string.IsNullOrEmpty(Address) ? Address : SteamId != "0" ? SteamId : Address);
+    /// <summary>"PvP" or "PvE" for a mode tag (0.15.3 and older published "PvP on" / "PvP off"); null for any other tag.</summary>
+    public static string ModeOf(string tag) => tag switch { "PvP" or "PvP on" => "PvP", "PvE" or "PvP off" => "PvE", _ => null };
+    /// <summary>The listing's mode, "-" when it doesn't say.</summary>
+    public static string Mode(string[] tags) => tags?.Select(ModeOf).FirstOrDefault(m => m != null) ?? "-";
     public bool MatchesBuild(string pluginVersion, string gameVersion) => PluginVersion == pluginVersion && GameVersion == gameVersion && SyncVersion == SyncProtocol.Version;
 
     public void Validate()

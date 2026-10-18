@@ -23,6 +23,8 @@ internal sealed class SteamLink : IPacketLink, IDisposable
 		public bool Connected;
 
 		public bool LanesOk;
+
+		public long LastInboundMs;
 	}
 
 	private readonly IMpLog _log;
@@ -204,24 +206,49 @@ internal sealed class SteamLink : IPacketLink, IDisposable
 	private void Register(HSteamNetConnection h, ulong remote, bool incoming)
 	{
 		uint id = h.m_HSteamNetConnection;
-		// Another game instance on the same Steam account is a separate player, not a reconnect;
-		// the transport's Hello instance check still replaces a genuinely stale connection.
+		long now = MpClock.NowMs();
 		if (incoming && _conns.Values.Any(c => c.Remote == remote && c.Connected))
 		{
-			int slot = 1;
-			while (slot <= PeerAlias.MaxSlots && _conns.Values.Any(c => c.Remote == PeerAlias.Make(remote, slot) && c.Connected))
-			{
-				slot++;
-			}
-			if (slot > PeerAlias.MaxSlots)
+			remote = PeerFor(id, remote, now);
+			if (remote == 0)
 			{
 				_api.CloseConnection(h, DisconnectCodes.NotAllowed, "too many game instances on this Steam account", false);
 				return;
 			}
-			remote = PeerAlias.Make(remote, slot);
-			_log.Info($"incoming conn {id}: this Steam account is already connected; the new game instance joins as peer {remote}");
 		}
-		foreach (var superseded in _table.Add(id, remote, incoming, MpClock.NowMs()))
+		// An IP connection's identity comes with authentication (MarkConnected); superseding on 0 would close
+		// whatever else is still connecting by IP.
+		if (remote != 0) Supersede(id, remote, incoming, now, _pendingEvents);
+		_conns[id] = new Conn
+		{
+			Handle = h,
+			Remote = remote,
+			Incoming = incoming,
+			LastInboundMs = now
+		};
+		ApplyRates(h);
+	}
+
+	// Another live game instance on the same Steam account is a separate player (an alias peer id). A slot whose
+	// connection has gone quiet is a crashed game coming back before Steam's 20 s timeout: it takes that slot again
+	// (Supersede closes the old connection), so the player keeps its identity and character. 0: every slot is live.
+	private ulong PeerFor(uint id, ulong account, long now)
+	{
+		List<long> Holders(ulong peer) => _conns.Values.Where(c => c.Remote == peer && c.Connected).Select(c => c.LastInboundMs).ToList();
+		ulong chosen = PeerAlias.Choose(account, Holders, now, out bool replaced);
+		if (chosen != 0)
+		{
+			_log.Info(replaced
+				? $"incoming conn {id}: peer {chosen} reconnected while its old connection had received nothing for {now - Holders(chosen).Max()} ms; replacing it (same player)"
+				: $"incoming conn {id}: this Steam account is already connected; the new game instance joins as peer {chosen}");
+		}
+		return chosen;
+	}
+
+	// Every other connection on this peer id is closed; a connected one reports its disconnect (the player is parked).
+	private void Supersede(uint id, ulong remote, bool incoming, long now, List<LinkEvent> events)
+	{
+		foreach (var superseded in _table.Add(id, remote, incoming, now))
 		{
 			if (_conns.Remove(superseded.Conn, out var stale))
 			{
@@ -229,17 +256,10 @@ internal sealed class SteamLink : IPacketLink, IDisposable
 				_api.CloseConnection(stale.Handle, DisconnectCodes.Superseded, "superseded by a newer connection", bEnableLinger: false);
 				if (stale.Connected)
 				{
-					_pendingEvents.Add(new LinkEvent(LinkEventKind.Disconnected, superseded.Conn, remote, DisconnectCodes.Superseded, "superseded by a newer connection"));
+					events.Add(new LinkEvent(LinkEventKind.Disconnected, superseded.Conn, remote, DisconnectCodes.Superseded, "superseded by a newer connection"));
 				}
 			}
 		}
-		_conns[id] = new Conn
-		{
-			Handle = h,
-			Remote = remote,
-			Incoming = incoming
-		};
-		ApplyRates(h);
 	}
 
 	private void ApplyRates(HSteamNetConnection h)
@@ -329,9 +349,10 @@ internal sealed class SteamLink : IPacketLink, IDisposable
 					{
 						new ReadOnlySpan<byte>((void*)data, size).CopyTo(payload);
 					}
-					if (_conns.TryGetValue(connId, out var c) && !c.Connected)
+					if (_conns.TryGetValue(connId, out var c))
 					{
-						TryPromote(c, events);
+						c.LastInboundMs = MpClock.NowMs();
+						if (!c.Connected) TryPromote(c, events);
 					}
 					messages.Add(new LinkMessage(connId, payload));
 				}
@@ -452,9 +473,20 @@ internal sealed class SteamLink : IPacketLink, IDisposable
 		ulong identity = info.m_identityRemote.GetSteamID64();
 		if (c.Remote == 0)
 		{
-			// IP connections learn the peer's Steam identity only once authenticated.
-			c.Remote = identity;
-			_table.Add(c.Handle.m_HSteamNetConnection, identity, c.Incoming, MpClock.NowMs());
+			// IP connections learn the peer's Steam identity only once authenticated: the same slot rules as Register,
+			// or two live connections ended up on one peer id.
+			uint id = c.Handle.m_HSteamNetConnection;
+			long now = MpClock.NowMs();
+			ulong peer = c.Incoming && _conns.Values.Any(o => o.Remote == identity && o.Connected) ? PeerFor(id, identity, now) : identity;
+			if (peer == 0)
+			{
+				_api.CloseConnection(c.Handle, DisconnectCodes.NotAllowed, "too many game instances on this Steam account", false);
+				_conns.Remove(id);
+				_table.Remove(id);
+				return;
+			}
+			c.Remote = peer;
+			Supersede(id, peer, c.Incoming, now, events);
 		}
 		else if (PeerAlias.SteamOf(c.Remote) != identity)
 		{

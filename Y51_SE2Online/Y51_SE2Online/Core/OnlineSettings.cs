@@ -24,6 +24,9 @@ public sealed class OnlineSettings
     public string PublicAddress { get; set; } = "";
     public string ServersDirectory { get; set; } = "https://se2-online-servers.yellow51.dev";
     public string SessionsDirectory { get; set; } = "https://se2-online-sessions.yellow51.dev";
+    public const int MinPlayers = 2, PlayerLimit = 384, StablePlayers = 64;
+    public const string UnstablePlayersWarning = "More than 64 players may be unstable (lag, desync, long saves).";
+    public static bool Unstable(int maxPlayers) => maxPlayers > StablePlayers;
     public int MaxPlayers { get; set; } = 8;
     public bool FriendsOnly { get; set; } = true;
     public string PlayerName { get; set; } = "";
@@ -36,6 +39,10 @@ public sealed class OnlineSettings
     public int InterpolationMs { get; set; } = 60;
     public int StateBudgetKiB { get; set; } = 1024;
     public string Password { get; set; } = "";
+    /// <summary>Hosting: message of the day shown to each player after they spawn; {player}, {server}, {online} and {max} are filled in. The admin panel's message replaces it for a world.</summary>
+    public string Motd { get; set; } = "";
+    /// <summary>Hosting: title of the message of the day; empty uses the session name.</summary>
+    public string MotdTitle { get; set; } = "";
     /// <summary>Hosting: the country shown with this server in the directory, as a 2-letter code (US, DE, ...), or "auto" to use the location of its IP.</summary>
     public string Country { get; set; } = Countries.Auto;
 
@@ -68,6 +75,8 @@ public sealed class OnlineSettings
     public double StreamingRadiusMeters { get; set; }
     /// <summary>Experimental: mirrors debug-menu water to joiners. Costs bandwidth and performance; not meant for full-time use yet.</summary>
     public bool WaterSync { get; set; }
+    /// <summary>Hosting: players see the placement outline of anyone building near them.</summary>
+    public bool BuildGhosts { get; set; } = true;
     /// <summary>Hosting: the respawn ships players may choose (Pathfinder, ...); empty offers every ship.</summary>
     public List<string> RespawnShips { get; set; } = new();
     /// <summary>Hosting: minutes before a player can take another respawn ship; 0 for no wait.</summary>
@@ -91,12 +100,14 @@ public sealed class OnlineSettings
     /// <summary>Percent, 0-200.</summary>
     public int VoiceVolume { get; set; } = 100;
     /// <summary>Player names whose voice this player does not hear.</summary>
+    public const int MaxMutedVoices = 1000;
     public List<string> MutedVoices { get; set; } = new();
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public bool? PlayerTurrets { get => null; set { if (value.HasValue) Pvp = value.Value; } }
     public string ChatKey { get; set; } = "Enter";
     public string PlayersKey { get; set; } = "F3";
-    public string AdminKey { get; set; } = "Alt+F10";
+    /// <summary>Not Alt+F10 (SE1's key): NVIDIA's overlay takes it for "save instant replay". Saved settings keep their key.</summary>
+    public string AdminKey { get; set; } = "Ctrl+F10";
     public string BroadcastKey { get; set; } = "O";
     /// <summary>Hold for the emote radial menu. N is free in SE2 2.4's default bindings.</summary>
     public string EmoteKey { get; set; } = "N";
@@ -128,7 +139,7 @@ public sealed class OnlineSettings
             DirectoryClient.ValidateServiceUrl(SessionsDirectory);
         }
         catch (FormatException ex) { return ex.Message; }
-        if (MaxPlayers < 2 || MaxPlayers > 32) return "Player limit must be between 2 and 32, including the host.";
+        if (MaxPlayers < MinPlayers || MaxPlayers > PlayerLimit) return $"Player limit must be between {MinPlayers} and {PlayerLimit}, including the host.";
         if (NametagRange < 1 || NametagRange > 100000 || !double.IsFinite(NametagRange)) return "Name tag range must be between 1 and 100000 metres.";
         if (SunPeriodMinutes is double day && !(day >= 1 && day <= 10080)) return "Day length must be between 1 minute and 7 days (10080 minutes).";
         if (!Sync.StreamingRules.Valid(StreamingRadiusMeters)) return $"Streaming radius must be 0 (off) or between {Sync.StreamingRules.MinRadius:0} and {Sync.StreamingRules.MaxRadius:0} metres.";
@@ -138,13 +149,16 @@ public sealed class OnlineSettings
         if (VoiceVolume < 0 || VoiceVolume > 200) return "Voice volume must be between 0 and 200 percent.";
         if (Sync.RespawnShips.Validate(RespawnShips, RespawnShipCooldownMinutes) is { } ships) return ships;
         if (MaxModDownloadGiB < 1 || MaxModDownloadGiB > ModDownloads.MaxGiBLimit) return $"Workshop download limit must be between 1 and {ModDownloads.MaxGiBLimit} GiB.";
-        if (MutedVoices == null|| MutedVoices.Count > 200) return "Too many muted players.";
+        if (MutedVoices == null|| MutedVoices.Count > MaxMutedVoices) return "Too many muted players.";
         if (HackRules.Validate(this) is string hacking) return hacking;
         if (InterpolationMs < 0 || InterpolationMs > 250) return "Motion smoothing must be between 0 and 250 milliseconds.";
         if (StateBudgetKiB < 32 || StateBudgetKiB > 4096) return "Update bandwidth must be between 32 and 4096 KiB/s.";
         if (PlayerName == null || PlayerName.Trim().Length > 32 || PlayerName.IndexOfAny(new[] { '\r', '\n', '\0' }) >= 0) return "Player name must be at most 32 characters on one line.";
         if (Countries.Normalize(Country) == null) return "Country must be auto or a 2-letter country code such as US, GB or DE.";
         if (Password == null || Password.Length > 64 || Password.Any(char.IsControl)) return "Password must be at most 64 characters on one line.";
+        if (Motd == null || Motd.Length > Core.Motd.MaxText) return $"The message of the day can be at most {Core.Motd.MaxText} characters.";
+        if (MotdTitle == null || MotdTitle.Length > Core.Motd.MaxTitle || MotdTitle.Any(char.IsControl)) return $"The message of the day title must be at most {Core.Motd.MaxTitle} characters on one line.";
+        if (PcuLimit < 0) return "PCU limit must be 0 (unlimited) or more; leave it empty to keep the world's limit.";
         foreach (var (label, key) in new[] { ("Chat", ChatKey), ("Players", PlayersKey), ("Admin panel", AdminKey), ("Suit broadcast", BroadcastKey), ("Push to talk", VoiceKey), ("Emotes", EmoteKey), ("Hack", HackKey) })
             if (!KeyBinding.TryParse(key, out _)) return label + " key binding '" + key + "' is not a valid key.";
         return null;
@@ -193,6 +207,8 @@ public sealed class OnlineSettings
         options.Country = Countries.Normalize(Country) ?? "";
         options.PublicAddress = PublishedAddress;
         options.Password = Password ?? "";
+        options.Motd = Motd ?? "";
+        options.MotdTitle = MotdTitle ?? "";
         options.Pvp = Pvp;
         options.OfflineRaidProtection = OfflineRaidProtection;
         options.PcuLimit = PcuLimit;

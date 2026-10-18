@@ -35,7 +35,8 @@ public static class Emotes
         new("Point", new Guid("d61b91a4-aee0-43e6-8944-1fec6657ec4b")),
         new("Thumbs up", new Guid("069be753-acc3-437a-9305-9151b920601a")),
         new("Dance", new Guid("c05862bf-9f8b-4867-8bbb-ca1aed894af3")),
-        new("Facepalm", new Guid("b223268c-78e2-443b-9e35-9e154954f96e")),
+        // No Facepalm: SE2 2.4's FacePalmEmoteDefinition (b223268c...) plays Emote_FacePalm.vra, whose 145 keyframes are all
+        // the bind pose (no bone turns more than 0.1 degrees), so it shows an A-pose on every peer.
         new("Punch", Punch),
     };
 }

@@ -75,6 +75,14 @@ internal sealed class HostIdentities
 		"ShowOnboardingTooltipActionComponent", "OpenTerminalScreenActionComponent"
 	};
 
+	// Server stories that name no client (MoveTo.Client()) but answer whoever caused them: Keen runs them on the host's
+	// own client, so the host saw a player's safe-zone refusals and the player saw nothing. Started inside a player's
+	// story they go to that player (HostWorld.StoryActor), otherwise to the host as before.
+	internal static readonly HashSet<string> ActorStories = new HashSet<string>(StringComparer.Ordinal)
+	{
+		"GameModeSessionComponent.SendSafeZoneProtectionNotification"
+	};
+
 	public static HostIdentities? Current { get; private set; }
 
 	public static IdentityId Hotfix => InProcessPerPlayerDataSessionComponent.HotfixIdentity;
@@ -352,6 +360,12 @@ internal sealed class HostIdentities
 			return true;
 		}
 		int id = client.ClientId.Id;
+		bool byActor = false;
+		if (id == 0 && HostWorld.StoryActor > 1 && ActorStories.Contains(StoryState.Name(ObjectCodec.TypeName(stateMachine.GetType()))))
+		{
+			id = HostWorld.StoryActor;
+			byActor = true;
+		}
 		if (id <= 1)
 		{
 			return true;
@@ -360,7 +374,7 @@ internal sealed class HostIdentities
 		try
 		{
 			story = StoryState.Name(ObjectCodec.TypeName(stateMachine.GetType()));
-			if (ForwardedStoryOwners.Contains(stateMachine.GetType().DeclaringType?.Name ?? "") && HostWorld.Current?.ForwardServerStory((ushort)id, stateMachine) == true)
+			if ((byActor || ForwardedStoryOwners.Contains(stateMachine.GetType().DeclaringType?.Name ?? "")) && HostWorld.Current?.ForwardServerStory((ushort)id, stateMachine) == true)
 			{
 				current.StoriesForwarded++;
 			}

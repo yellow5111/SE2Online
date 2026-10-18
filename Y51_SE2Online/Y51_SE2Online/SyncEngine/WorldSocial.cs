@@ -71,7 +71,7 @@ internal sealed class WorldSocial
             {
                 // Worlds that never had factions or players online stay free of the plugin's file.
                 if (social.State.Players.Count == 0 && social.State.Factions.Count == 0) return;
-                data = social.State.Serialize();
+                data = social.State.SerializeForSave();
             }
             var container = ((FileContainerAdapter<WorldSessionSaveGameMetaData>)serializer.Container).Container;
             // Temp containers must finish cleanup before a save listener writes into them.
@@ -89,6 +89,7 @@ internal sealed class WorldSocial
             lock (social.Sync)
             {
                 social.State = stream == null ? new SocialState() : SocialState.Deserialize(bytes.ToArray());
+                if (DedicatedRuntime.Requested) social.State.SettleHostSlot();
                 social._initialized = false;
                 social._tagged.Clear(); social._unmatched = null;
             }
@@ -390,12 +391,19 @@ internal sealed class WorldSocial
         return due;
     }
 
-    internal SocialSnapshot Snapshot(long actor, SocialGrid[] grids, SocialRequest view, string message)
+    /// <summary>One copy of the state for a whole publish; every player's snapshot shares its lists.</summary>
+    internal SocialSnapshot Common(uint[] openBlocks)
     {
         var copy = SocialState.Deserialize(State.Serialize());
-        var filtered = grids.Where(g => string.IsNullOrWhiteSpace(view.Name) || g.Name.Contains(view.Name, StringComparison.OrdinalIgnoreCase)).OrderBy(g => g.Name).ThenBy(g => g.NetId).ToArray();
+        return new SocialSnapshot { Revision = State.Revision, Players = copy.Players.ToArray(), Factions = copy.Factions.ToArray(), Pacts = copy.Pacts.ToArray(), Proposals = copy.Proposals.ToArray(), OpenBlocks = openBlocks };
+    }
+
+    /// <param name="sortedGrids">By name, then NetId.</param>
+    internal SocialSnapshot Snapshot(long actor, SocialGrid[] sortedGrids, SocialRequest view, string message, SocialSnapshot common)
+    {
+        var filtered = string.IsNullOrWhiteSpace(view.Name) ? sortedGrids : sortedGrids.Where(g => g.Name.Contains(view.Name, StringComparison.OrdinalIgnoreCase)).ToArray();
         int offset = Math.Clamp(view.Offset, 0, Math.Max(0, ((filtered.Length - 1) / 100) * 100));
-        var snapshot = new SocialSnapshot { Actor = actor, Revision = State.Revision, Message = message, Players = copy.Players.ToArray(), Factions = copy.Factions.ToArray(), TotalGrids = filtered.Length, Offset = offset, Grids = filtered.Skip(offset).Take(100).ToArray(), Focus = view.Grid == 0 ? null : grids.FirstOrDefault(g => g.NetId == view.Grid) is { } focus ? focus with { Secure = view.Secure } : null, Pacts = copy.Pacts.ToArray(), Proposals = copy.Proposals.ToArray() };
+        var snapshot = new SocialSnapshot { Actor = actor, Revision = common.Revision, Message = message, Players = common.Players, Factions = common.Factions, TotalGrids = filtered.Length, Offset = offset, Grids = filtered.Skip(offset).Take(100).ToArray(), Focus = view.Grid == 0 ? null : sortedGrids.FirstOrDefault(g => g.NetId == view.Grid) is { } focus ? focus with { Secure = view.Secure } : null, Pacts = common.Pacts, Proposals = common.Proposals, OpenBlocks = common.OpenBlocks };
         if (actor == PlayerIdentities.HotfixIdentity) Local = snapshot;
         return snapshot;
     }

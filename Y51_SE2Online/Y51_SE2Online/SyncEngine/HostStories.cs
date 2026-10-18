@@ -354,7 +354,16 @@ internal sealed class HostStories
 			{
 				_log.Info($"host world sync: STORY {name} #{move.StoryId} from {peer} runs on the server as ClientId {sourceClientId}");
 			}
-			((IAsyncStateMachine)sm).MoveNext();
+			ushort outer = HostWorld.StoryActor;
+			HostWorld.StoryActor = clientId != 0 ? clientId : sourceClientId;
+			try
+			{
+				((IAsyncStateMachine)sm).MoveNext();
+			}
+			finally
+			{
+				HostWorld.StoryActor = outer;
+			}
 		}
 		catch (Exception ex)
 		{

@@ -58,6 +58,11 @@ internal sealed class NetSession
 
 	private PlayerNamesPublisher? _names;
 
+	private readonly NetProfile _profile = new();
+
+	/// <summary>Load tests only: a loopback TCP listener next to the dedicated server's Steam link (-y51testtcp:&lt;port&gt;).</summary>
+	internal const string TestTcpArgument = "-y51testtcp:";
+
 	private ClientSession? _client;
 
 	private volatile MpTransport? _transport;
@@ -431,6 +436,14 @@ internal sealed class NetSession
 				_o.SteamListenIp, _o.Dedicated);
 			steamLink.Start(_o.Host);
 			link = steamLink;
+			if (_o.Dedicated && TestTcpPort() is int testPort)
+			{
+				// Headless test clients (Tests/LoadTest) have no Steam; never reachable from another machine.
+				tcpLink = new TcpLink("test-tcp", _log);
+				tcpLink.Listen(new IPEndPoint(IPAddress.Loopback, testPort));
+				link = new MuxLink(steamLink, tcpLink);
+				_log.Warn($"net: TEST listener on 127.0.0.1:{testPort} ({TestTcpArgument}) accepts unauthenticated local clients; remove it outside load tests");
+			}
 			SteamJoinStart(localId, name);
 			if (_o.Host && _o.Advertise) _directory = new DirectoryPublisher(new DirectoryClient(_o.Dedicated ? _o.ServersDirectory : _o.SessionsDirectory), message => _log.WarnOnce("directory-publish", message));
 		}
@@ -489,8 +502,8 @@ internal sealed class NetSession
 						Access = LoadAccess(AccessPath(_o.Dedicated)),
 						Password = _o.Password ?? "",
 						SessionName = _o.SessionName,
-						Motd = _o.Dedicated ? Y51_SE2Online.Dedicated.DedicatedRuntime.Config?.Motd ?? "" : "",
-						MotdTitle = _o.Dedicated ? Y51_SE2Online.Dedicated.DedicatedRuntime.Config?.MotdTitle ?? "" : "",
+						Motd = _o.Motd,
+						MotdTitle = _o.MotdTitle,
 						Dedicated = _o.Dedicated,
 						HostSteamId = _o.Dedicated ? 0 : localId,
 						HostIdentity = PlayerIdentities.HotfixIdentity,
@@ -529,7 +542,7 @@ internal sealed class NetSession
 			}
 			if (host != null && _o.Nametags)
 			{
-				_names = new PlayerNamesPublisher(transport, _log, HostNametags.Roster, p => host.StatusOf(p) == HostSession.ClientStatus.Synced);
+				_names = new PlayerNamesPublisher(transport, _log, HostNametags.Roster, p => host.StatusOf(p) == HostSession.ClientStatus.Synced, host.TakesPatches);
 			}
 			if (_o.Host)
 			{
@@ -599,6 +612,22 @@ internal sealed class NetSession
 			};
 		}
 		_directory.Tick(listing, now);
+	}
+
+	private static int? TestTcpPort()
+	{
+		string arg = Environment.GetCommandLineArgs().FirstOrDefault(a => a.StartsWith(TestTcpArgument, StringComparison.OrdinalIgnoreCase));
+		return arg != null && int.TryParse(arg.AsSpan(TestTcpArgument.Length), out int port) && port is > 0 and < 65536 ? port : null;
+	}
+
+	private Func<PeerId, string> PeerNames()
+	{
+		var names = new Dictionary<PeerId, string>();
+		foreach (var p in _host?.Players() ?? Array.Empty<HostSession.PlayerRecord>())
+		{
+			if (p.Peer is PeerId peer) names[peer] = p.Name;
+		}
+		return peer => names.TryGetValue(peer, out string name) ? name : peer.ToString();
 	}
 
 	private ClientSession NewClientSession(MpTransport transport)
@@ -810,7 +839,9 @@ internal sealed class NetSession
 			long callbacksMs = tickWatch.ElapsedMilliseconds - transportMs;
 			UpdateDirectory(now);
 			long pollMs = tickWatch.ElapsedMilliseconds;
+			long hostStarted = Stopwatch.GetTimestamp();
 			host?.Tick();
+			double hostTickMs = Stopwatch.GetElapsedTime(hostStarted).TotalMilliseconds;
 			_client?.Tick();
 			ClientWorld.Current?.NetTick(now);
 			long tickMs = tickWatch.ElapsedMilliseconds;
@@ -834,11 +865,22 @@ internal sealed class NetSession
 				if (HostWorld.Current != null && _o.Host)
 				{
 					_log.Info($"net status: host world sync {HostWorld.Current.Stats()}; world ready={HostWorld.Current.WorldReady}");
+					_log.Info("net status: " + HostWorld.Current.DesyncDescribe());
+					_log.Info("net status: " + _profile.Status(now, transport, host, PeerNames));
 					if (HostWorld.Current.SignalsForwarded + HostWorld.Current.SignalsDropped + HostWorld.Current.InputCommandsApplied + HostWorld.Current.InputRejected > 0)
 					{
 						_log.Info("net status: " + HostWorld.Current.SignalStats());
 					}
 				}
+				else if (ClientWorld.Current != null && _o.Join)
+				{
+					_log.Info("net status: " + Y51_SE2Online.Sync.DesyncStats.DescribeClient());
+				}
+			}
+			if (host != null)
+			{
+				_profile.NoteLoop(iteration.Elapsed.TotalMilliseconds, hostTickMs);
+				_profile.Tick(now, transport, host, PeerNames);
 			}
 			if (iteration.ElapsedMilliseconds > 150)
 			{

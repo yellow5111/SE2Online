@@ -306,6 +306,8 @@ internal static class MpMenu
     private static void Hotkeys(Keen.Game2.GameAppComponent app)
     {
         var shared = Shared(app);
+        KeyHook.Start();
+        KeyHook.Claim(Settings);
         bool chat = Pressed(Settings.ChatKey, ref _chatDown), players = Pressed(Settings.PlayersKey, ref _playersDown), admin = Pressed(Settings.AdminKey, ref _adminDown), broadcast = Pressed(Settings.BroadcastKey, ref _broadcastDown);
         bool inWorld = app.Client != null && !app._isTransitioning.IsSet && shared != null;
         ChatUi.TickHud(shared, inWorld && AdminAccess.InSession);
@@ -313,6 +315,7 @@ internal static class MpMenu
         BrokenMods.Tick(app, shared);
         UpdatePrompt.Tick(shared, _mainMenu != null && app.Client == null && app.Server == null && !app._isTransitioning.IsSet);
         VoiceChat.Tick(inWorld && AdminAccess.InSession, inWorld && shared.TryGetTopScreenNeedingInput() == null);
+        BuildGhosts.Tick(inWorld && AdminAccess.InSession);
         if (!inWorld) return;
         bool free = shared.TryGetTopScreenNeedingInput() == null;
         FightLock.Tick();
@@ -328,15 +331,28 @@ internal static class MpMenu
         if (admin)
         {
             if (_adminScreen != null) _adminScreen.Dispose();
-            else if (!free) { }
-            else if (!AdminAccess.InSession || AdminAccess.LocalRole == Sync.OnlineRole.Player)
-                AdminAccess.Notice(shared, "Admin panel", AdminAccess.InSession ? "You are not an admin on " + AdminAccess.ServerName + ", so you can't use the admin panel." : "The admin panel is available while you host a multiplayer session or are an admin on a server.");
-            else
-            {
-                _adminScreen = shared.CreateScreen<AdminScreen>(new AdminScreenViewModel(), showCursor: true, ScreenLayer.Top);
-                _adminScreen.OnDisposed += _ => _adminScreen = null;
-            }
+            else ShowAdmin(shared, free || _playersScreen != null, "key " + Settings.AdminKey);
         }
+    }
+
+    /// <summary>The admin panel without the hotkey: overlays (NVIDIA's instant replay is Alt+F10) can swallow it.</summary>
+    public static void OpenAdmin(string via) => Queue(() =>
+    {
+        var shared = JoinStatusUi.FindShared(MpPlugin.App);
+        if (shared != null && _adminScreen == null) ShowAdmin(shared, true, via);
+    });
+
+    private static void ShowAdmin(SharedUIComponent shared, bool free, string via)
+    {
+        var role = AdminAccess.LocalRole;
+        string refusal = Sync.AdminPanel.Refusal(AdminAccess.InSession, role, AdminAccess.ServerName);
+        GameLog.Instance.Info($"admin panel ({via}): role {role}{(AdminAccess.InSession ? "" : ", no session")}: "
+            + (!free ? "not opened, another screen has the input (" + shared.TryGetTopScreenNeedingInput()?.GetType().Name + ")" : refusal != null ? "refused" : "opened"));
+        if (!free) return;
+        if (refusal != null) { AdminAccess.Notice(shared, "Admin panel", refusal); return; }
+        _playersScreen?.Dispose();
+        _adminScreen = shared.CreateScreen<AdminScreen>(new AdminScreenViewModel(), showCursor: true, ScreenLayer.Top);
+        _adminScreen.OnDisposed += _ => _adminScreen = null;
     }
 
     private static bool _broadcastDown;

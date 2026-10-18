@@ -23,7 +23,8 @@ public static class PlayerNamesMessage
 	{
 		if (tags.Count != 0)
 		{
-			return string.Join(", ", tags.Select((PlayerTag t) => $"ClientId {t.ClientId} '{t.Name}' = NetworkId {t.NetId}"));
+			// Logged on every roster change: with hundreds of players the whole list would be tens of KB per line.
+			return string.Join(", ", tags.Take(16).Select((PlayerTag t) => $"ClientId {t.ClientId} '{t.Name}' = NetworkId {t.NetId}")) + (tags.Count > 16 ? $" and {tags.Count - 16} more" : "");
 		}
 		return "none";
 	}

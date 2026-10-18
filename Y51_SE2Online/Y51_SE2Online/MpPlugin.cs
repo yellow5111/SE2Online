@@ -141,6 +141,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		PvpRules.Install(_harmony);
 		Optional("control panel names", () => NameSync.Install(_harmony));
 		Optional("map guard", () => MapGuard.Install(_harmony));
+		Optional("suit sync", () => SuitSync.Install(_harmony));
 		Optional("shared discoveries", () => SharedDiscoveries.Install(_harmony));
 		Optional("join status", () => JoinStatusUi.Install(_harmony));
 		Optional("block size names", () => BlockSizeFilter.Install(_harmony));
@@ -148,6 +149,8 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		Optional("resource usage", () => ResourceMultiplierRules.Install(_harmony));
 		Optional("broken mods", () => BrokenMods.Install(_harmony));
 		InstallExitGuards();
+		Optional("build previews", () => BuildGhosts.Install(_harmony));
+		Optional("paste once", () => PasteOnce.Install(_harmony));
 		if (DedicatedRuntime.Headless)
 		{
 			HeadlessEngine.Install(_harmony);
@@ -160,12 +163,14 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			Optional("GPS sharing", GpsShareUi.Install);
 			Optional("gun HUD guard", () => GunHudGuard.Install(_harmony));
 			Optional("animator guard", () => AnimatorGuard.Install(_harmony));
+			Optional("ragdoll smoothing", () => RagdollGuard.Install(_harmony));
 			Optional("sound range", () => SoundRange.Install(_harmony));
 			Optional("procedural voxel handoff", () => ProceduralVoxelHandoff.Install(_harmony));
 			Optional("flora sector fix", () => FloraSectorSpawnFix.Install(_harmony));
 			Optional("host-only saves", () => HostOnlySaves.Install(_harmony));
 			Optional("water sync", () => WaterMirror.Install(_harmony));
 			Optional("passenger seats", () => PassengerSeats.Install(_harmony));
+			Optional("cockpit passengers", () => CockpitPassenger.Install(_harmony));
 			Optional("seat restore", () => SeatRestore.Install(_harmony));
 			Optional("trade UI", TradeUi.Install);
 			Optional("replication race guards", () => ReplicationRaceGuards.Install(_harmony));
@@ -233,6 +238,8 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			hooks.Add(Patch("host:CommitFrame", HookTargets.CommitFrame, new HarmonyMethod(typeof(HostWorld), "CommitPrefix"), new HarmonyMethod(typeof(HostWorld), "CommitPostfix")));
 			hooks.Add(Patch("host:BuildAndReset", HookTargets.BuildAndReset, null, new HarmonyMethod(typeof(HostWorld), "BundlePostfix")));
 			HostWorld.InstallOreMarkers(_installingMode ? _modeHarmony : _harmony);
+			HostWorld.InstallUserMessages(_installingMode ? _modeHarmony : _harmony);
+			HostWorld.InstallTurretControl(_installingMode ? _modeHarmony : _harmony);
 			if (!DedicatedRuntime.Headless)
 			{
 				// Encounters spawn through ReplicateStagedEntitiesAsync, which never passes BuildAndReset; its bundle reaches the local client here.

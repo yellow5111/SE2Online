@@ -60,10 +60,10 @@ public sealed class JoinProgress
 	{
 		"Press Enter to chat with everyone on the server",
 		"F3 shows who is online, their role and ping",
-		"Admins open their panel with Alt+F10",
+		"Admins open their panel from the F3 players screen or with /admin",
 		"New grids are private; share them in Grid ownership",
 		"Faction tags appear before names, like [TAG] Name",
-		"F11 shows the Y51_SE2Online connection stats page",
+		"F11 shows the Space Engineers 2 Online connection stats page",
 		"Rebind chat, players and admin keys in Multiplayer > Settings"
 	};
 

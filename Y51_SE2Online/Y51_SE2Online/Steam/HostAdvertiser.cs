@@ -59,7 +59,7 @@ internal sealed class HostAdvertiser
 				else
 				{
 					string value = ConnectString.Build(_me, _vport);
-					bool flag = Set("y51online_host", text) & Set("connect", value) & Set("status", HostPresence.Clean("Hosting SE2 multiplayer (Y51_SE2Online): " + worldName, 120));
+					bool flag = Set("y51online_host", text) & Set("connect", value) & Set("status", HostPresence.Clean("Hosting Space Engineers 2 Online: " + worldName, 120));
 					_log.Info($"steam presence: advertising world '{worldName}' to Steam friends{(flag ? "" : " (Steam refused a key, see above)")}: {"y51online_host"}='{text}', connect='{value}'. Friends join with Join-Friend.bat, -y51online:join:friends, " + "or 'Join Game' in the Steam friends list (needs -plugins:... in their SE2 Steam launch options)");
 				}
 				_current = text;

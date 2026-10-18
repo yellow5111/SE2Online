@@ -120,15 +120,16 @@ internal static class StoryState
 				parameters.Add(This);
 			}
 			FieldInfo[] awaiters = fields.Where(f => f.Name.StartsWith("<>u__", StringComparison.Ordinal)).ToArray();
+			string name = Name(ObjectCodec.TypeName(t));
 			return new StoryType
 			{
 				Type = t,
-				Name = Name(ObjectCodec.TypeName(t)),
+				Name = name,
 				Arguments = fields.Where(f => !f.IsStatic && parameters.Contains(f.Name)).ToArray(),
 				State = state,
 				Builder = builder,
 				ClientMayStart = method.IsDefined(typeof(Server), inherit: false) || Calls(t.GetMethod("MoveNext", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic), MoveToServer),
-				HostMayStart = HostIdentities.ForwardedStoryOwners.Contains(t.DeclaringType.Name) && awaiters.Length > 0 && awaiters.All(f => f.FieldType == typeof(ClientRequest))
+				HostMayStart = (HostIdentities.ForwardedStoryOwners.Contains(t.DeclaringType.Name) || HostIdentities.ActorStories.Contains(name)) && awaiters.Length > 0 && awaiters.All(f => f.FieldType == typeof(ClientRequest))
 			};
 		}
 		catch (Exception)

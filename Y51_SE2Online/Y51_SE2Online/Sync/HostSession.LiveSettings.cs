@@ -15,6 +15,8 @@ public sealed partial class HostSession
 		_o.MaxPlayers = after.MaxPlayers;
 		_o.Password = after.Password ?? "";
 		_o.SessionName = after.SessionName.Trim();
+		_o.Motd = after.Motd ?? "";
+		_o.MotdTitle = after.MotdTitle ?? "";
 		_o.StreamingRadiusMeters = after.StreamingRadiusMeters;
 		_o.VoiceRadiusMeters = after.VoiceRadiusMeters;
 		_o.Settings = _o.Settings with { WaterSync = after.WaterSync };
@@ -23,7 +25,6 @@ public sealed partial class HostSession
 		if (before.PcuLimit != after.PcuLimit) _o.Access.SetPcuLimit(after.PcuLimit ?? -1);
 		if (before.SunRotation != after.SunRotation && after.SunRotation is bool sun) _o.Access.SetSunRotation(sun);
 		if (before.SunPeriodMinutes != after.SunPeriodMinutes && after.SunPeriodMinutes is double day) _o.Access.SetSunPeriod(day);
-		_adminSignature = "";
 		_nextAdminPushMs = 0;
 		if (changes.Count > 0) Announce("Server settings changed: " + string.Join(", ", changes) + ".");
 	}

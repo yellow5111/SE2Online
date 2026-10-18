@@ -83,6 +83,19 @@ internal sealed class ProxyMap
 		}
 	}
 
+	public List<uint> LiveIn(uint lo, uint hi)
+	{
+		lock (_sync)
+		{
+			var ids = new List<uint>();
+			foreach (uint id in _live)
+			{
+				if (id >= lo && id <= hi) ids.Add(id);
+			}
+			return ids;
+		}
+	}
+
 	public void MarkDead(uint id)
 	{
 		lock (_sync)

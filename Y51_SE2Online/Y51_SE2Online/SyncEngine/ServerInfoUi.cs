@@ -24,7 +24,7 @@ internal static class ServerInfoUi
         var tags = new List<string>();
         if (host.HasPassword) tags.Add("Password");
         if (host.Access.WhitelistOnly) tags.Add("Whitelist");
-        tags.Add(host.Pvp ? "PvP on" : "PvP off");
+        tags.Add(host.Pvp ? "PvP" : "PvE");
         tags.Add(host.OfflineRaidProtection ? "Raid protection on" : "Raid protection off");
         tags.Add(host.PcuInForce == 0 ? "PCU unlimited" : "PCU " + host.PcuInForce.ToString("N0", System.Globalization.CultureInfo.InvariantCulture));
         if (host.StreamingRadiusMeters > 0) tags.Add($"Streaming {host.StreamingRadiusMeters / 1000:0.#} km");
@@ -44,12 +44,13 @@ internal static class ServerInfoUi
             new("Server", "Address", !string.IsNullOrWhiteSpace(e.Address) ? e.Address : "Steam host " + e.SteamId),
             new("Server", "Players", e.Players + " / " + e.MaxPlayers),
             new("Server", "Access", e.FriendsOnly ? "Steam friends only" : "Public"),
+            new("Server", "Mode", DirectoryListing.Mode(e.Tags) switch { "PvP" => "PvP: players can hurt each other", "PvE" => "PvE: players can't hurt each other", _ => "-" }),
             new("Server", "Password", e.Tags?.Contains("Password") == true ? "Yes" : "No"),
             new("Server", "Whitelist only", e.Tags?.Contains("Whitelist") == true ? "Yes" : "No"),
-            new("Server", "Version", $"Y51 SE2 Online {e.PluginVersion}, protocol {e.SyncVersion}, SE2 {e.GameVersion}"),
+            new("Server", "Version", $"Space Engineers 2 Online {e.PluginVersion}, protocol {e.SyncVersion}, SE2 {e.GameVersion}"),
             new("Server", "Listed", e.UpdatedAt == default ? "-" : e.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")),
         };
-        rows.AddRange((e.Tags ?? Array.Empty<string>()).Where(t => t is not ("Password" or "Whitelist")).Take(8).Select(t => new ServerInfoRow("Settings", "Setting", t)));
+        rows.AddRange((e.Tags ?? Array.Empty<string>()).Where(t => t is not ("Password" or "Whitelist") && DirectoryListing.ModeOf(t) == null).Take(8).Select(t => new ServerInfoRow("Settings", "Setting", t)));
         if (!string.IsNullOrWhiteSpace(e.Description)) rows.Add(new ServerInfoRow("About", "Description", e.Description.Replace('\n', ' ')));
         if (MpMenu.Ping(e) is { Length: > 0 } ping) rows.Insert(0, new ServerInfoRow("Connection", "Your ping", ping));
         rows.Add(new ServerInfoRow("Mods", "Mods", ListingMod.Total(e.Mods)));
@@ -110,7 +111,7 @@ internal static class ServerInfoUi
             if (body == null || title?.Text?.StartsWith(TitlePrefix, StringComparison.OrdinalIgnoreCase) != true) return;
             int index = grid.Children.IndexOf(body);
             grid.Children.Remove(body);
-            body.TextAlignment = TextAlignment.Left; body.HorizontalAlignment = HorizontalAlignment.Left;
+            body.TextAlignment = TextAlignment.Left; body.HorizontalAlignment = HorizontalAlignment.Left; body.Margin = new Thickness(0, 0, OnlineUi.ScrollGutter, 0);
             var scroll = new ScrollViewer { Content = body, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, AllowAutoHide = false };
             Grid.SetRow(scroll, 1);
             grid.Children.Insert(index, scroll);

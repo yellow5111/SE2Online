@@ -43,6 +43,11 @@ internal static class BulkCompression
 		return output.Length <= message.Length * 4L / 5 && !OverRatio(message.Length, (int)output.Length) ? output.ToArray() : null;
 	}
 
+	/// <summary>Rewrites the LifeSeq (bytes 1-4 of the original) inside an envelope's uncompressed head.</summary>
+	public static void SetLifeSeq(byte[] envelope, uint seq) => BinaryPrimitives.WriteUInt32LittleEndian(envelope.AsSpan(1 + 4 + 1), seq);
+
+	public static bool IsEnvelope(ReadOnlySpan<byte> payload) => payload.Length >= Prefix && payload[0] == Marker;
+
 	public static int DeclaredLength(ReadOnlySpan<byte> envelope) => envelope.Length >= Prefix ? BinaryPrimitives.ReadInt32LittleEndian(envelope.Slice(1)) : -1;
 
 	public static bool OverRatio(long inflated, int deflated) => inflated > (long)deflated * MaxRatio;

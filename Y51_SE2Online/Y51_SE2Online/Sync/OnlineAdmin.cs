@@ -12,7 +12,7 @@ public enum AdminAction
 {
     Refresh, Kick, Ban, Unban, Promote, Demote, WhitelistAdd, WhitelistRemove, WhitelistOnly,
     Creative, SpawnPrefab, SpawnItem, CreateSafeZone, DeleteSafeZone, TeleportTo, Bring, Pvp, OfflineRaidProtection, PcuLimit,
-    SunRotation, SunPeriod, SunNudge, Motd
+    SunRotation, SunPeriod, SunNudge, Motd, SunSet
 }
 
 public sealed record ChatSend(string Text);
@@ -64,6 +64,8 @@ public sealed class AdminState
     public bool SunRotation { get; set; }
     /// <summary>Minutes for one full day.</summary>
     public double SunPeriodMinutes { get; set; }
+    /// <summary>Sun angle in degrees (0-360) when this state was built; it keeps turning while rotation is on.</summary>
+    public double SunDegrees { get; set; }
     public string Motd { get; set; } = "";
     /// <summary>Proximity voice range on this server; 0 when voice is off.</summary>
     public double VoiceRadius { get; set; } = 50;
@@ -330,4 +332,12 @@ public sealed class ChatThrottle
             return ok;
         }
     }
+}
+
+public static class AdminPanel
+{
+    /// <summary>Why this player can't open the admin panel, or null when they can.</summary>
+    public static string Refusal(bool inSession, OnlineRole role, string serverName)
+        => !inSession ? "The admin panel is available while you host a multiplayer session or are an admin on a server."
+        : role == OnlineRole.Player ? "You are not an admin on " + serverName + ", so you can't use the admin panel." : null;
 }

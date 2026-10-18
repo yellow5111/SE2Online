@@ -37,7 +37,11 @@ internal static class CommandLayouts
 	{
 		typeof(Keen.VRage.Voxels.Storage.Operations.CutOutCapsulesBuilder), typeof(Keen.Game2.Simulation.WorldObjects.CubeGrids.Movement.ThrusterSyncData),
 		typeof(Keen.Game2.Simulation.WorldObjects.CubeGrids.Damage.GridExplosionHitInfo), typeof(Keen.Game2.Simulation.GameSystems.ProjectileSystems.ExplosionHit),
-		typeof(Keen.Game2.Simulation.WorldObjects.Characters.Stats.StatChangeData)
+		typeof(Keen.Game2.Simulation.WorldObjects.Characters.Stats.StatChangeData),
+		// User message popups (contract completed, undo/redo, respawn notices): sent only to the player they are for.
+		typeof(Keen.Game2.Simulation.GameSystems.UserMessages.UserMessage),
+		// Item pickup / inventory full toasts (InventoryComponent.ItemTransferSignal): sent only to the character's player.
+		typeof(Keen.Game2.Simulation.StreamedUI.Terminal.Inventories.ItemTransferData?)
 	};
 
 	private static readonly MethodInfo SizeOfMethod = typeof(Unsafe).GetMethod("SizeOf");

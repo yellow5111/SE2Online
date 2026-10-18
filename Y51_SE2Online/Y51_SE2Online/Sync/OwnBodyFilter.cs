@@ -29,7 +29,7 @@ public sealed class OwnBodyFilter
 
 	private bool _startFromShown;
 
-	private long _lastMs;
+	private double _lastMs;
 
 	private long _lastLogMs = -4611686018427387904L;
 
@@ -87,7 +87,7 @@ public sealed class OwnBodyFilter
 		_offQ = Quaternion.Identity;
 	}
 
-	public void NoteShown(long now, double x, double y, double z, Quaternion q)
+	public void NoteShown(double now, double x, double y, double z, Quaternion q)
 	{
 		_shown = new Vec3D(x, y, z);
 		_shownQ = Quaternion.Normalize(q);
@@ -103,7 +103,9 @@ public sealed class OwnBodyFilter
 		_offQ = Quaternion.Normalize(delta * _offQ * Quaternion.Conjugate(delta));
 	}
 
-	public (double X, double Y, double Z, Quaternion Q) Filter(long now, double x, double y, double z, Quaternion q, Vector3? velocity, Quaternion ownTurn, string source, string? why, bool smoothedSource = false)
+	// Fractional: whole-ms frame times made the velocity prediction miss by speed x 0.5 ms each frame, and that miss was
+	// blended into the shown body as if it had jumped (10 mm at 20 m/s, a third of the own body's frame-to-frame error).
+	public (double X, double Y, double Z, Quaternion Q) Filter(double now, double x, double y, double z, Quaternion q, Vector3? velocity, Quaternion ownTurn, string source, string? why, bool smoothedSource = false)
 	{
 		Frames++;
 		var pos = new Vec3D(x, y, z);
@@ -141,7 +143,7 @@ public sealed class OwnBodyFilter
 		else
 		{
 			_startFromShown = false;
-			double dtMs = Math.Clamp(now - _lastMs, 0L, 100L);
+			double dtMs = Math.Clamp(now - _lastMs, 0.0, 100.0);
 			double decay = Math.Exp((0.0 - dtMs) / TauMs);
 			_off *= decay;
 			_offQ = Quaternion.Normalize(Quaternion.Slerp(Quaternion.Identity, _offQ, (float)decay));
@@ -238,7 +240,7 @@ public sealed class OwnBodyFilter
 		return (_shown.X, _shown.Y, _shown.Z, _shownQ);
 	}
 
-	private void Report(long now, double m, float deg, string source, string? why, bool snapped)
+	private void Report(double now, double m, float deg, string source, string? why, bool snapped)
 	{
 		if (_log != null)
 		{
@@ -250,7 +252,7 @@ public sealed class OwnBodyFilter
 			Logged++;
 			string more = _suppressed > 0 ? $" (+{_suppressed} more in the last second)" : "";
 			_suppressed = 0;
-			_lastLogMs = now;
+			_lastLogMs = (long)now;
 			IMpLog log = _log;
 			string jump = $"client: own body: frame discontinuity {m.ToString("0.00", CultureInfo.InvariantCulture)} m / {deg.ToString("0.0", CultureInfo.InvariantCulture)} deg from source '{source}'";
 			string reason = why != null ? " (" + why + ")" : "";

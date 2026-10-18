@@ -21,6 +21,8 @@ public sealed class LifecycleItem
 
 	public List<ObservableOp>? Observables;
 
+	public DesyncCheck? Check;
+
 	public uint HostTick;
 
 	public int WireBytes;
@@ -32,9 +34,11 @@ public sealed class LifecycleItem
 			SyncMsg.EntityBundle => $"{((Bundle.Kind == 0) ? "world" : "spawn")} bundle #{Bundle.LifeSeq} ({Bundle.Entities.Count} entities, {MpLogExtensions.Bytes(WireBytes)})", 
 			SyncMsg.Despawn => $"{((DespawnMode == 0) ? "despawn" : "forget")} {NetIds.Count}", 
 			SyncMsg.DataRemove => $"data-remove {Removes.Count}", 
+			SyncMsg.DataTag => $"data-tag {Removes.Count}", 
 			SyncMsg.SignalBatch => $"signals {Signals.Count} (host tick {HostTick})", 
 			SyncMsg.StringTable => $"names {Strings.Count}", 
 			SyncMsg.ObservableBatch => $"observables {Observables.Count}", 
+			SyncMsg.DesyncCheck => $"desync check {Check.CheckId} ({Check.Roots.Count} roots)", 
 			_ => Type.ToString(), 
 		};
 	}

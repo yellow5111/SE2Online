@@ -23,6 +23,7 @@ using Keen.Game2.Simulation.WorldObjects.Characters;
 using Keen.Game2.Simulation.WorldObjects.CubeBlocks;
 using Keen.Game2.Simulation.WorldObjects.CubeGrids;
 using Keen.Game2.Simulation.WorldObjects.CubeBlocks.Pilotable;
+using Keen.Game2.Simulation.WorldObjects.CubeBlocks.Weapons;
 using Keen.VRage.Core;
 using Keen.VRage.Core.Game.Components;
 using Keen.VRage.Core.Game.Data;
@@ -124,6 +125,11 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 	private readonly IMpLog _log;
 
 	private readonly NetIdRegistry<Entity> _ids = new();
+
+	/// <summary>Tag Data (no fields, e.g. DampeningData) the clients were last told is present, by NetId and server type id.</summary>
+	private readonly HashSet<(uint, int)> _tags = new();
+
+	private static readonly ConcurrentDictionary<int, bool> TagTypes = new();
 
 	private readonly ConcurrentQueue<PeerId> _captureRequests = new();
 
@@ -244,8 +250,6 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 	private readonly Dictionary<long, string> _socialMessages = new();
 	private readonly ConcurrentDictionary<ushort, (long Start, int Count)> _socialRate = new();
 
-	/// <summary>Players with their suit broadcast off: other players get no name tag for them.</summary>
-	private readonly ConcurrentDictionary<ushort, bool> _silentClients = new();
 	private long _socialNextPublish;
 	private string Tagged(long identity, string name)
 	{
@@ -264,7 +268,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		long now = MpClock.NowMs();
 		// A burst of five a second: a single 200 ms slot dropped clicks that landed next to a periodic request (suit broadcast, terminal open).
 		var (start, count) = _socialRate.TryGetValue(clientId, out var rate) && now - rate.Start < 1000 ? rate : (now, 0);
-		if (_socialRequests.Count >= 128 || count >= 5) return;
+		if (_socialRequests.Count >= 1024 || count >= 5) return;
 		_socialRate[clientId] = (start, count + 1);
 		_socialRequests.Enqueue((peer, clientId, request));
 	}
@@ -284,6 +288,9 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		host.PcuInForce = want;
 	}
 
+	private double _sunGlide, _sunGlideDone, _sunGlideMs;
+	private long _sunGlideStartMs;
+
 	private void ApplySun(Session session)
 	{
 		var host = _host;
@@ -292,6 +299,22 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		bool rotate = host.SunRotation ?? sun.SunRotation;
 		var period = host.SunPeriodMinutes is double minutes ? TimeSpan.FromMinutes(minutes) : sun.SunPeriod;
 		double nudge = host.TakeSunNudge() / 360.0;
+		if (host.TakeSunTarget() is double target) { nudge += target / 360.0 - Angle(); _sunGlideMs = 0; }
+		if (host.TakeSunGlide() is (bool absolute, double deg))
+		{
+			double turns = absolute ? deg / 360.0 - Angle() : deg / 360.0;
+			if (absolute) turns -= Math.Round(turns);
+			// About 30 degrees a second, eased in and out; a new move starts from wherever the sun is now.
+			_sunGlide = turns; _sunGlideDone = 0; _sunGlideStartMs = MpClock.NowMs();
+			_sunGlideMs = Math.Clamp(Math.Abs(turns) * 12000, 1500, 12000);
+		}
+		if (_sunGlideMs > 0)
+		{
+			double t = Math.Min(1, (MpClock.NowMs() - _sunGlideStartMs) / _sunGlideMs), eased = t * t * (3 - 2 * t);
+			nudge += _sunGlide * (eased - _sunGlideDone);
+			_sunGlideDone = eased;
+			if (t >= 1) _sunGlideMs = 0;
+		}
 		if (rotate != sun.SunRotation || period != sun.SunPeriod || nudge != 0)
 		{
 			// The sun's angle is (game time of day / period + offset) turns, with the time term dropped while it is
@@ -300,12 +323,17 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			sun.TimeOfDayOffset = (float)(offset - Math.Floor(offset));
 			sun.SunRotation = rotate;
 			sun.SunPeriod = period;
-			_log.Info($"host world sync: sun rotation {(rotate ? "on" : "off")}, one turn every {period.TotalMinutes:0.#} min, offset {sun.TimeOfDayOffset:0.###}");
+			if (_sunGlideMs == 0) _log.Info($"host world sync: sun rotation {(rotate ? "on" : "off")}, one turn every {period.TotalMinutes:0.#} min, offset {sun.TimeOfDayOffset:0.###}");
 		}
 		host.SunInForce = (sun.SunRotation, sun.SunPeriod.TotalMinutes);
+		host.SunDegrees = Angle() * 360;
+
+		double Angle() { double turns = sun.TimeOfDayOffset + Phase(sun.SunRotation, sun.SunPeriod); return turns - Math.Floor(turns); }
 
 		double Phase(bool rotating, TimeSpan turn) => rotating && turn.TotalSeconds > 0 ? sun._time.CurrentGameTime.TimeOfDay.TotalSeconds / turn.TotalSeconds % 1.0 : 0;
 	}
+
+	private long _socialTableVersion = -1;
 
 	private void UpdateSocial(Session session)
 	{
@@ -333,7 +361,14 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 				_log.Info($"turrets: factions or PvP changed; {TurretRelations.Refresh(session)} turret grid(s) re-evaluated their targets; {PvpRules.Describe()}");
 			social.InitializeGrids(_worldSession);
 			var roster = _host.PlayerTable();
-			foreach (var player in roster) social.State.Register(player.Identity, player.Name);
+			long now = MpClock.NowMs();
+			// Registering is O(players^2); the roster only changes with the player table, and once a second catches the rest.
+			long tableVersion = Interlocked.Read(ref _host.PlayerTableVersion);
+			if (tableVersion != _socialTableVersion || now >= _socialNextPublish)
+			{
+				_socialTableVersion = tableVersion;
+				foreach (var player in roster) social.State.Register(player.Identity, player.Name, player.Identity == PlayerIdentities.HotfixIdentity ? _host.HostKey : null);
+			}
 			bool changed = false;
 			while (_socialRequests.TryDequeue(out var command))
 			{
@@ -341,8 +376,8 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 				if (command.Peer.HasValue && !_host.Players().Any(p => p.ClientId == command.ClientId && p.Peer == command.Peer)) continue;
 				if (command.Request.Action == SocialAction.Broadcast)
 				{
-					if (command.Request.Offset == 0) _silentClients[command.ClientId] = true;
-					else _silentClients.TryRemove(command.ClientId, out _);
+					// Kept per identity in the world's side file, so a parked character's tag follows its owner's last choice.
+					if (PlayerIdentities.IsHuman(actor) && (command.Request.Offset == 0 ? social.State.Silent.Add(actor) : social.State.Silent.Remove(actor))) _rosterSilentChanged = true;
 					continue;
 				}
 				if (!roster.Any(p => p.Identity == actor)) continue;
@@ -352,27 +387,38 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 				else _socialMessages[actor] = social.Apply(actor, request, id => _ids.TryGet(id, out Entity entity) && !EngineCodec.IsDead(entity) ? entity : null);
 				changed = true;
 			}
-			long now = MpClock.NowMs();
 			if (!changed && now < _socialNextPublish) return;
 			_socialNextPublish = now + 1000;
 			social.TagAntennas(session, FactionTagOf);
 			foreach (var (clientId, text) in social.DueFactionMotds(roster)) _host.GpsNotice(clientId, text);
 			var grids = session.Entities.Where(e => e.TryGet<CubeGridComponent>() != null && e.TryGet<OwnershipComponent>() != null && !EngineCodec.IsDead(e))
-				.Select(e => new SocialGrid(_ids.GetOrAssign(e), SocialState.Clean(e.TryGet<CubeGridComponent>().DisplayName.ToString(), 100), TeamPermissions.OwnerOf(e), WorldSocial.SharingOf(e))).ToArray();
+				.Select(e => new SocialGrid(_ids.GetOrAssign(e), SocialState.Clean(e.TryGet<CubeGridComponent>().DisplayName.ToString(), 100), TeamPermissions.OwnerOf(e), WorldSocial.SharingOf(e)))
+				.OrderBy(g => g.Name).ThenBy(g => g.NetId).ToArray();
 			var (listed, open) = BlockLists(session);
+			// Everything every player sees alike is built and serialized once here, not once per player.
+			var common = social.Common(open);
+			var commonDoc = JsonDoc.Of(common);
+			var pages = new Dictionary<(string, int), JsonDoc>();
+			var peers = new Dictionary<ushort, PeerId>();
+			foreach (var p in _host.Players()) if (p.Peer is PeerId id) peers.TryAdd(p.ClientId, id);
+			var docs = new List<(PeerId, JsonDoc)>(peers.Count);
 			foreach (var player in roster)
 			{
+				bool remote = peers.TryGetValue(player.ClientId, out var peer);
+				if (!remote && player.Identity != PlayerIdentities.HotfixIdentity) continue;
 				var view = _socialViews.TryGetValue(player.Identity, out var current) ? current : new SocialRequest(SocialAction.Refresh);
 				var message = _socialMessages.TryGetValue(player.Identity, out var text) ? text : "";
-				var snapshot = social.Snapshot(player.Identity, grids, view, message);
+				var snapshot = social.Snapshot(player.Identity, grids, view, message, common);
 				snapshot.FocusBlock = FocusBlockOf(player.Identity);
 				snapshot.AllowedBlocks = listed.Where(b => b.Acl.Allow.Contains(player.Identity)).Select(b => b.Id).ToArray();
 				snapshot.DeniedBlocks = listed.Where(b => b.Acl.Deny.Contains(player.Identity)).Select(b => b.Id).ToArray();
-				snapshot.OpenBlocks = open;
 				snapshot.Hacks = HackViewsFor(player.Identity);
-				var peer = _host.Players().FirstOrDefault(p => p.ClientId == player.ClientId)?.Peer;
-				if (peer.HasValue) _host.SendSocial(peer.Value, snapshot);
+				if (!remote) continue;
+				var pageKey = (view.Name?.Trim() ?? "", snapshot.Offset);
+				if (!pages.TryGetValue(pageKey, out var page)) pages[pageKey] = page = JsonDoc.Of(new SocialSnapshot { Grids = snapshot.Grids });
+				docs.Add((peer, JsonDoc.Of(snapshot.OwnPart()).With(commonDoc, SocialSnapshot.Common).With(page, new[] { nameof(SocialSnapshot.Grids) })));
 			}
+			_host.SendSocial(docs);
 		}
 	}
 
@@ -396,7 +442,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 	// Not const: the live rig shrinks it to put a seat and its pilot into different parts.
 	internal static int WorldPartEntities = 1500;
 
-	private static readonly HashSet<string> ShipActionStories = new(StringComparer.Ordinal) { "CubeGridComponent.TogglePower", "CubeGridComponent.ToggleDampeners", "CubeGridComponent.ToggleLights", "CubeGridComponent.ToggleParkingBrakes", "GridSpeedLimitComponent.SetBoost" };
+	private static readonly HashSet<string> ShipActionStories = new(StringComparer.Ordinal) { "CubeGridComponent.TogglePower", "CubeGridComponent.ToggleDampeners", "CubeGridComponent.ToggleLights", "CubeGridComponent.ToggleParkingBrakes", "GridSpeedLimitComponent.SetBoost", "BlockToolbarServerComponent.RequestActivateTile", "BlockToolsComponent.RequestEquipTool" };
 
 	public long PassengerActionsRefused;
 
@@ -424,7 +470,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 
 	private readonly ConditionalWeakTable<ReplicationCommandBuffer, StrongBox<uint>> _bufferStamp = new();
 
-	private double _lastStampMs = -1.0;
+	private readonly TickClock _tickClock = new(paced: true);
 
 	public long StampedBuffers;
 
@@ -461,6 +507,10 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 	private int _hostTagTick;
 
 	private readonly List<(ushort ClientId, string Name, Entity? Target)> _hostTagList = new();
+
+	private uint _hostTagVersion;
+
+	private volatile bool _rosterSilentChanged;
 
 	private volatile Entity? _hostCharacterServer;
 
@@ -521,6 +571,8 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		}
 		Current = null;
 		ReplicationProbe.Tap = null;
+		if (!Y51_SE2Online.Dedicated.DedicatedRuntime.Requested) ServerProfiler.Enabled = false;
+		ServerProfiler.Reset();
 	}
 
 	public static HostWorld Install(IMpLog log)
@@ -529,6 +581,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		{
 			Current = new HostWorld(log);
 		}
+		ServerProfiler.Enabled = true;
 		ReplicationProbe.Tap = Current;
 		return Current;
 	}
@@ -641,26 +694,23 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			string denied = SocialGuard.CheckObject(box, actor);
 			if (denied != null) return denied;
 		}
-		if (OnePilot)
+		if (PassengerGate(clientId, box) is string passenger)
 		{
-			string? passenger = PassengerGate(clientId, box);
-			if (passenger != null)
-			{
-				return passenger;
-			}
+			return passenger;
 		}
 		var gate = _gate;
 		if (gate == null || server == null || !_identityOf.TryGetValue(clientId, out var identity))
 		{
-			return null;
+			return PasteOnce.HostGate(clientId, box);
 		}
 		string? validator = gate.StoryValidator(box.GetType());
 		if (validator == null)
 		{
-			return null;
+			return PasteOnce.HostGate(clientId, box);
 		}
 		// Stories are compiler closures over their component; "<>4__this" is that captured component.
-		return gate.Check(validator, (ObjectCodec.Fields(box.GetType()).FirstOrDefault(f => f.Name == "<>4__this")?.GetValue(box) as Component)?.Entity, identity, server.SessionComponents.TryGet<PermissionsSessionComponent>());
+		// The paste guard goes last: it remembers what it lets through.
+		return gate.Check(validator, (ObjectCodec.Fields(box.GetType()).FirstOrDefault(f => f.Name == "<>4__this")?.GetValue(box) as Component)?.Entity, identity, server.SessionComponents.TryGet<PermissionsSessionComponent>()) ?? PasteOnce.HostGate(clientId, box);
 	}
 
 	public void Bind(HostSession host) => _host = host;
@@ -706,6 +756,8 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 				current._socialMs = 0;
 				current.OnServerCommit(comp);
 				current.NoteFrameWork(Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+				// A listen host's server may tick on its own thread; its commit is the only frame edge there.
+				if (!Y51_SE2Online.Dedicated.DedicatedRuntime.Requested) ServerProfiler.BeginFrame(false);
 			}
 		}
 		catch (Exception e)
@@ -748,6 +800,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			bool hadWorld = _serverComp != null;
 			_identityOf.Clear();
 			_ids.Clear();
+			_tags.Clear();
 			_ids.Bind(comp.Entity, 1u);
 			try
 			{
@@ -785,6 +838,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		{
 			SyncMenuPause();
 		}
+		long lap = ServerProfiler.Now;
 		if (!_joiners.IsEmpty && !_upstreamFailed)
 		{
 			try
@@ -801,6 +855,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		{
 			PublishPlayerStatus(comp);
 		}
+		lap = ServerProfiler.Lap(ServerSection.Joiners, lap);
 		if (!_joiners.IsEmpty)
 		{
 			try
@@ -811,8 +866,19 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			{
 				_log.WarnOnce("host-streaming", $"streaming: update failed ({ex.GetType().Name}: {ex.Message}); retrying next update");
 			}
+			lap = ServerProfiler.Lap(ServerSection.Streaming, lap);
+			try
+			{
+				UpdateDesync(comp);
+			}
+			catch (Exception ex)
+			{
+				_log.WarnOnce("host-desync", $"desync: update failed ({ex.GetType().Name}: {ex.Message}); retrying next frame\n{ex.StackTrace}");
+			}
 		}
+		lap = ServerProfiler.Lap(ServerSection.Desync, lap);
 		UpdateNametagRoster(comp);
+		lap = ServerProfiler.Lap(ServerSection.Joiners, lap);
 		List<PeerId>? waiting = null;
 		PeerId peer;
 		while (_captureRequests.TryDequeue(out peer))
@@ -841,6 +907,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			}
 			Capture(comp, peer);
 		}
+		ServerProfiler.Lap(ServerSection.Capture, lap);
 		if (waiting == null)
 		{
 			return;
@@ -1070,6 +1137,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		j.Character = character;
 		j.NetId = _ids.GetOrAssign(character);
 		CharactersSpawned++;
+		TestSpread(j, character, via);
 		string where = "?";
 		try
 		{
@@ -1108,7 +1176,6 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 
 	public void ReleaseCharacter(PeerId client, ushort clientId)
 	{
-		_silentClients.TryRemove(clientId, out _);
 		if (_joiners.TryRemove(clientId, out var joiner))
 		{
 			_allowed.TryRemove(clientId, out _);
@@ -1162,30 +1229,41 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		{
 			return null;
 		}
-		if (!_joiners.TryGetValue(clientId, out var joiner) || joiner.Seat == null || joiner.SeatRoot == null || joiner.Driving)
+		// The seat comes from the host's own scene: the input-based tracking (joiner.Seat) only knows a player after its
+		// first flight input, so a passenger who had not pressed anything could switch the pilot's dampeners.
+		var seat = (CharacterOf(clientId)?.AsInterface<ISeatable>()?.CurrentSeat as SeatComponent)?.Entity;
+		var fields = ObjectCodec.Fields(type);
+		// Static stories (the cockpit toolbar's RequestActivateTile) carry the block as their Entity argument.
+		var root = (fields.FirstOrDefault(f => f.Name == "<>4__this")?.GetValue(box) as Component)?.Entity
+			?? fields.FirstOrDefault(f => f.FieldType == typeof(Entity))?.GetValue(box) as Entity;
+		if (seat == null || root == null || RootOf(seat) != RootOf(root))
 		{
 			return null;
 		}
-		var root = (ObjectCodec.Fields(type).FirstOrDefault(f => f.Name == "<>4__this")?.GetValue(box) as Component)?.Entity;
-		if (root == null)
+		root = RootOf(root);
+		// Vanilla only reaches these stories from a cockpit's input handler; passenger seats have none.
+		bool passenger = !IsControlSeat(seat);
+		if (!passenger && OnePilot)
 		{
-			return null;
+			_joiners.TryGetValue(clientId, out var joiner);
+			passenger = joiner != null && joiner.Seat == seat
+				? !joiner.Driving
+				: HostPilots(root, MpClock.NowMs()) || _joiners.Values.Any(o => o != joiner && o.SeatRoot == root && o.Driving);
 		}
-		for (int depth = 0; depth < 16; depth++)
-		{
-			var parent = root.TryGet<HierarchyComponent>()?.Parent;
-			if (parent == null)
-			{
-				break;
-			}
-			root = parent;
-		}
-		if (root != joiner.SeatRoot)
+		if (!passenger)
 		{
 			return null;
 		}
 		Interlocked.Increment(ref PassengerActionsRefused);
-		return "passenger seat: only the ship's pilot switches its power, dampeners, lights, brakes and boost";
+		return "passenger seat: only the ship's pilot switches its power, dampeners, lights, brakes and boost or uses its toolbar";
+	}
+
+	private static bool IsControlSeat(Entity? seat) => seat != null && seat.TryGet<CockpitComponent>() != null && !PassengerSeats.IsPassengerSeat(seat);
+
+	private static Entity RootOf(Entity e)
+	{
+		for (int depth = 0; depth < 16 && e.TryGet<HierarchyComponent>()?.Parent is { } parent; depth++) e = parent;
+		return e;
 	}
 
 	private bool MayDriveGrid(Joiner j, Entity root, long now)
@@ -1196,26 +1274,32 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			j.SeatedAtMs = now;
 			j.Driving = true;
 		}
+		if (!IsControlSeat(j.Seat))
+		{
+			// A passenger seat block has no controls; it must not claim the ship from whoever sits in its cockpit.
+			j.Driving = false;
+			return false;
+		}
 		if (!OnePilot)
 		{
 			return true;
 		}
-		string? pilot = null;
-		if (HostPilots(root, now) && _hostSeatedSince.TryGetValue(root, out var hostSince) && hostSince <= j.SeatedAtMs)
+		var seated = new List<(ushort Client, long SeatedAtMs)> { (j.ClientId, j.SeatedAtMs) };
+		if (HostPilots(root, now) && _hostSeatedSince.TryGetValue(root, out var hostSince))
 		{
-			pilot = "the host's player sat down first and flies it";
+			seated.Add((SyncProtocol.HostClientId, hostSince));
 		}
-		else
+		foreach (var other in _joiners.Values)
 		{
-			foreach (var other in _joiners.Values)
+			if (other != j && other.Character != null && other.Seat != null && other.SeatRoot == root && IsControlSeat(other.Seat))
 			{
-				if (other != j && other.Seat != null && other.SeatRoot == root && (other.SeatedAtMs < j.SeatedAtMs || (other.SeatedAtMs == j.SeatedAtMs && other.ClientId < j.ClientId)))
-				{
-					pilot = $"ClientId {other.ClientId} '{other.Name}' sat down first and flies it";
-					break;
-				}
+				seated.Add((other.ClientId, other.SeatedAtMs));
 			}
 		}
+		ushort pilotId = ShipPilots.Pilot(seated);
+		string? pilot = pilotId == j.ClientId ? null
+			: pilotId == SyncProtocol.HostClientId ? "the host's player sat down first and flies it"
+			: $"ClientId {pilotId} '{(_joiners.TryGetValue(pilotId, out var flier) ? flier.Name : "?")}' sat down first and flies it";
 		bool driving = pilot == null;
 		if (driving != j.Driving)
 		{
@@ -1245,8 +1329,10 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			var seat = entity.TryGet<SeatComponent>();
 			if (seat != null)
 			{
+				// Only the host's own player: a character of a player who left stays seated (parked, or loaded from the save)
+				// and counted as the host flying, so an online player in another cockpit could neither fly nor switch dampeners.
 				var pilot = seat.Pilot;
-				if (pilot != null && entity.TryGet<CockpitComponent>() != null && !IsJoinerCharacter(pilot))
+				if (pilot != null && pilot == _hostCharacterServer && entity.TryGet<CockpitComponent>() != null)
 				{
 					hostPilots = true;
 				}
@@ -1384,6 +1470,13 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			{
 				joiner.Character = null;
 				joiner.NetId = 0u;
+				// A dead pilot kept the ship: its seat stayed counted, so nobody else in the ship could fly it.
+				if (joiner.Driving && joiner.Seat?.TryGet<CubeBlockComponent>()?.Grid?.Entity is { } deadGrid && _ids.TryGet(deadGrid, out var deadGridId))
+				{
+					joiner.StopGridId = deadGridId;
+				}
+				joiner.Seat = null;
+				joiner.SeatRoot = null;
 				_allowed.TryRemove(joiner.ClientId, out _);
 				CharactersLost++;
 				_log.Info($"host world sync: ClientId {joiner.ClientId} '{joiner.Name}': character {how}");
@@ -1399,6 +1492,12 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 				Collect(character, allowed, 0);
 				try
 				{
+					// Seated as of sitting down, not as of the first flight input: the pilot is whoever sat first.
+					if (joiner.Seat == null && character.AsInterface<ISeatable>()?.CurrentSeat is SeatComponent sat && sat.Pilot == character)
+					{
+						joiner.Seat = sat.Entity;
+						_log.Info($"host world sync: ClientId {joiner.ClientId} '{joiner.Name}' sat down (seat {(_ids.TryGet(sat.Entity, out var satId) ? satId : 0)}, {(IsControlSeat(sat.Entity) ? "control seat" : "passenger seat")})");
+					}
 					uint candidateId;
 					while (joiner.Candidates.TryDequeue(out candidateId))
 					{
@@ -1629,6 +1728,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			if (headless) action();
 			else comp.PostInvoke(_ => action());
 		}
+		long lap = ServerProfiler.Now;
 		OnServer(() => UpdateSocial(server.Session));
 		OnServer(() => UpdateAdmin(server.Session));
 		OnServer(() => UpdateGps(server.Session));
@@ -1638,16 +1738,19 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		OnServer(UpdatePunches);
 		OnServer(UpdateVoicePositions);
 		OnServer(UpdateSeats);
+		OnServer(UpdateTurrets);
 		Registration next;
 		while (_registrations.TryDequeue(out next))
 		{
 			var r = next;
 			OnServer(() => ServerRegister(server, r));
 		}
+		lap = ServerProfiler.Lap(ServerSection.Social, lap);
 		List<WireCommand>? signals = null;
 		string? heavy = null;
 		lock (_signalSync)
 		{
+			FlushCoalesced();
 			if (_pendingSignals.Count > 0)
 			{
 				signals = _pendingSignals;
@@ -1677,8 +1780,10 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		}
 		if (_host != null)
 		{
+			FlushAddressedSignals(_host);
 			FlushDespawns(_host);
 		}
+		lap = ServerProfiler.Lap(ServerSection.Signals, lap);
 		var obsHost = _host;
 		if (obsHost != null)
 		{
@@ -1691,6 +1796,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 				_log.WarnOnce("host-observables-flush", $"host world sync: observables flush failed ({ex.GetType().Name}: {ex.Message}); joiners' screens may stop updating");
 			}
 		}
+		lap = ServerProfiler.Lap(ServerSection.Observables, lap);
 		var stories = _stories;
 		if (stories != null && stories.Pending)
 		{
@@ -1700,6 +1806,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			stories.RootsFor = _observables.AddRoots;
 			stories.Drain(comp, () => _host, () => ServerSpace(server), serverSession, headless);
 		}
+		lap = ServerProfiler.Lap(ServerSection.Stories, lap);
 		Joiner released;
 		while (_releaseRequests.TryDequeue(out released))
 		{
@@ -1726,6 +1833,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 				ServerShip(server, pending);
 			});
 		}
+		lap = ServerProfiler.Lap(ServerSection.Spawns, lap);
 		var host = _host;
 		if (host == null || !host.AnySynced)
 		{
@@ -1748,6 +1856,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 				Inject(comp, batch, host);
 			}
 		}
+		ServerProfiler.Lap(ServerSection.Inputs, lap);
 	}
 
 	private void UpdateJoinerCharacters(InProcessReplicationSessionComponent comp)
@@ -1942,7 +2051,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		ReplicationCommandBuffer? echoBuffer = null;
 		int echoed = 0;
 		ObjectSpace? echoSpace = null;
-		foreach (var (signal, cmd) in b.Commands)
+		foreach (var (signal, cmd) in SuitGate(b))
 		{
 			var layout = CommandLayouts.ByName(signal);
 			string? fail = null;
@@ -1983,6 +2092,10 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			{
 				fail = "not allowed: another player's character (controller-only signal)";
 				Interlocked.Increment(ref ControlGuard.HostInjectDropped);
+			}
+			else if (ControlGuard.IsControllerOnly(layout) && cmd.Refs.Count > 0 && cmd.Refs[0].Kind == WireKind.Entity && _ids.TryGet(cmd.Refs[0].Id, out Entity turret) && turret.TryGet<AutoTargetingComponent>() != null && !Turrets.Controls(turret, b.ClientId))
+			{
+				fail = "not allowed: a turret this player does not control";
 			}
 			else
 			{
@@ -2328,15 +2441,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		var buffer = ((ReplicationCommandBufferSessionComponent)(object)server).Buffer;
 		if (buffer != null)
 		{
-			// Server ticks are nominally 60 Hz: follow that cadence, easing toward the wall clock, and resync on a big jump.
-			double now = MpClock.NowMs();
-			double expected = _lastStampMs + 1000.0 / 60.0;
-			double stamp = _lastStampMs < 0.0 || Math.Abs(now - expected) > 250.0 ? now : expected + 0.1 * (now - expected);
-			if (_lastStampMs >= 0.0)
-			{
-				stamp = Math.Max(stamp, _lastStampMs + 1.0);
-			}
-			_lastStampMs = stamp;
+			double stamp = _tickClock.Next(MpClock.NowMsExact());
 			_bufferStamp.AddOrUpdate(buffer, new StrongBox<uint>((uint)(long)Math.Round(stamp)));
 			StampedBuffers++;
 		}
@@ -2355,6 +2460,13 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			return;
 		}
 		var key = Keys.GetOrAdd(typeId, EngineCodec.DescribeType);
+		// A tag's only news is that it is there. On the lossy state lane it could be lost, or land after a later removal
+		// on the lifecycle lane (dampeners shown on while the host had them off), so it goes the reliable way too.
+		if (IsTag(typeId))
+		{
+			if (_tags.Add((id, typeId))) host.PublishDataTag(id, key.Key);
+			return;
+		}
 		uint hostMs;
 		if (_bufferStamp.TryGetValue(cb, out var stamp))
 		{
@@ -2365,18 +2477,27 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			hostMs = (uint)MpClock.NowMs();
 			UnstampedPostData++;
 		}
-		host.PublishState(new StateEntry(id, key.Key, (uint)Interlocked.Increment(ref _version), data.ToArray(), hostMs, _streamingActive ? RootIdOf(source) : 0u));
+		host.PublishState(new StateEntry(id, key.Key, (uint)Interlocked.Increment(ref _version), data.ToArray(), hostMs, RootIdOf(source)));
 	}
 
 	public void OnRemoveData(Entity? source, int typeId)
 	{
 		var host = _host;
-		if (host != null && host.AnySynced && !_disabled && source != null && _ids.TryGet(source, out var id))
+		if (source == null || !_ids.TryGet(source, out var id))
+		{
+			return;
+		}
+		_tags.Remove((id, typeId));
+		if (host != null && host.AnySynced && !_disabled)
 		{
 			var key = Keys.GetOrAdd(typeId, EngineCodec.DescribeType);
 			host.PublishDataRemove(new (uint, ushort)[] { (id, key.Key) });
 		}
 	}
+
+	internal static bool IsTag(int typeId) => TagTypes.GetOrAdd(typeId, static t =>
+		Keen.VRage.DCS.Internal.RuntimeDataInfo.Of(t).RuntimeType is { IsValueType: true } type
+		&& type.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic).Length == 0);
 
 	private bool CappedContactSignal(CommandLayout l, ReplicationCommandBuffer cb, ReadOnlySpan<byte> payload)
 	{
@@ -2450,6 +2571,11 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			NoteS2CDrop(layout.Name, "the host player's own event");
 			return;
 		}
+		if (IsAddressedSignal(layout, cb, payload, out var addressee) && addressee == null)
+		{
+			NoteS2CDrop(layout.Name, "for no player (the host's own)");
+			return;
+		}
 		if (CappedContactSignal(layout, cb, payload))
 		{
 			NoteS2CDrop(layout.Name, $"rate-capped (one per {ContactCapMs} ms per entity)");
@@ -2477,7 +2603,8 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		}
 		lock (_signalSync)
 		{
-			_pendingSignals.Add(command);
+			if (addressee != null) _addressedSignals.Add((addressee.Peer, command));
+			else QueueSignal(layout, command);
 			var name = ShortName(layout.Name);
 			_frameSignalBytes.TryGetValue(name, out var tally);
 			_frameSignalBytes[name] = (tally.Count + 1, tally.Bytes + command.Payload.Length + 4 * command.Refs.Count);
@@ -2681,6 +2808,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			run.Add(id);
 			// A joiner skips ids it streamed out (roots); their children never reached it, and it ignores unknown ids.
 			runRoots.Add(id);
+			ForgetCoalesced(id);
 			if (mode == 1)
 			{
 				ForgetStreamedRoot(id);
@@ -2766,7 +2894,7 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 	public string SignalStats() =>
 		$"S2C signals top: {Top(_s2cSent, 8)}; S2C dropped: {Top(_s2cDrops, 8)}; C2S applied: {Top(_c2sApplied, 8)}; C2S rejected: {Top(_c2sDrops, 6)}; "
 		+ ReplayGuard.Describe()
-		+ $"; 0.7.6: {AudioGate.Describe()}; {ToolShadowGuard.Describe()}; {ToolTargetDiagnostics.Describe()}; joiner data removals applied {InputRemovals}; {BuildGuards.Describe()}; {ControlGuard.Describe()}; 0.8.2: state stamped by server tick {StampedBuffers} ticks ({UnstampedPostData} unstamped), passenger ship actions refused {PassengerActionsRefused}; 0.8.3: contact signals rate-capped {ContactCapped}, StringIds announced {_sids.Announced}";
+		+ $"; 0.7.6: {AudioGate.Describe()}; {ToolShadowGuard.Describe()}; {ToolTargetDiagnostics.Describe()}; joiner data removals applied {InputRemovals}; {BuildGuards.Describe()}; {ControlGuard.Describe()}; 0.8.2: state stamped by server tick {StampedBuffers} ticks ({UnstampedPostData} unstamped, tick {_tickClock.PeriodMs:0.0} ms, stamp resyncs {_tickClock.Resyncs}), passenger ship actions refused {PassengerActionsRefused}; 0.8.3: contact signals rate-capped {ContactCapped}, StringIds announced {_sids.Announced}; 0.15.4: per-entity signals {_coalescer.Describe()}";
 
 	public string Stats() =>
 		$"NetIds {_ids.Count}, type keys {Keys.Count}, spawn bundles {SpawnBundles} ({MpLogExtensions.Bytes(SpawnBytes)}; blobs {SpawnBlobs} {MpLogExtensions.Bytes(SpawnBlobBytes)}), despawns {Despawns}, forgets {Forgets}, joiners {_joiners.Count} (characters spawned {CharactersSpawned}, released {CharactersReleased}, lost {CharactersLost}), joiner input applied {InputDataApplied} data / {InputCommandsApplied} commands, rejected {InputRejected}, S2C signals forwarded {SignalsForwarded} dropped {SignalsDropped}, {_stories?.Describe() ?? "stories: none"}, state for unknown entities {StateUnknownEntity}; {_observables.Describe()}; "
@@ -2783,39 +2911,62 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 			return;
 		}
 		long now = MpClock.NowMs();
-		if (now - _lastRosterMs < RosterIntervalMs)
+		if (now - _lastRosterMs < RosterIntervalMs && !_rosterSilentChanged)
 		{
 			return;
 		}
 		_lastRosterMs = now;
+		_rosterSilentChanged = false;
 		try
 		{
-			var tags = new List<PlayerTag>();
-			if (!_joiners.IsEmpty)
+			var online = new List<(ushort, uint, long, string)>();
+			var onlineCharacters = new HashSet<Entity>(ReferenceEqualityComparer.Instance);
+			foreach (var joiner in _joiners.Values)
 			{
-				var joinerCharacters = new HashSet<Entity>(ReferenceEqualityComparer.Instance);
-				foreach (var joiner in _joiners.Values)
+				var character = joiner.Character;
+				bool live = character != null && !EngineCodec.IsDead(character);
+				if (live) onlineCharacters.Add(character);
+				online.Add((joiner.ClientId, live ? joiner.NetId : 0, IdentityOf(joiner.ClientId), Tagged(IdentityOf(joiner.ClientId), joiner.Name)));
+			}
+			// Players still loading in have no joiner yet; their parked body must not read as offline to them.
+			foreach (var player in _host?.Players() ?? Array.Empty<HostSession.PlayerRecord>())
+			{
+				if (!_joiners.ContainsKey(player.ClientId)) online.Add((player.ClientId, 0, IdentityOf(player.ClientId), ""));
+			}
+			var hostCharacter = _hostCharacterServer;
+			if (hostCharacter != null && !EngineCodec.IsDead(hostCharacter) && !onlineCharacters.Contains(hostCharacter) && _ids.TryGet(hostCharacter, out var hostId))
+			{
+				online.Add((SyncProtocol.HostClientId, hostId, PlayerIdentities.HotfixIdentity, Tagged(PlayerIdentities.HotfixIdentity, HostNametags.HostName)));
+			}
+			var bodies = new List<(uint, long)>();
+			var alive = new List<Entity>();
+			if (comp.Session.TryFillAliveCharactersHotfix(alive, preserveOrder: false))
+			{
+				foreach (var character in alive)
 				{
-					var character = joiner.Character;
-					if (character != null && joiner.NetId != 0 && !EngineCodec.IsDead(character))
-					{
-						joinerCharacters.Add(character);
-						if (_silentClients.ContainsKey(joiner.ClientId)) continue;
-						tags.Add(new PlayerTag(joiner.ClientId, joiner.NetId, Tagged(IdentityOf(joiner.ClientId), joiner.Name)));
-					}
-				}
-				var hostCharacter = _hostCharacterServer;
-				if (hostCharacter != null && !EngineCodec.IsDead(hostCharacter) && !joinerCharacters.Contains(hostCharacter) && !_silentClients.ContainsKey(SyncProtocol.HostClientId) && _ids.TryGet(hostCharacter, out var id))
-				{
-					tags.Add(new PlayerTag(SyncProtocol.HostClientId, id, Tagged(PlayerIdentities.HotfixIdentity, HostNametags.HostName)));
+					if (onlineCharacters.Contains(character) || EngineCodec.IsDead(character) || !_ids.TryGet(character, out var netId)) continue;
+					bodies.Add((netId, (long?)character.TryGet<OwnershipComponent>()?.Owner ?? 0));
 				}
 			}
-			HostNametags.Roster.Set(tags);
+			var names = new Dictionary<long, string>();
+			HashSet<long> silent;
+			var social = Social;
+			if (social == null) silent = new HashSet<long>();
+			else lock (social.Sync)
+			{
+				silent = new HashSet<long>(social.State.Silent);
+				var owners = new HashSet<long>(bodies.Select(b => b.Item2));
+				foreach (var player in social.State.Players)
+				{
+					if (owners.Contains(player.Identity)) names[player.Identity] = Tagged(player.Identity, player.Name);
+				}
+			}
+			HostNametags.Roster.Set(PlayerTag.Build(NametagOverlay.Enabled, online, bodies, names, silent));
 		}
 		catch (Exception ex)
 		{
 			_rosterFailed = true;
-			_log.Error($"nametags(host): building the player list failed, joiners get no nametags this session (game unaffected): {ex}");
+			_log.Error($"nametags(host): building the player list failed, players get no nametags this session (game unaffected): {ex}");
 		}
 	}
 
@@ -2844,30 +2995,34 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 	{
 		if (!NametagOverlay.Enabled)
 		{
+			// HostPilots needs the host's character with nametags off too.
+			if (_hostTagTick++ % HostTagResolveTicks == 0) ResolveHostCharacter(comp);
 			return;
 		}
 		var overlay = _hostTags ??= new NametagOverlay(_log, "host");
-		if (_hostTagTick++ % HostTagResolveTicks == 0 || _hostTagList.Count != _joiners.Count)
+		var (version, tags) = HostNametags.Roster.Snapshot();
+		if (_hostTagTick++ % HostTagResolveTicks == 0 || version != _hostTagVersion)
 		{
 			ResolveHostCharacter(comp);
+			_hostTagVersion = version;
 			_hostTagList.Clear();
 			try
 			{
-				foreach (var joiner in _joiners.Values.OrderBy(x => x.ClientId))
+				foreach (var tag in tags)
 				{
+					if (tag.ClientId == SyncProtocol.HostClientId) continue;
 					Entity? target = null;
-					var character = joiner.Character;
-					if (character != null && !EngineCodec.IsDead(character) && !_silentClients.ContainsKey(joiner.ClientId))
+					if (_ids.TryGet(tag.NetId, out Entity character) && !EngineCodec.IsDead(character))
 					{
 						bool skip = false;
 						target = comp.ReplayContext.TranslateObject(character, ReplicationFailureStrategy.NullOnAnyFail, ref skip) as Entity;
 					}
-					_hostTagList.Add((joiner.ClientId, joiner.Name, target));
+					_hostTagList.Add((tag.ClientId, tag.Name, target));
 				}
 			}
 			catch (Exception ex)
 			{
-				_log.WarnOnce("host-nametag-resolve", $"nametags(host): resolving joiners' characters failed ({ex.GetType().Name}: {ex.Message}); retrying");
+				_log.WarnOnce("host-nametag-resolve", $"nametags(host): resolving players' characters failed ({ex.GetType().Name}: {ex.Message}); retrying");
 				_hostTagList.Clear();
 			}
 		}

@@ -8,7 +8,7 @@ public sealed class TransformSmoother
 {
 	private sealed class Track
 	{
-		public readonly List<(long T, byte[] V)> Samples = new List<(long, byte[])>();
+		public readonly List<(double T, byte[] V)> Samples = new List<(double, byte[])>();
 
 		public long LastArrivalMs;
 
@@ -18,7 +18,10 @@ public sealed class TransformSmoother
 
 		public bool WasExtrapolating;
 
-		public long LastOutMs;
+		// The newest sample the last extrapolation started from.
+		public double BaseT = double.NaN;
+
+		public double LastOutMs;
 
 		public Vec3D LastRaw, LastShown, Velocity, Offset;
 
@@ -27,9 +30,12 @@ public sealed class TransformSmoother
 
 		public Vec3D Heading;
 
-		public long PaybackUntilMs;
+		public double PaybackUntilMs;
 
 		public bool HasOut;
+
+		// The host sends far bodies less often (StateBands); such a track plays further behind so it still has a sample ahead.
+		public double GapMs = -1, ExtraMs;
 	}
 
 	public const int TransformBytes = 40;
@@ -52,15 +58,30 @@ public sealed class TransformSmoother
 
 	private double _curDelay = -1.0;
 
-	private double _targetDelay = -1.0;
+	private double _targetDelay = -1.0, _targetLag = double.NaN;
 
-	private long _lastSampleMs = long.MinValue;
+	private double _lastSampleMs = double.NaN;
 
 	private long _lastLateArrivalMs = long.MinValue;
 
-	private long _lastTargetMs = long.MinValue;
+	private double _lastTargetMs = double.NaN;
 
-	private readonly int[] _late = new int[512];
+	private double _elapsedMs;
+
+	// SE2 advances its own world a fixed 1/60 s per frame, so everything local moves evenly from frame to frame, while
+	// the moment a frame samples here wanders by several ms (uneven frame work, two games on one PC). At that raw moment a
+	// 300 m/s ship, and a camera riding it, advanced 1.2 then 5.1 px a frame; the frame clock keeps the rate, not the wobble.
+	private readonly TickClock _frameClock = new();
+
+	/// <summary>Sample spacing above this is a body at rest, not its send rate.</summary>
+	public const int MaxGapMs = 300;
+
+	// Arrival minus host stamp, per arrival: the playout lag has to cover nearly all of it.
+	private readonly long[] _late = new long[512];
+
+	private double _lag = double.NaN;
+
+	private bool _underrun;
 
 	private int _lateHead;
 
@@ -195,12 +216,13 @@ public sealed class TransformSmoother
 			{
 				return false;
 			}
-			long t = Unwrap(hostMs);
-			long arrivalOffset = NoteClockLocked(t, localNowMs);
+			long raw = Unwrap(hostMs);
+			long arrivalOffset = NoteClockLocked(raw, localNowMs);
+			double t = TickTime(raw);
 			if (localNowMs != _lastLateArrivalMs)
 			{
 				_lastLateArrivalMs = localNowMs;
-				_late[_lateHead] = (int)Math.Clamp(arrivalOffset - _offset, 0L, 5000L);
+				_late[_lateHead] = arrivalOffset;
 				_lateHead = (_lateHead + 1) % _late.Length;
 				if (_lateCount < _late.Length)
 				{
@@ -243,6 +265,12 @@ public sealed class TransformSmoother
 					return true;
 				}
 			}
+			if (samples.Count > 0)
+			{
+				// Gaps over MaxGapMs are a body at rest (unchanged values are resent once a second), not its send rate.
+				double gap = t - samples[samples.Count - 1].T;
+				if (gap <= MaxGapMs) track.GapMs = track.GapMs < 0 ? gap : track.GapMs + 0.25 * (gap - track.GapMs);
+			}
 			samples.Add((t, value));
 			if (samples.Count > 16)
 			{
@@ -267,9 +295,64 @@ public sealed class TransformSmoother
 		lock (_sync)
 		{
 			// The slewed playout offset where there is one: the raw estimate steps 2 ms at a time (speed x 2 ms jumps).
-			return (_offset == long.MinValue) ? null : (Unwrap(hostMs) + (double.IsNaN(_playOffset) ? _offset : _playOffset));
+			return (_offset == long.MinValue) ? null : (TickTime(Unwrap(hostMs)) + (double.IsNaN(_playOffset) ? _offset : _playOffset));
 		}
 	}
+
+	/// <summary>Host simulation seconds per real second: SE2 moves its world one 1/60 s tick per frame, so a host at
+	/// 58 fps moves bodies at 97 % of their velocity in real time.</summary>
+	public double HostRate => Math.Clamp(1000.0 / 60.0 / _tickPeriod, 0.25, 1.0);
+
+	/// <summary>The tick time a whole-ms host stamp stands for (see TickTime).</summary>
+	public double HostTickMs(uint hostMs)
+	{
+		lock (_sync)
+		{
+			return _offset == long.MinValue ? hostMs : TickTime(Unwrap(hostMs));
+		}
+	}
+
+	// Host stamps travel as whole ms, but ticks are 16.7 ms apart (a stamp up to 0.5 ms off moved a 300 m/s ship up to 0.15 m
+	// and gave every body a 17/17/16 three-frame ripple). Stamps of successive ticks lie on a near-straight line, so the
+	// line through them, kept inside each stamp's rounding interval, is the tick's real time.
+	private double TickTime(long raw)
+	{
+		for (int i = 0; i < _ticks.Length; i++)
+		{
+			if (_ticks[i].Raw == raw) return _ticks[i].At;
+		}
+		double at = raw;
+		if (raw > _tickRaw && raw - _tickRaw <= MaxGapMs)
+		{
+			double n = Math.Max(1.0, Math.Round((raw - _tickAt) / _tickPeriod));
+			double error = raw - (_tickAt + n * _tickPeriod);
+			if (Math.Abs(error) < 2.0)
+			{
+				at = Math.Clamp(_tickAt + n * _tickPeriod + 0.3 * error, raw - 0.5, raw + 0.5);
+				_tickPeriod = Math.Clamp(_tickPeriod + 0.05 * error / n, 1000.0 / 240.0, 250.0);
+			}
+			else if (n == 1.0 && raw - _tickRaw >= 4)
+			{
+				_tickPeriod = raw - _tickRaw;
+			}
+		}
+		if (raw > _tickRaw)
+		{
+			_tickRaw = raw;
+			_tickAt = at;
+		}
+		_ticks[_tickHead] = (raw, at);
+		_tickHead = (_tickHead + 1) % _ticks.Length;
+		return at;
+	}
+
+	private readonly (long Raw, double At)[] _ticks = new (long, double)[64];
+
+	private int _tickHead;
+
+	private long _tickRaw = long.MinValue;
+
+	private double _tickAt, _tickPeriod = 1000.0 / 60.0;
 
 	private long NoteClockLocked(long t, long localNowMs)
 	{
@@ -302,7 +385,10 @@ public sealed class TransformSmoother
 		}
 	}
 
-	public void Sample(long localNowMs, List<(uint NetId, byte[] Value)> output)
+	/// <summary>Bodies for the frame sampling at <paramref name="localNowMs"/>; call once a frame, with the fraction (whole ms moved a 300 m/s ship up to 0.3 m).</summary>
+	/// <param name="evenTime">The caller's time is already an even frame time (a <see cref="TickClock"/> it also draws the
+	/// own body with): taken as is, so remote bodies and the own body step and catch up together.</param>
+	public void Sample(double localNowMs, List<(uint NetId, byte[] Value)> output, bool evenTime = false)
 	{
 		lock (_sync)
 		{
@@ -310,22 +396,30 @@ public sealed class TransformSmoother
 			{
 				return;
 			}
+			localNowMs = evenTime ? _frameClock.Follow(localNowMs) : _frameClock.Next(localNowMs);
 			UpdateDelay(localNowMs);
 			// Fractional: rounding the playout time to whole milliseconds jittered fast bodies by speed x 0.5 ms.
-			double playTime = localNowMs - (_playOffset + CurrentDelayMs);
+			double sharedPlayTime = localNowMs - _lag;
+			_underrun = false;
 			foreach (var (netId, track) in _tracks)
 			{
 				if (!track.Active || track.Samples.Count == 0)
 				{
 					continue;
 				}
+				double extra = track.GapMs < 0 ? 0 : Math.Max(0, track.GapMs + MarginMs - CurrentDelayMs);
+				track.ExtraMs += extra > track.ExtraMs ? Math.Min(extra - track.ExtraMs, 0.04 * _elapsedMs) : Math.Max(extra - track.ExtraMs, -0.03 * _elapsedMs);
+				double playTime = sharedPlayTime - track.ExtraMs;
 				var samples = track.Samples;
 				var newest = samples[samples.Count - 1];
-				if ((double)(playTime - newest.T) > CurrentDelayMs + MaxExtrapolateMs + IdleMs)
+				if ((double)(playTime - newest.T) > CurrentDelayMs + track.ExtraMs + MaxExtrapolateMs + IdleMs)
 				{
 					if (!track.FinalApplied)
 					{
-						output.Add((netId, newest.V));
+						// Coasted ahead (a long server stall, a hard stop): stay put rather than jump back to the newest
+						// sample; whatever comes next blends from here.
+						if (!track.WasExtrapolating) output.Add((netId, newest.V));
+						else track.Velocity = default;
 						track.FinalApplied = true;
 					}
 					track.Active = false;
@@ -346,13 +440,14 @@ public sealed class TransformSmoother
 						{
 							// Past the extrapolation window (a server stall) the body waits where the window ended: going
 							// back to the newest sample there snapped fast ships tens of metres back and then froze them.
-							output.Add((netId, Settle(track, localNowMs, Lerp(previous.V, newest.V, 1.0 + Math.Min(ahead, MaxExtrapolateMs) / interval, 1.0 + (double)MaxExtrapolateMs / interval), extrapolated: true)));
-							if (ahead <= MaxExtrapolateMs) Extrapolated++;
+							var coast = ahead <= MaxExtrapolateMs ? PathVelocity(previous, newest) : default;
+							output.Add((netId, Settle(track, localNowMs, Lerp(previous.V, newest.V, 1.0 + Math.Min(ahead, MaxExtrapolateMs) / interval, 1.0 + (double)MaxExtrapolateMs / interval), extrapolated: true, coast, newest.T)));
+							if (ahead <= MaxExtrapolateMs) { Extrapolated++; _underrun = true; }
 							else Held++;
 							continue;
 						}
 					}
-					output.Add((netId, Settle(track, localNowMs, newest.V, extrapolated: false)));
+					output.Add((netId, Settle(track, localNowMs, newest.V, extrapolated: false, default)));
 					Held++;
 				}
 				else
@@ -362,7 +457,7 @@ public sealed class TransformSmoother
 					var from = samples[i - 1];
 					var to = samples[i];
 					double t = to.T == from.T ? 1.0 : (double)(playTime - from.T) / (double)(to.T - from.T);
-					output.Add((netId, Settle(track, localNowMs, Lerp(from.V, to.V, t), extrapolated: false)));
+					output.Add((netId, Settle(track, localNowMs, Lerp(from.V, to.V, t), extrapolated: false, PathVelocity(from, to))));
 					Interpolated++;
 					if (i - 1 > 0)
 					{
@@ -373,41 +468,58 @@ public sealed class TransformSmoother
 		}
 	}
 
-	private void UpdateDelay(long now)
+	// Playout lag (local time minus host stamp) changes only as a slow time scale: the 2 s minimum of the arrival
+	// offset steps +-10 ms every few seconds and the old delay slewed 3-6 %, so ships surged 2-6 % at steady flight.
+	// It grows faster only while bodies run out of samples, never past what arrivals need, and shrinks very slowly.
+	public const double LagRate = 0.005, UnderrunRate = 0.04, ShrinkRate = 0.0025;
+
+	private void UpdateDelay(double now)
 	{
-		double elapsed = _lastSampleMs == long.MinValue ? 0 : Math.Clamp(now - _lastSampleMs, 0L, 100L);
+		double elapsed = double.IsNaN(_lastSampleMs) ? 0 : Math.Clamp(now - _lastSampleMs, 0.0, 100.0);
+		_elapsedMs = elapsed;
 		_lastSampleMs = now;
-		// Offset estimate steps +-2 ms; stepping playout with it jerks every remote body by speed x step, so slew instead.
+		// LocalOf (own-character dead reckoning) keeps the slewed minimum offset.
 		double drift = _offset - _playOffset;
 		_playOffset = (double.IsNaN(_playOffset) || Math.Abs(drift) > 250.0) ? _offset : (_playOffset + Math.Clamp(drift, -0.02 * elapsed, 0.02 * elapsed));
+		double target;
 		if (!Adaptive)
 		{
-			_curDelay = _targetDelay = DelayMs;
-			return;
+			target = _playOffset + DelayMs;
 		}
-		if (_curDelay < 0.0)
+		else
 		{
-			_curDelay = DelayMs;
+			if (double.IsNaN(_lastTargetMs) || now - _lastTargetMs >= 250)
+			{
+				_lastTargetMs = now;
+				if (_lateCount >= 30)
+				{
+					long[] sorted = new long[_lateCount];
+					Array.Copy(_late, sorted, _lateCount);
+					Array.Sort(sorted);
+					// p99, not p97: the 1-3% late tail (Steam bursts) is what pulled fast bodies backwards once the floor came down.
+					_targetLag = sorted[Math.Min(sorted.Length - 1, (int)(sorted.Length * 0.99))] + MarginMs;
+				}
+				else
+				{
+					_targetLag = double.NaN;
+				}
+			}
+			target = double.IsNaN(_targetLag) ? _playOffset + DelayMs : Math.Clamp(_targetLag, _playOffset + DelayMs, _playOffset + Math.Max(DelayMs, MaxDelayMs));
+			_targetDelay = target - _playOffset;
 		}
-		if (_lastTargetMs == long.MinValue || now - _lastTargetMs >= 250)
+		if (double.IsNaN(_lag) || Math.Abs(target - _lag) > 250.0 || !Adaptive)
 		{
-			_lastTargetMs = now;
-			if (_lateCount >= 30)
-			{
-				int[] sorted = new int[_lateCount];
-				Array.Copy(_late, sorted, _lateCount);
-				Array.Sort(sorted);
-				// p99, not p97: the 1-3% late tail (Steam bursts) is what pulled fast bodies backwards once the floor came down.
-				int p99 = sorted[Math.Min(sorted.Length - 1, (int)(sorted.Length * 0.99))];
-				_targetDelay = Math.Clamp(p99 + MarginMs, DelayMs, Math.Max(DelayMs, MaxDelayMs));
-			}
-			else
-			{
-				_targetDelay = DelayMs;
-			}
+			_lag = target;
 		}
-		double step = _targetDelay - _curDelay;
-		_curDelay += step > 0.0 ? Math.Min(step, 0.06 * elapsed) : Math.Max(step, -0.03 * elapsed);
+		else if (target > _lag)
+		{
+			_lag += Math.Min(target - _lag, (_underrun ? UnderrunRate : LagRate) * elapsed);
+		}
+		else if (_lag - target > 5.0)
+		{
+			_lag -= Math.Min(_lag - target - 5.0, ShrinkRate * elapsed);
+		}
+		_curDelay = _lag - _playOffset;
 		if (_curDelay > MaxDelaySeenMs)
 		{
 			MaxDelaySeenMs = _curDelay;
@@ -419,14 +531,23 @@ public sealed class TransformSmoother
 	/// the body snapped there (ships rubberbanded, and whoever stood on or piloted them with it). The gap is carried
 	/// as an offset that decays over about 100 ms instead. Gaps over <see cref="TeleportMeters"/> are real teleports and are shown at once.
 	/// </summary>
-	private static byte[] Settle(Track track, long now, byte[] raw, bool extrapolated)
+	private static Vec3D Position(byte[] v) => new(BinaryPrimitives.ReadDoubleLittleEndian(v.AsSpan(0)), BinaryPrimitives.ReadDoubleLittleEndian(v.AsSpan(8)), BinaryPrimitives.ReadDoubleLittleEndian(v.AsSpan(16)));
+
+	private static Vec3D PathVelocity((double T, byte[] V) from, (double T, byte[] V) to) => to.T > from.T ? (Position(to.V) - Position(from.V)) * (1000.0 / (to.T - from.T)) : default;
+
+	// The velocity of the path being shown (between its samples), not of the shown positions: right after a stall the
+	// shown body moves from a held sample to a coasted one in one frame, and that step taken as a speed (391 m/s for a
+	// 300 m/s ship) made the next blend run 30 % fast.
+	private static byte[] Settle(Track track, double now, byte[] raw, bool extrapolated, Vec3D pathVelocity, double baseT = double.NaN)
 	{
 		var position = new Vec3D(BinaryPrimitives.ReadDoubleLittleEndian(raw.AsSpan(0)), BinaryPrimitives.ReadDoubleLittleEndian(raw.AsSpan(8)), BinaryPrimitives.ReadDoubleLittleEndian(raw.AsSpan(16)));
-		double dt = track.HasOut ? Math.Clamp(now - track.LastOutMs, 0L, 100L) / 1000.0 : 0.0;
+		double dt = track.HasOut ? Math.Clamp(now - track.LastOutMs, 0.0, 100.0) / 1000.0 : 0.0;
 		track.Offset *= Math.Exp(-dt * 10.0);
 		if (track.HasOut && dt > 0.0)
 		{
-			if (track.WasExtrapolating && !extrapolated)
+			// A new sample while still coasting moves the extrapolation's start: on a stall the host spreads, that start
+			// lies behind the coasted path, and the body stepped back 9 m in one frame at 300 m/s.
+			if (track.WasExtrapolating && (!extrapolated || baseT != track.BaseT))
 			{
 				Vec3D jump = track.LastShown + track.Velocity * dt - position;
 				track.Offset = jump.Length > TeleportMeters(track.Speed) ? default : jump;
@@ -434,7 +555,7 @@ public sealed class TransformSmoother
 			}
 			else
 			{
-				track.Velocity = (position - track.LastRaw) * (1.0 / dt);
+				track.Velocity = pathVelocity;
 				if (!extrapolated)
 				{
 					track.Speed = track.Velocity.Length;
@@ -453,6 +574,7 @@ public sealed class TransformSmoother
 			if (back < 0.0) track.Offset -= track.Heading * back;
 		}
 		track.WasExtrapolating = extrapolated;
+		track.BaseT = baseT;
 		track.LastRaw = position;
 		track.LastShown = position + track.Offset;
 		track.LastOutMs = now;

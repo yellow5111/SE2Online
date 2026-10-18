@@ -51,7 +51,7 @@ public sealed class PlayersScreen : ScreenView
     private readonly TextBlock _addNote = OnlineUi.Text("", "SubtleNotice", 22);
     private readonly ComboBox _duration = new() { ItemsSource = Durations, SelectedIndex = 0, MinHeight = 48, MinWidth = 260, FontSize = 24 };
     private readonly OnlineToggle _whitelistOnly = new("Only whitelisted players and admins may join");
-    private readonly Button _kick, _ban, _admin, _whitelistButton, _unban, _unlist, _addWhitelist, _invite, _refreshFriends;
+    private readonly Button _kick, _ban, _admin, _whitelistButton, _unban, _unlist, _addWhitelist, _invite, _refreshFriends, _adminPanel;
     private readonly Button[] _tabs;
     private readonly Control[] _pages;
     private readonly ContentControl _page = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
@@ -119,7 +119,8 @@ public sealed class PlayersScreen : ScreenView
         Styles.Add(new Avalonia.Styling.Style(s => s.OfType<Button>().Class("OnlineNavigation").Class("Selected")) { Setters = { new Avalonia.Styling.Setter(Button.BorderThicknessProperty, new Thickness(3)), new Avalonia.Styling.Setter(Button.BorderBrushProperty, new Keen.VRage.UI.AvaloniaInterface.Utilities.VRageDynamicResource("Primary")), new Avalonia.Styling.Setter(Button.FontWeightProperty, Avalonia.Media.FontWeight.Bold) } });
         var body = OnlineUi.Columns(OnlineUi.Panel(roster), OnlineUi.Panel(_page), "*,24,760");
         var connection = OnlineUi.Stack(_status, _message); connection.Spacing = 6;
-        Content = OnlineUi.Shell(this, "PLAYERS", OnlineUi.Row(_tabs), connection, body, OnlineUi.Row(OnlineUi.Button("Server info", ServerInfoUi.OpenInGame, "ServerInfo")));
+        _adminPanel = OnlineUi.Button("Admin panel", () => MpMenu.OpenAdmin("Players screen button"), "OpenAdminPanel");
+        Content = OnlineUi.Shell(this, "PLAYERS", OnlineUi.Row(_tabs), connection, body, OnlineUi.Row(OnlineUi.Button("Server info", ServerInfoUi.OpenInGame, "ServerInfo"), _adminPanel));
         Select(0);
     }
 
@@ -252,6 +253,7 @@ public sealed class PlayersScreen : ScreenView
         _admin.Content = p?.Role == OnlineRole.Admin ? "Remove admin" : "Make admin";
         _whitelistButton.IsEnabled = !busy && target;
         _whitelistButton.Content = p != null && Listed(p.SteamId) ? "Remove from whitelist" : "Add to whitelist";
+        _adminPanel.IsVisible = admin;
         _reason.IsEnabled = _duration.IsEnabled = admin;
         _whitelistOnly.IsEnabled = admin && !busy;
         _unban.IsEnabled = admin && !busy && _bans.SelectedItem is BanRow;

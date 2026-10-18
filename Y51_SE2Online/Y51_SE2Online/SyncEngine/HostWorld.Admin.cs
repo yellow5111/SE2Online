@@ -93,15 +93,18 @@ internal sealed partial class HostWorld
         }
         case AdminAction.SpawnItem:
         {
-            if (body == null) return "You need a character to receive items.";
+            // Target 0 is the admin; a 0.15.3 host ignores Target and gives to the admin.
+            Entity receiver = r.Target == 0 ? body : CharacterOf(ClientOfSteam(r.Target));
+            string name = r.Target == 0 ? null : _host?.AccessPlayers().FirstOrDefault(p => p.SteamId == r.Target)?.Name ?? "that player";
+            if (receiver == null || EngineCodec.IsDead(receiver)) return r.Target == 0 ? "You need a character to receive items." : "That player has no character in the world.";
             if (!Guid.TryParse(r.Name, out var guid) || !Singleton<DefinitionManager>.Instance.TryGetDefinition(guid, out ItemDefinition item)) return "Unknown item.";
             int amount = (int)Math.Clamp(r.Size <= 0 ? 1 : r.Size, 1, 100000);
-            foreach (var inventory in body.Components.OfType<InventoryComponent>())
+            foreach (var inventory in receiver.Components.OfType<InventoryComponent>())
             {
                 var added = inventory.AddItem(new ItemStack(item, amount));
-                if (added > 0) return $"Added {added} x {item.DebugNameShort}.";
+                if (added > 0) return name == null ? $"Added {added} x {item.DebugNameShort}." : $"Gave {added} x {item.DebugNameShort} to {name}.";
             }
-            return "Your inventory has no room for that.";
+            return name == null ? "Your inventory has no room for that." : $"The inventory of {name} has no room for that.";
         }
         case AdminAction.CreateSafeZone:
         {

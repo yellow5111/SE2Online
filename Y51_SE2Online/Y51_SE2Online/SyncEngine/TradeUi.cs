@@ -1,11 +1,6 @@
 using System;
 using System.Globalization;
 using System.Linq;
-using Avalonia;
-using Avalonia.Controls;
-using Avalonia.Controls.Templates;
-using Avalonia.Layout;
-using Avalonia.Threading;
 using Keen.Game2.Client.UI.Library.Dialogs.TwoOptionsDialog;
 using Keen.Game2.Simulation.WorldObjects.Items;
 using Keen.VRage.Library.Definitions;
@@ -45,8 +40,8 @@ internal static class TradeUi
             }
             else if (kind == SyncMsg.TradeState)
             {
-                var state = SocialMessage.Decode<TradeState>(data);
-                if (state.Names?.Length != 2 || state.Offers?.Length != 2 || state.Ready?.Length != 2 || state.You is < 0 or > 1) return;
+                var state = SocialMessage.Decode<TradeState>(data).Bounded();
+                if (state == null) return;
                 lock (Sync) { _state = state; _stateVersion++; }
             }
         }
@@ -120,10 +115,16 @@ internal static class TradeUi
     internal static string ItemName(Guid item)
     {
         if (item == Guid.Empty) return "Credits";
-        if (!Singleton<DefinitionManager>.Instance.TryGetDefinition(item, out ItemDefinition def)) return "Unknown item";
+        if (Definition(item) is not ItemDefinition def) return "Unknown item";
         string text = null;
         try { text = def.DisplayName.EvaluateText(); } catch (Exception) { }
         return string.IsNullOrWhiteSpace(text) || text.Contains('{') ? def.DebugNameShort : text;
+    }
+
+    internal static ItemDefinition Definition(Guid item)
+    {
+        try { return item != Guid.Empty && Singleton<DefinitionManager>.Instance.TryGetDefinition(item, out ItemDefinition def) ? def : null; }
+        catch (Exception) { return null; }
     }
 
     internal static string Amount(long raw) => (raw / 1_000_000.0).ToString("0.##", CultureInfo.InvariantCulture);
@@ -131,107 +132,3 @@ internal static class TradeUi
     internal static long Raw(double amount) => (long)Math.Round(amount * 1_000_000);
 }
 
-/// <summary>Both offers side by side; editing your offer clears both acceptances, so a change is a counter offer.</summary>
-public sealed class TradeScreen : ScreenView
-{
-    private sealed record Row(Guid Item, long Raw, string Name) { public override string ToString() => Name; }
-
-    private readonly ListBox _have = OnlineUi.List("TradeInventory"), _mine = OnlineUi.List("TradeMyOffer"), _theirs = OnlineUi.List("TradeTheirOffer");
-    private readonly TextBox _amount = OnlineUi.Input("Amount", 16);
-    private readonly TextBlock _status = OnlineUi.Text(""), _mineTitle = OnlineUi.Text("YOUR OFFER", "SubTitle", 26), _theirsTitle = OnlineUi.Text("THEIR OFFER", "SubTitle", 26);
-    private readonly Button _offer, _all, _remove, _accept, _withdraw, _cancel;
-    private SocialScreenViewModel _model;
-    private long _shown = -1;
-    private bool _closing;
-
-    public TradeScreen()
-    {
-        var template = new FuncDataTemplate<Row>((r, _) => r == null ? null : OnlineUi.ListCells("*,140", r.Name, TradeUi.Amount(r.Raw)));
-        _have.ItemTemplate = _mine.ItemTemplate = _theirs.ItemTemplate = template;
-        _amount.Text = "1";
-        _offer = OnlineUi.Button("Offer amount", () => Offer(false), "TradeOffer");
-        _all = OnlineUi.Button("Offer all", () => Offer(true), "TradeOfferAll");
-        _remove = OnlineUi.Button("Remove from offer", () => { if (_mine.SelectedItem is Row r) Set(r.Item, 0); }, "TradeRemove");
-        _accept = OnlineUi.Button("Accept trade", Accept, "TradeAccept", true);
-        _withdraw = OnlineUi.Button("Withdraw acceptance", () => Verb(TradeVerb.Unready), "TradeWithdraw");
-        _cancel = OnlineUi.Button("Cancel trade", () => { _closing = true; Verb(TradeVerb.Cancel); _model?.Close(); }, "TradeCancel");
-        var columns = new Grid { ColumnDefinitions = new ColumnDefinitions("*,24,*,24,*") };
-        void Column(int at, Control title, Control list, params Control[] actions)
-        {
-            var grid = new Grid { RowDefinitions = new RowDefinitions("Auto,*,Auto") };
-            grid.Children.Add(title);
-            Grid.SetRow(list, 1); grid.Children.Add(list);
-            var row = OnlineUi.Row(actions); Grid.SetRow(row, 2); grid.Children.Add(row);
-            var panel = OnlineUi.Panel(grid, new Thickness(18));
-            Grid.SetColumn(panel, at); columns.Children.Add(panel);
-        }
-        Column(0, OnlineUi.Text("YOUR INVENTORY", "SubTitle", 26), _have, _amount, _offer, _all);
-        Column(2, _mineTitle, _mine, _remove);
-        Column(4, _theirsTitle, _theirs);
-        Content = OnlineUi.Shell(this, "TRADE", OnlineUi.Row(), _status, columns, OnlineUi.Row(_accept, _withdraw, _cancel));
-        OnDisposing += _ => { if (!_closing && TradeUi.State is { Closed: false } s) TradeUi.Act(new TradeAction(s.Trade, TradeVerb.Cancel)); };
-        Refresh();
-    }
-
-    private void Offer(bool all)
-    {
-        if (_have.SelectedItem is not Row row) { _status.Text = "Select something in your inventory first."; return; }
-        long raw = row.Raw;
-        if (!all)
-        {
-            if (!double.TryParse(_amount.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double amount) || amount <= 0) { _status.Text = "Enter an amount above zero."; return; }
-            raw = Math.Min(row.Raw, TradeUi.Raw(amount));
-        }
-        Set(row.Item, raw);
-    }
-
-    private static void Set(Guid item, long raw)
-    {
-        if (TradeUi.State is { Closed: false } s) TradeUi.Act(new TradeAction(s.Trade, TradeVerb.Set, item, raw));
-    }
-
-    private static void Verb(TradeVerb verb)
-    {
-        if (TradeUi.State is { Closed: false } s) TradeUi.Act(new TradeAction(s.Trade, verb));
-    }
-
-    private static void Accept()
-    {
-        if (TradeUi.State is { Closed: false } s) TradeUi.Act(new TradeAction(s.Trade, TradeVerb.Ready, Raw: s.Version));
-    }
-
-    private void Refresh()
-    {
-        long version = TradeUi.StateVersion;
-        if (version == _shown) return;
-        _shown = version;
-        var state = TradeUi.State;
-        if (state == null || state.Closed) return;
-        int you = state.You, them = 1 - you;
-        static Row[] Rows(TradeLine[] lines) => (lines ?? Array.Empty<TradeLine>()).Where(l => l != null && l.Raw > 0).Take(200)
-            .Select(l => new Row(l.Item, l.Raw, TradeUi.ItemName(l.Item))).OrderBy(r => r.Name, StringComparer.OrdinalIgnoreCase).ToArray();
-        Guid? keep = (_have.SelectedItem as Row)?.Item;
-        var have = Rows(state.Have);
-        _have.ItemsSource = have;
-        _have.SelectedItem = have.FirstOrDefault(r => r.Item == keep);
-        _mine.ItemsSource = Rows(state.Offers[you]);
-        _theirs.ItemsSource = Rows(state.Offers[them]);
-        string other = SocialState.Clean(state.Names[them] ?? "", 80);
-        _mineTitle.Text = "YOUR OFFER" + (state.Ready[you] ? "  - ACCEPTED" : "");
-        _theirsTitle.Text = other.ToUpperInvariant() + "'S OFFER" + (state.Ready[them] ? "  - ACCEPTED" : "");
-        string waiting = state.Ready[you] ? "Waiting for " + other + " to accept." : state.Ready[them] ? other + " accepted. Accept to complete the trade." : "Change your offer or accept the current one. Any change asks both of you to accept again.";
-        _status.Text = string.IsNullOrEmpty(state.Message) ? waiting : SocialState.Clean(state.Message, 200) + "  " + waiting;
-        _accept.IsEnabled = !state.Ready[you];
-        _withdraw.IsEnabled = state.Ready[you];
-    }
-
-    private void QueueRefresh() => Dispatcher.UIThread.Post(Refresh);
-
-    protected override void OnDataContextChanged(EventArgs e)
-    {
-        base.OnDataContextChanged(e);
-        if (_model != null) _model.Refresh -= QueueRefresh;
-        _model = DataContext as SocialScreenViewModel;
-        if (_model != null) _model.Refresh += QueueRefresh;
-    }
-}

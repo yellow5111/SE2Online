@@ -225,7 +225,7 @@ internal sealed partial class HostWorld
                 if (encounters == null || !Singleton<DefinitionManager>.Instance.TryGetDefinition(ship.Prefab, out PrefabDefinition prefab)) { ShipCheck.Probed[ship.Key] = new(); continue; }
                 var roots = await SpawnEncounter(session, encounters, prefab, new WorldTransform(origin + new Vector3D(i * 3000, 0, 0), Quaternion.Identity));
                 var grids = ReleaseEncounter(session, roots).Where(e => e.TryGet<CubeGridComponent>() != null).ToList();
-                Settle(grids);
+                Settle(grids, force: true);
                 ShipCheck.Probed[ship.Key] = grids;
             }
             catch (Exception ex)
@@ -248,18 +248,21 @@ internal sealed partial class HostWorld
     /// <summary>
     /// Undoes the cargo route (dampeners off, thrusters held at a target speed) so the ship holds still for its new owner.
     /// The route starts asynchronously after the spawn, so this runs for a few seconds after the takeover.
+    /// Dampeners are switched on at the takeover (<paramref name="force"/>) and after that only when the route ran again:
+    /// it turns them off in the same step as it sets the target speed. Forcing them every tick undid the pilot's Z.
     /// </summary>
-    internal static void Settle(IEnumerable<Entity> grids)
+    internal static void Settle(IEnumerable<Entity> grids, bool force = false)
     {
         foreach (var grid in grids)
         {
             if (EngineCodec.IsDead(grid) || grid.TryGet<CubeGridComponent>() is not { } cube) continue;
+            bool routed = false;
             cube.VisitAllBlocksWithComponent((Keen.Game2.Simulation.WorldObjects.CubeBlocks.Movement.ThrusterComponent t) =>
             {
                 object data = t.Data;
-                try { RemoveCargoSpeed.Value?.Invoke(data, null); } catch (Exception) { }
+                try { routed |= RemoveCargoSpeed.Value?.Invoke(data, null) is true; } catch (Exception) { }
             });
-            if (Keen.Game2.Simulation.WorldObjects.Movement.EntityMovementExtensions.GetDampenerState(grid.Data) == Keen.Game2.Simulation.WorldObjects.Movement.DampenerState.Off)
+            if ((force || routed) && Keen.Game2.Simulation.WorldObjects.Movement.EntityMovementExtensions.GetDampenerState(grid.Data) == Keen.Game2.Simulation.WorldObjects.Movement.DampenerState.Off)
                 Keen.Game2.Simulation.WorldObjects.Movement.EntityMovementExtensions.ToggleDampeners(grid.Data);
         }
     }
@@ -311,7 +314,7 @@ internal sealed partial class HostWorld
             return;
         }
         var grids = ship.Where(e => e.TryGet<CubeGridComponent>() != null).ToList();
-        Settle(grids);
+        Settle(grids, force: true);
         _shipChosen.TryRemove(j.ClientId, out var chosen);
         try
         {

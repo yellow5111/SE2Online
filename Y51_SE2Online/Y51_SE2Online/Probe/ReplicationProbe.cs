@@ -298,7 +298,14 @@ internal static class ReplicationProbe
 				}
 				else
 				{
-					tap.OnSignal(cb, stub, new ReadOnlySpan<byte>(dataPtr + dataOffset, (int)Math.Min(int.MaxValue, st.ActiveBytes - dataOffset)));
+					var payload = new ReadOnlySpan<byte>(dataPtr + dataOffset, (int)Math.Min(int.MaxValue, st.ActiveBytes - dataOffset));
+					tap.OnSignal(cb, stub, payload);
+					int skip = HostWorld.HostGameTurretSkip(stub, payload, cb);
+					if (skip >= 0)
+					{
+						st.DataOffset = dataOffset + skip;
+						return;
+					}
 				}
 			}
 		}

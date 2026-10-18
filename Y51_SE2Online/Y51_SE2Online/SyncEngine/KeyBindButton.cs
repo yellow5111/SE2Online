@@ -63,6 +63,8 @@ internal sealed class KeyBindButton : Button
         if (!_listening) return;
         _active.Clear();
         foreach (var keyboard in devices.GetAllDevices(GenericDeviceClass.Keyboard)) keyboard.FillActive(_active);
+        // Keys an overlay swallows (NVIDIA's Alt+F10) only show up in the low-level hook.
+        for (int vk = 1; vk < 0xA0; vk++) if (KeyHook.IsDown(vk)) _active.Add(new DigitalInput(vk, GenericDeviceClass.Keyboard));
         if (_held == null) { _held = new HashSet<InputId>(_active); return; } // e.g. the Enter that clicked the button
         _held.IntersectWith(_active);
         if (_pressed is KeyBinding key)

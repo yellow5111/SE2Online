@@ -288,6 +288,7 @@ internal static class PassengerSeats
             catch (Exception ex) { _holdFailed = true; GameLog.Instance.Warn("passenger seats: holding seated characters still failed: " + ex); }
             var interactor = session?.GetEntitiesOfType<InteractorEntityComponent>().Select(e => e.Get<InteractorEntityComponent>()).FirstOrDefault(i => i.IsControlledByLocalPlayer);
             var seat = interactor?.Entity.AsInterface<ISeatable>()?.CurrentSeat as SeatComponent;
+            CockpitPassenger.Tick(session, interactor?.Entity, seat);
             bool passenger = seat != null && IsPassengerSeat(seat.Entity) && session != null;
             try { if (!_inputFailed && session != null) HoldInput(session, passenger ? interactor!.Entity : null); }
             catch (Exception ex) { _inputFailed = true; _heldInput = null; GameLog.Instance.Warn("passenger seats: switching movement keys off in a seat failed: " + ex); }

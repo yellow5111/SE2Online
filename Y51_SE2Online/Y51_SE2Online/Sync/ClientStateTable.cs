@@ -102,6 +102,16 @@ public sealed class ClientStateTable
 		}
 	}
 
+	/// <summary>A despawned id the host spawned again (an entity taken out of the scene and put back keeps its id):
+	/// without this its state was dropped as stale for the whole tombstone time and the grid froze for up to two minutes.</summary>
+	public void Revive(uint netId)
+	{
+		lock (_sync)
+		{
+			_tombstones.Remove(netId);
+		}
+	}
+
 	public void Despawn(uint netId, long nowMs)
 	{
 		lock (_sync)

@@ -123,7 +123,7 @@ internal static class AutoUpdateClient
         shared.ShowDialog(new TwoOptionsDialogViewModel(new TwoOptionsDialogDefinition
         {
             Title = OnlineUi.Raw("Update installed"),
-            Content = OnlineUi.Raw($"Y51_SE2Online {installed} is installed (you are running {MpPlugin.Version}). Restart the game now to use it?\n\nLater: it loads the next time you start the game."),
+            Content = OnlineUi.Raw($"Space Engineers 2 Online {installed} is installed (you are running {MpPlugin.Version}). Restart the game now to use it?\n\nLater: it loads the next time you start the game."),
             ConfirmOption = OnlineUi.Raw("Restart now"),
             CancelOption = OnlineUi.Raw("Later")
         }) { ConfirmAction = RestartNow });
@@ -153,7 +153,7 @@ internal static class AutoUpdateClient
         catch (Exception ex)
         {
             GameLog.Instance.Warn("update: automatic restart failed, the player restarts by hand: " + ex.Message);
-            MpMenu.Report($"Y51_SE2Online {_installed} is installed. Restart the game to use it.");
+            MpMenu.Report($"Space Engineers 2 Online {_installed} is installed. Restart the game to use it.");
         }
     }
 

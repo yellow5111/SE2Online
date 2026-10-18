@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Y51_SE2Online.Sync;
 
@@ -83,6 +84,18 @@ public sealed class SocialSnapshot
     public uint[] OpenBlocks { get; set; } = Array.Empty<uint>();
     /// <summary>Hacks this player runs or defends against.</summary>
     public HackView[] Hacks { get; set; } = Array.Empty<HackView>();
+
+    /// <summary>The lists every player's snapshot shares; serialized once per publish, not once per player.</summary>
+    public static readonly string[] Common = { nameof(Players), nameof(Factions), nameof(Pacts), nameof(Proposals), nameof(OpenBlocks) };
+
+    /// <summary>This snapshot without the <see cref="Common"/> lists or the grid page, which players with the same view share.</summary>
+    public SocialSnapshot OwnPart()
+    {
+        var own = (SocialSnapshot)MemberwiseClone();
+        own.Players = Array.Empty<SocialPlayer>(); own.Factions = Array.Empty<OnlineFaction>(); own.Pacts = Array.Empty<FactionPact>();
+        own.Proposals = Array.Empty<FactionProposal>(); own.OpenBlocks = Array.Empty<uint>(); own.Grids = Array.Empty<SocialGrid>();
+        return own;
+    }
 }
 
 public sealed class SocialState
@@ -97,6 +110,8 @@ public sealed class SocialState
     public List<TaggedAntenna> TaggedAntennas { get; set; } = new();
     /// <summary>The world's block lists carry their owner (<see cref="BlockAcl.Owner"/>); older lists were stamped once.</summary>
     public bool AclOwners { get; set; }
+    /// <summary>Players whose suit broadcast was last off; their parked character gets no name tag while they are offline.</summary>
+    public HashSet<long> Silent { get; set; } = new();
     public const int MaxMotd = 300;
 
     public static bool CanAccess(long owner, long actor, GridSharing sharing, IEnumerable<OnlineFaction> factions)
@@ -113,10 +128,20 @@ public sealed class SocialState
     public bool MayTag(long owner, long actor)
         => PlayerIdentities.IsHuman(actor) && PlayerIdentities.IsHuman(owner) && (owner == actor || FactionOf(owner) is { } f && f.Members.Contains(actor) && f.RoleOf(actor) >= FactionRole.Admin);
     public static bool CanManageGrid(long owner, long actor) => PlayerIdentities.IsHuman(actor) && (owner == actor || owner == 0);
-    public void Register(long identity, string name)
+
+    /// <summary>
+    /// Host: the stable key (Steam id) of the player playing as <see cref="PlayerIdentities.HotfixIdentity"/>, the identity
+    /// SE2 gives the host of every world. Saves name that player by their own MP identity instead, the one every server
+    /// derives from the same key, so a world moved to a dedicated server or hosted by someone else keeps them.
+    /// </summary>
+    [JsonIgnore] public string HostKey { get; set; }
+
+    /// <param name="key">The host's own stable key when <paramref name="identity"/> is the host's.</param>
+    public void Register(long identity, string name, string key = null)
     {
         if (!PlayerIdentities.IsHuman(identity)) return;
         name = Clean(name, 64);
+        if (identity == PlayerIdentities.HotfixIdentity && key != null && key != HostKey) TakeHostSlot(key, name);
         int index = Players.FindIndex(p => p.Identity == identity);
         if (index >= 0 && Players[index].Name == name) return;
         if (index >= 0) Players[index] = new(identity, name);
@@ -254,6 +279,91 @@ public sealed class SocialState
         foreach (var faction in Factions) { faction.Requests.Remove(player); faction.Invitations.Remove(player); }
     }
 
+    private void TakeHostSlot(string key, string name)
+    {
+        const long host = PlayerIdentities.HotfixIdentity;
+        if (HostKey != null) Merge(host, PlayerIdentities.Derive(HostKey));
+        // Saves from before 0.15.4 kept the host's identity: it stays with this host unless another saved player has its name.
+        else if (Players.Find(p => p.Identity == host) is { } saved && saved.Name != name && Namesake(saved) is long other) Merge(host, other);
+        HostKey = key;
+        Merge(PlayerIdentities.Derive(key), host);
+    }
+
+    /// <summary>
+    /// Dedicated, at load: nobody plays as the host's identity there. Saves from before 0.15.4 kept it for whoever hosted;
+    /// it goes to the one other saved player of the same name, or leaves its faction unless it is the faction's only member.
+    /// </summary>
+    public void SettleHostSlot()
+    {
+        const long host = PlayerIdentities.HotfixIdentity;
+        var saved = Players.Find(p => p.Identity == host);
+        if (saved == null) return;
+        if (Namesake(saved) is long other) Merge(host, other);
+        else if (FactionOf(host) is not { Members.Count: 1 }) Forget(host);
+    }
+
+    private long? Namesake(SocialPlayer player)
+    {
+        var same = Players.Where(p => p.Identity != player.Identity && p.Name == player.Name).Take(2).ToList();
+        return same.Count == 1 ? same[0].Identity : null;
+    }
+
+    /// <summary>
+    /// <paramref name="from"/> is the same player as <paramref name="to"/>: one faction place is kept, the higher-ranked
+    /// one (a leader stays leader), and invitations, requests and the name move over.
+    /// </summary>
+    public void Merge(long from, long to)
+    {
+        if (from == to || !PlayerIdentities.IsHuman(to) || !Players.Any(p => p.Identity == from)) return;
+        var a = FactionOf(from); var b = FactionOf(to);
+        if (a != null && (b == null || a == b || a.RoleOf(from) > b.RoleOf(to)))
+        {
+            var rank = b == a && a.RoleOf(to) > a.RoleOf(from) ? a.RoleOf(to) : a.RoleOf(from);
+            if (b != null && b != a) Leave(b, to);
+            a.ForgetRole(from); a.ForgetRole(to);
+            if (a.Members.Contains(to)) a.Members.Remove(from); else a.Members[a.Members.IndexOf(from)] = to;
+            if (rank == FactionRole.Leader) a.Leader = to;
+            else if (rank == FactionRole.Admin) a.Admins.Add(to);
+            else if (rank == FactionRole.Moderator) a.Moderators.Add(to);
+        }
+        else if (a != null) Leave(a, from);
+        foreach (var faction in Factions)
+            foreach (var list in new[] { faction.Requests, faction.Invitations })
+                if (list.Remove(from) && !list.Contains(to)) list.Add(to);
+        if (FactionOf(to) != null) ClearPending(to);
+        string name = Players.Find(p => p.Identity == from).Name;
+        Players.RemoveAll(p => p.Identity == from);
+        if (!Players.Any(p => p.Identity == to)) Players.Add(new(to, name));
+        Revision++;
+    }
+
+    private void Forget(long player)
+    {
+        if (FactionOf(player) is { } faction) Leave(faction, player);
+        ClearPending(player);
+        Players.RemoveAll(p => p.Identity == player);
+        Revision++;
+    }
+
+    /// <summary>Takes <paramref name="player"/> out of <paramref name="faction"/>; a leader hands over to the most senior member left.</summary>
+    private void Leave(OnlineFaction faction, long player)
+    {
+        faction.Members.Remove(player); faction.ForgetRole(player);
+        if (faction.Leader != player) return;
+        if (faction.Members.Count == 0) { Factions.Remove(faction); FactionDiplomacy.Forget(this, faction.Id); return; }
+        faction.Leader = faction.Admins.FirstOrDefault() is long admin and not 0 ? admin : faction.Moderators.FirstOrDefault() is long moderator and not 0 ? moderator : faction.Members[0];
+        faction.ForgetRole(faction.Leader);
+    }
+
+    /// <summary>The save's copy, with the host named by their own MP identity (see <see cref="HostKey"/>).</summary>
+    public byte[] SerializeForSave()
+    {
+        if (HostKey == null) return Serialize();
+        var copy = Deserialize(Serialize());
+        copy.Merge(PlayerIdentities.HotfixIdentity, PlayerIdentities.Derive(HostKey));
+        return copy.Serialize();
+    }
+
     public static string Clean(string value, int limit) => new string((value ?? "").Where(c => !char.IsControl(c)).Take(limit).ToArray()).Trim();
     public byte[] Serialize() => JsonSerializer.SerializeToUtf8Bytes(this);
     public static SocialState Deserialize(ReadOnlySpan<byte> data)
@@ -275,7 +385,7 @@ public sealed class SocialState
             faction.Admins ??= new(); faction.Moderators ??= new(); faction.Motd ??= "";
             if (faction.Motd.Length > MaxMotd || faction.Admins.Concat(faction.Moderators).Any(p => p == faction.Leader || !faction.Members.Contains(p)) || faction.Admins.Intersect(faction.Moderators).Any()) throw new InvalidOperationException("Invalid faction roles.");
         }
-        Pacts ??= new(); Proposals ??= new();
+        Pacts ??= new(); Proposals ??= new(); Silent ??= new();
         TaggedAntennas = (TaggedAntennas ?? new()).Where(a => a != null).Take(65536).ToList();
         var pairs = new HashSet<(string, string)>();
         if (Pacts.Count > 65536 || Proposals.Count > 4096) throw new InvalidOperationException("Invalid faction diplomacy.");

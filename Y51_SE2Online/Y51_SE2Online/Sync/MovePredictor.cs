@@ -22,6 +22,17 @@ public sealed class MovePredictor
 
 	private double _anchor = double.NaN;
 
+	// The newest sample's tick on a straight line of ticks (see OnHost): _lineTick is that tick's host time.
+	private double _lineTick = double.NaN, _tickMs = 1000.0 / 60.0;
+
+	private (double X, double Y, double Z) _linePos;
+
+	// The velocity the samples' positions moved at. The host's reported velocity dipped 2-3 m/s for a few ticks at the
+	// jetpack's speed limit while the body kept moving 1/3 m a tick, and the lead shrank by that x the window (90 mm).
+	private Vector3 _posVel;
+
+	private bool _posVelOk;
+
 	// The offset estimate steps (+2 ms a second, down at once on a quick packet); anchoring on it directly moved the
 	// lead by speed x step (0.1-0.6 m at jetpack/ship speeds, a snap back or forward). Slewed like playout instead.
 	private double _play = double.NaN;
@@ -77,12 +88,20 @@ public sealed class MovePredictor
 
 	public Vector3 Velocity { get; private set; }
 
+	/// <summary>The newest sample's local time on the tick line (see OnHost), or null before one.</summary>
+	public double? SampleLocalMs => double.IsNaN(_anchor) ? null : _anchor;
+
+	/// <summary>The velocity the newest samples moved at (see _posVel), or null when too slow to tell.</summary>
+	public Vector3? SampleVelocity => _posVelOk ? _posVel : null;
+
 	public bool Active => !double.IsNaN(_anchor) && _count > 0;
 
 	public void Reset()
 	{
 		_count = 0;
 		_anchor = double.NaN;
+		_lineTick = double.NaN;
+		_posVelOk = false;
 		_ground = false;
 		_free = false;
 		_jet = false;
@@ -138,7 +157,7 @@ public sealed class MovePredictor
 		}
 		Step(now, Vector3.Zero, hostVel, inputChanged: false);
 		_free = true;
-		_freeVel = hostVel;
+		_freeVel = _posVelOk ? _posVel : hostVel;
 	}
 
 	// Jetpack: the inputs the host has not applied yet decide where the body goes next, not the host's last velocity:
@@ -279,7 +298,9 @@ public sealed class MovePredictor
 
 	// Anchors on the host's own stamp (min-filtered clock offset, as TransformSmoother does) so arrival jitter
 	// does not move the window; _late is the mean jitter, which LookPredictor.LagMs contains and Lead removes.
-	public void OnHost(long now, uint hostMs)
+	/// <param name="hostTickMs">The stamp's de-quantized tick time (whole-ms stamps moved the lead window by up to 0.5 ms).</param>
+	/// <param name="pos">The sample's position and <paramref name="vel"/> the body's velocity: how many ticks it moved.</param>
+	public void OnHost(long now, uint hostMs, double hostTickMs = double.NaN, (double X, double Y, double Z) pos = default, Vector3 vel = default)
 	{
 		if (hostMs == 0)
 		{
@@ -294,7 +315,45 @@ public sealed class MovePredictor
 		double dt = _playSetMs == long.MinValue ? 0 : Math.Clamp(now - _playSetMs, 0L, 100L);
 		_playSetMs = now;
 		_play = double.IsNaN(_play) || Math.Abs(_offset - _play) > 250.0 ? _offset : _play + Math.Clamp(_offset - _play, -0.02 * dt, 0.02 * dt);
-		_anchor = hostT + _play;
+		// The window start is the sample's place in time, and the body moves one fixed tick per host tick, but the stamps
+		// wander 1-3 ms a tick around the host's frame pacing (15-20 ms after a server hitch), and about one sample in
+		// ten carries a position a tick older or newer than its stamp. Following each stamp moved the lead by speed x
+		// that (18 mm a frame at 20 m/s). The start steps by the ticks the body moved instead (by the stamps when it
+		// is too slow to tell) and drifts onto the stamps.
+		double tick = double.IsNaN(hostTickMs) ? hostT : hostTickMs;
+		double raw = tick + _play;
+		double step = tick - _lineTick;
+		if (double.IsNaN(_anchor) || double.IsNaN(_lineTick) || step < 0.0 || Math.Abs(raw - (_anchor + step)) > 50.0)
+		{
+			_anchor = raw;
+			_lineTick = tick;
+			_linePos = pos;
+			_posVelOk = false;
+			return;
+		}
+		float speed = vel.Length();
+		double n = speed > 2f
+			? Math.Clamp(Math.Round(((pos.X - _linePos.X) * vel.X + (pos.Y - _linePos.Y) * vel.Y + (pos.Z - _linePos.Z) * vel.Z) / speed / (speed / 60.0)), 0.0, 8.0)
+			: step > 0.0 ? Math.Max(1.0, Math.Round(step / _tickMs)) : 0.0;
+		double ticks = Math.Round(step / _tickMs);
+		if (ticks >= 1.0 && Math.Abs(step - ticks * _tickMs) < 0.35 * _tickMs) _tickMs = Math.Clamp(_tickMs + 0.01 * (step / ticks - _tickMs), 1000.0 / 240.0, 250.0);
+		if (n > 0.0 || step > 0.0)
+		{
+			double predicted = _anchor + n * _tickMs;
+			_anchor = predicted + 0.02 * (raw - predicted);
+		}
+		if (speed > 2f && n >= 1.0)
+		{
+			float perSecond = (float)(60.0 / n);
+			_posVel = new Vector3((float)(pos.X - _linePos.X) * perSecond, (float)(pos.Y - _linePos.Y) * perSecond, (float)(pos.Z - _linePos.Z) * perSecond);
+			_posVelOk = true;
+		}
+		else if (speed <= 2f)
+		{
+			_posVelOk = false;
+		}
+		_lineTick = tick;
+		_linePos = pos;
 	}
 
 	// How much of the modelled velocity the host achieved (walls, slopes). Only steady stretches count, so the
@@ -316,7 +375,7 @@ public sealed class MovePredictor
 		Gain += 0.2f * (ratio - Gain);
 	}
 
-	public Vector3 Lead(long now, double lagMs)
+	public Vector3 Lead(double now, double lagMs)
 	{
 		_lastLagMs = lagMs;
 		if (!Active)

@@ -21,6 +21,8 @@ public enum SyncMsg : byte
 	EntityBundle = 49,
 	Despawn = 50,
 	DataRemove = 51,
+	// Tag Data additions (DampeningData...), lifecycle-ordered with DataRemove.
+	DataTag = 60,
 	BlobData = 52,
 	ClientCommands = 54,
 	SignalBatch = 55,
@@ -38,6 +40,7 @@ public enum SyncMsg : byte
 	SpawnMenu = 71,
 	InputAck = 72,
 	GpsShare = 73,
+	BuildGhost = 75,
 	VoiceUp = 76,
 	VoiceDown = 77,
 	Motd = 78,
@@ -48,5 +51,10 @@ public enum SyncMsg : byte
 	TradeState = 83,
 	Punch = 86,
 	FightLock = 87,
-	WaterGrids = 88
+	WaterGrids = 88,
+	// Counted down from SyncProtocol.IsSyncMessage's upper bound.
+	DesyncReport = 94,
+	DesyncCheck = 95,
+	// Roster patches (RosterDocs.cs); a free slot, clear of the values other changes count up and down from.
+	RosterSync = 47
 }

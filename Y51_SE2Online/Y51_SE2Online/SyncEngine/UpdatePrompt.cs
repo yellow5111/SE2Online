@@ -65,7 +65,7 @@ internal static class UpdatePrompt
             shared.ShowDialog(new TwoOptionsDialogViewModel(new TwoOptionsDialogDefinition
             {
                 Title = OnlineUi.Raw("Update available"),
-                Content = OnlineUi.Raw($"Y51_SE2Online {available} is available. You have {MpPlugin.Version}.\n\nServers only admit players on their exact version. " + PulsarUpdateHint),
+                Content = OnlineUi.Raw($"Space Engineers 2 Online {available} is available. You have {MpPlugin.Version}.\n\nServers only admit players on their exact version. " + PulsarUpdateHint),
                 ConfirmOption = OnlineUi.Raw("OK"),
                 CancelOption = OnlineUi.Raw("Skip this version")
             }) { CancelAction = () => MpMenu.RememberSkippedUpdate(available) });
@@ -74,7 +74,7 @@ internal static class UpdatePrompt
         shared.ShowDialog(new ThreeOptionsDialogViewModel(new ThreeOptionsDialogDefinition
         {
             Title = OnlineUi.Raw("Update available"),
-            Content = OnlineUi.Raw($"Y51_SE2Online {available} is available. You have {MpPlugin.Version}.\n\nServers only admit players on their exact version. Update now?"),
+            Content = OnlineUi.Raw($"Space Engineers 2 Online {available} is available. You have {MpPlugin.Version}.\n\nServers only admit players on their exact version. Update now?"),
             ConfirmOption = OnlineUi.Raw("Update"),
             DefaultOption = OnlineUi.Raw("Skip this version"),
             CancelOption = OnlineUi.Raw("Later")

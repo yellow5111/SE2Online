@@ -380,7 +380,7 @@ internal sealed partial class HostWorld
         {
         case "planetdyn":
             foreach (var g in grids) g.TryGet<GridPhysicsComponent>()?.SetGridMotion(false);
-            Settle(grids);
+            Settle(grids, force: true);
             return grids.Count + " grids made dynamic";
         case "planetgrids":
             return string.Join("\n", grids.Select(g =>

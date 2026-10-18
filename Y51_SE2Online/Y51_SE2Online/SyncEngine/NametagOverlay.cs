@@ -12,6 +12,7 @@ using Keen.VRage.DCS.Components;
 using Keen.VRage.Library.Collections;
 using Keen.VRage.Library.Mathematics;
 using Y51_SE2Online.Core;
+using Y51_SE2Online.Sync;
 
 namespace Y51_SE2Online.SyncEngine;
 
@@ -158,7 +159,7 @@ internal sealed class NametagOverlay
 
 	public void Update(Session session, Entity sessionEntity, IReadOnlyList<(ushort ClientId, string Name, Entity? Target)> players)
 	{
-		Last = (session, players);
+		Last = (session, players.Any(p => PlayerTag.IsOffline(p.ClientId)) ? players.Where(p => !PlayerTag.IsOffline(p.ClientId)).ToList() : players);
 		if (_failed || !Enabled)
 		{
 			return;
@@ -209,7 +210,7 @@ internal sealed class NametagOverlay
 				if (!_tags.TryGetValue(clientId, out Tag tag))
 				{
 					var style = (GPSMarkersConfiguration)_styleConfig;
-					var marker = new GPSMarker(_type, name, "Y51_SE2Online player", target.Data.GetWorldTransform().Position, PlayerIcon.Get(style.DefaultIcon), new ColorSRGB(140, 210, 255), alwaysShow: true, hidden: false, removeWithEntity: false, MarkerIdentifier, showOnMap: false);
+					var marker = new GPSMarker(_type, name, "Space Engineers 2 Online player", target.Data.GetWorldTransform().Position, PlayerIcon.Get(style.DefaultIcon), new ColorSRGB(140, 210, 255), alwaysShow: true, hidden: false, removeWithEntity: false, MarkerIdentifier, showOnMap: false);
 					_tags[clientId] = tag = new Tag
 					{
 						Marker = marker,
@@ -223,7 +224,8 @@ internal sealed class NametagOverlay
 					tag.Marker.Name = name;
 				}
 				tag.Target = target;
-				tag.Marker.Color = MarkerColors.For(TeamPermissions.OwnerOf(target)) ?? new ColorSRGB(140, 210, 255);
+				var color = MarkerColors.For(TeamPermissions.OwnerOf(target)) ?? new ColorSRGB(140, 210, 255);
+				tag.Marker.Color = PlayerTag.IsOffline(clientId) ? new ColorSRGB((byte)(color.R * 3 / 5), (byte)(color.G * 3 / 5), (byte)(color.B * 3 / 5), color.A) : color;
 			}
 		}
 		foreach (ushort gone in _tags.Keys.Where(k => !seen.Contains(k)).ToList())

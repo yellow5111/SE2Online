@@ -58,6 +58,9 @@ public sealed class PeerStats
 
 	public long SendBusy;
 
+	/// <summary>Reliable bytes the link (Steam or TCP) still holds for this peer, beyond the transport's bulk queue.</summary>
+	public int LinkPendingBytes;
+
 	public PeerStats Clone()
 	{
 		PeerStats peerStats = (PeerStats)MemberwiseClone();

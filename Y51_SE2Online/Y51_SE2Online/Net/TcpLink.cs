@@ -138,7 +138,7 @@ public sealed class TcpLink : IPacketLink, IDisposable
 		{
 		}
 		socket.Bind(endpoint);
-		socket.Listen(8);
+		socket.Listen(128);
 		socket.Blocking = false;
 		_listener = socket;
 		_log.Info($"tcp: listening on {socket.LocalEndPoint}");

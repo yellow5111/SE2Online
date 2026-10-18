@@ -78,7 +78,7 @@ internal static class PermissionFeedback
         Notify("Permission Denied", "You don't have access to this block!");
     }
 
-    private static void Notify(string title, string text)
+    internal static void Notify(string title, string text)
     {
         if (_toast != null) return;
         var ui = MpPlugin.App?.ClientSession?.SessionComponents.TryGet<SessionInGameUISessionComponent>();

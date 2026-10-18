@@ -27,6 +27,8 @@ namespace Y51_SE2Online.SyncEngine;
 internal sealed partial class HostWorld
 {
     private const double TradeRangeMeters = 30;
+    /// <summary>Inventory changes alone resend a trade at most this often; the partner's view follows pickups and use.</summary>
+    private const long TradeRefreshMs = 1000;
     private readonly ConcurrentQueue<(ushort ClientId, byte[] Data)> _tradeInbox = new();
     private readonly PendingShare _tradeShare = new(256, TradeBook.MaxActionsPerSecond);
     private readonly TradeBook _trades = new();
@@ -67,11 +69,10 @@ internal sealed partial class HostWorld
                 }
             }
             if (changed) SendTradeState(session, host, trade);
-            else for (int side = 0; side < 2; side++)
+            else if (now >= trade.RefreshMs && Enumerable.Range(0, 2).Any(side => !_tradeHaveSent.TryGetValue((trade.Id, side), out string sent) || sent != Signature(Have(session, trade.Players[side]))))
             {
-                // The inventory list follows item pickups and use; only resent when it differs.
-                var have = Have(session, trade.Players[side]);
-                if (!_tradeHaveSent.TryGetValue((trade.Id, side), out string sent) || sent != Signature(have)) SendTradeState(session, host, trade);
+                trade.RefreshMs = now + TradeRefreshMs;
+                SendTradeState(session, host, trade);
             }
         }
     }
@@ -117,6 +118,12 @@ internal sealed partial class HostWorld
                 trade.Changed(now);
                 trade.Message = failed;
             }
+            break;
+        case TradeVerb.Request:
+            ushort partner = trade.Players[1 - trade.Side(player)];
+            error = !TradeView(host, trade) ? TradeName(host, partner) + "'s game is too old for item requests; ask them to offer it."
+                : _trades.Request(player, action.Trade, action.Item, action.Raw, Owned(session, partner, action.Item), now, out _);
+            if (error == null) trade.Message = "";
             break;
         case TradeVerb.Cancel:
             EndTrade(host, trade, TradeName(host, player) + " cancelled the trade.");
@@ -212,13 +219,19 @@ internal sealed partial class HostWorld
     private void SendTradeState(Session session, HostSession host, TradeBook.Session trade)
     {
         var names = trade.Players.Select(p => TradeName(host, p)).ToArray();
+        var haves = trade.Players.Select(p => Have(session, p)).ToArray();
+        // Each player's inventory goes to their partner only inside a trade both opened, and only when both games show it.
+        bool view = TradeView(host, trade);
+        var asked = view ? new[] { trade.AskedLines(0), trade.AskedLines(1) } : null;
         for (int side = 0; side < 2; side++)
         {
-            var have = Have(session, trade.Players[side]);
-            _tradeHaveSent[(trade.Id, side)] = Signature(have);
-            host.SendTrade(trade.Players[side], SyncMsg.TradeState, new TradeState(trade.Id, trade.Version, side, names, new[] { trade.Lines(0), trade.Lines(1) }, trade.Ready.ToArray(), have, trade.Message, Closed: false, Done: false));
+            _tradeHaveSent[(trade.Id, side)] = Signature(haves[side]);
+            var theirs = view ? haves[1 - side].Where(l => l.Item != Guid.Empty).ToArray() : null;
+            host.SendTrade(trade.Players[side], SyncMsg.TradeState, new TradeState(trade.Id, trade.Version, side, names, new[] { trade.Lines(0), trade.Lines(1) }, trade.Ready.ToArray(), haves[side], trade.Message, Closed: false, Done: false, theirs, asked));
         }
     }
+
+    private static bool TradeView(HostSession host, TradeBook.Session trade) => trade.Open && trade.Players.All(host.TakesTradeView);
 
     private List<InventoryComponent> Inventories(ushort player)
     {
@@ -249,7 +262,7 @@ internal sealed partial class HostWorld
                 if (stack.Definition != null) totals[stack.Definition.Guid] = (totals.TryGetValue(stack.Definition.Guid, out long t) ? t : 0) + stack.Amount.RawValue;
         long credits = Owned(session, player, Guid.Empty);
         if (credits > 0) totals[Guid.Empty] = credits;
-        return totals.Select(kv => new TradeLine(kv.Key, kv.Value)).OrderBy(l => l.Item).ToArray();
+        return totals.Select(kv => new TradeLine(kv.Key, kv.Value)).OrderBy(l => l.Item).Take(TradeState.MaxHave).ToArray();
     }
 
     private static string Signature(TradeLine[] lines) => string.Join(";", lines.Select(l => l.Item + "=" + l.Raw));

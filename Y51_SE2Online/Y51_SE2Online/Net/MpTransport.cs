@@ -150,6 +150,11 @@ public sealed class MpTransport : ITransport, IDisposable
 
 	public Func<PeerId, bool>? BulkGate { get; set; }
 
+	/// <summary>Messages queued for sending and delivered to handlers, by message type (uncompressed sizes).</summary>
+	public MessageTally Sent { get; } = new();
+
+	public MessageTally Received { get; } = new();
+
 	public MpTransport(IPacketLink link, TransportOptions options, IMpLog log, Func<long>? clock = null)
 	{
 		_link = link;
@@ -178,17 +183,29 @@ public sealed class MpTransport : ITransport, IDisposable
 			_log.Warn($"bulk message (type {(payload.Length > 0 ? payload.Span[0] : 0)}) of {payload.Length} B exceeds the {maxBulk} B the {(_o.Role == 0 ? "client" : "host")} accepts; not sent");
 			return 0;
 		}
-		if (channel == Channel.Bulk && BulkCompression.Pack(payload.Span, _o.Role == 0 ? _o.MaxInflatedFromHostBytes : _o.MaxInflatedFromClientBytes) is { } packed)
+		int length = payload.Length;
+		byte type = length > 0 ? payload.Span[0] : (byte)0;
+		if (channel == Channel.Bulk && BulkCompression.IsEnvelope(payload.Span))
+		{
+			// Packed once by the caller for many peers.
+			type = payload.Span[1 + 4];
+			length = BulkCompression.DeclaredLength(payload.Span);
+		}
+		else if (channel == Channel.Bulk && BulkCompression.Pack(payload.Span, _o.Role == 0 ? _o.MaxInflatedFromHostBytes : _o.MaxInflatedFromClientBytes) is { } packed)
 		{
 			payload = packed;
 		}
 		ulong token = (ulong)Interlocked.Increment(ref _nextToken);
+		if (length > 0) Sent.Add(type, length);
 		_out.Enqueue(new OutRequest(peer, channel, payload, token));
 		Core.LatencyTrace.Mark(Core.LatencyTrace.Queued, payload.Span, (int)channel, peer.Value);
 		return token;
 	}
 
 	public void Disconnect(PeerId peer, int code, string reason) => _out.Enqueue(new OutRequest(peer, code, reason));
+
+	/// <summary>The largest message the other side inflates (<see cref="BulkCompression.Pack"/>'s limit).</summary>
+	public int MaxInflatedOut => _o.Role == 0 ? _o.MaxInflatedFromHostBytes : _o.MaxInflatedFromClientBytes;
 
 	public int MaxDirectPayload(Channel channel)
 	{
@@ -724,7 +741,7 @@ public sealed class MpTransport : ITransport, IDisposable
 		}
 		if (protocol != Frame.ProtocolVersion)
 		{
-			string message = $"version mismatch: peer runs Y51_SE2Online {pluginVersion} (protocol {protocol}), this PC runs {_o.PluginVersion} (protocol {2}); " + "both players need the same plugin build";
+			string message = $"version mismatch: peer runs Space Engineers 2 Online {pluginVersion} (protocol {protocol}), this PC runs {_o.PluginVersion} (protocol {2}); " + "both players need the same plugin build";
 			_log.Error($"peer {p.Id} '{name}': {message}");
 			Close(p, DisconnectCodes.VersionMismatch, message, byPeer: false, "local", notifyPeer: true);
 			return;
@@ -877,6 +894,7 @@ public sealed class MpTransport : ITransport, IDisposable
 		stats.StateAcked = p.StateAcks.Acked;
 		stats.StateLost = p.StateAcks.Failed;
 		stats.StateInFlight = p.StateAcks.InFlight;
+		stats.LinkPendingBytes = _link.GetPendingReliableBytes(p.Conn);
 	}
 
 	public bool TryGetIncomingBulkProgress(PeerId peer, uint transferId, out int received, out int count)
@@ -911,6 +929,7 @@ public sealed class MpTransport : ITransport, IDisposable
 		try
 		{
 			Core.LatencyTrace.Mark(Core.LatencyTrace.Received, data, (int)ch, p.Id.Value);
+			if (data.Length > 0) Received.Add(data[0], data.Length);
 			MessageReceived?.Invoke(p.Id, ch, data);
 		}
 		catch (Exception ex)

@@ -10,4 +10,6 @@ public static class MpClock
 	{
 		return (long)((double)Stopwatch.GetTimestamp() * MsPerTick);
 	}
+
+	public static double NowMsExact() => Stopwatch.GetTimestamp() * MsPerTick;
 }

@@ -289,7 +289,9 @@ internal sealed class HostObservables
 				{
 					var value = EncodeValue(member.Get(e.Replica), member.Type, e.Info.Type.Name + "." + propertyName);
 					bool echo = _origin is { } origin && origin.Oid == e.Oid && origin.Name == propertyName;
-					_relevance.OnChange(ObservableOp.Member(e.Oid, propertyName, value), _origin.GetValueOrDefault().Peer, echo);
+					// The cockpit's transfer toast is set to null and then to the event, and every event must arrive.
+					bool everyChange = member.Type == typeof(Keen.Game2.Simulation.StreamedUI.Terminal.Inventories.ItemTransferEvent?);
+					_relevance.OnChange(ObservableOp.Member(e.Oid, propertyName, value), _origin.GetValueOrDefault().Peer, echo, everyChange);
 					ChangesSent++;
 				}
 			}
@@ -566,6 +568,7 @@ internal sealed class HostObservables
 						else
 						{
 							_origin = (batch.Peer, edit.Oid, edit.Name);
+							HostWorld.NoteEditOrigin(entry.Replica, batch.ClientId);
 							try
 							{
 								member.Set(entry.Replica, value);

@@ -6,9 +6,10 @@ namespace Y51_SE2Online.Sync;
 
 public static class DataRemoveMessage
 {
-	public static byte[] Encode(uint lifeSeq, IReadOnlyList<(uint NetId, ushort Key)> items)
+	/// <summary><paramref name="type"/> <see cref="SyncMsg.DataTag"/> carries tag Data additions in the same layout.</summary>
+	public static byte[] Encode(uint lifeSeq, IReadOnlyList<(uint NetId, ushort Key)> items, SyncMsg type = SyncMsg.DataRemove)
 	{
-		WireWriter wireWriter = new WireWriter(12 + items.Count * 6).U8(51).U32(lifeSeq).I32(items.Count);
+		WireWriter wireWriter = new WireWriter(12 + items.Count * 6).U8((byte)type).U32(lifeSeq).I32(items.Count);
 		foreach (var (v, v2) in items)
 		{
 			wireWriter.U32(v).U16(v2);

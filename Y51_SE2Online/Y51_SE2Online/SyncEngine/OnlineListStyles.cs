@@ -29,10 +29,18 @@ internal static class OnlineListStyles
         ScrollViewer.SetVerticalScrollBarVisibility(list, ScrollBarVisibility.Auto);
     }
 
+    /// <summary>SE2's terminal styles (inventory item tiles, their tooltips and sizes) for everything inside <paramref name="owner"/>.</summary>
+    public static void ApplyTerminal(Control owner)
+    {
+        var context = new ResourceContext(owner);
+        owner.Resources.MergedDictionaries.Add((ResourceDictionary)Load(context, "UI/Library/Styles/SharedResources.axaml"));
+        owner.Styles.Add((IStyle)Load(context, "UI/TerminalScreen/Styles/TerminalStyles.axaml"));
+    }
+
     private static object Load(IServiceProvider context, string path)
         => AvaloniaXamlLoader.Load(context, new Uri("avares://Game2.Client/" + path));
 
-    private sealed class ResourceContext(ListBox owner) : IServiceProvider, IAvaloniaXamlIlParentStackProvider
+    private sealed class ResourceContext(Control owner) : IServiceProvider, IAvaloniaXamlIlParentStackProvider
     {
         private readonly IServiceProvider _parent = XamlIlRuntimeHelpers.CreateRootServiceProviderV3(null);
         public IEnumerable<object> Parents => new object[] { owner };

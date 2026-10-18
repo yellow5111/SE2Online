@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Y51_SE2Online.Net;
 
 namespace Y51_SE2Online.Sync;
@@ -15,7 +16,10 @@ public sealed partial class HostSession
 	private readonly Dictionary<ulong, (int Count, long SinceMs)> _passwordFails = new();
 	private readonly Dictionary<PeerId, string> _adminMessages = new();
 	private long _nextAdminPushMs;
-	private string _adminSignature = "";
+	private readonly DocDiffCache _adminDiffs = new();
+	private AccessPlayer[] _shownPings = Array.Empty<AccessPlayer>();
+	private long _pingsDueMs;
+	private const long PingRefreshMs = 5000;
 
 	public AccessList Access => _o.Access;
 
@@ -36,6 +40,18 @@ public sealed partial class HostSession
 
 	/// <summary>Degrees the sun should move, collected for the world thread.</summary>
 	public double TakeSunNudge() { lock (_sync) { double deg = _sunNudgeDeg; _sunNudgeDeg = 0; return deg; } }
+
+	private double? _sunTargetDeg;
+	private (bool Absolute, double Deg)? _sunGlide;
+
+	/// <summary>Angle the sun should be set to, collected for the world thread.</summary>
+	public double? TakeSunTarget() { lock (_sync) { var deg = _sunTargetDeg; _sunTargetDeg = null; return deg; } }
+
+	/// <summary>A smooth sun move for the world thread: to an angle (Absolute) or by a number of degrees.</summary>
+	public (bool Absolute, double Deg)? TakeSunGlide() { lock (_sync) { var glide = _sunGlide; _sunGlide = null; return glide; } }
+
+	/// <summary>Current sun angle, written by the world thread.</summary>
+	public double SunDegrees { get; set; }
 
 	public int? PcuLimit => _o.Access.PcuLimit is int chosen ? (chosen < 0 ? null : chosen) : _o.PcuLimit;
 
@@ -145,7 +161,6 @@ public sealed partial class HostSession
 		else message = Act(c.Peer.Value, c.Player.Name, OnlineRole.Admin, request, c.Peer, c.Player.ClientId);
 		lock (_sync) _adminMessages[c.Peer] = message;
 		_nextAdminPushMs = 0;
-		_adminSignature = "";
 	}
 
 	/// <summary>Admin action by the hosting player or the dedicated console (actorId 0).</summary>
@@ -155,7 +170,7 @@ public sealed partial class HostSession
 	{
 		long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 		if (!Enum.IsDefined(r.Action)) return "Unknown action.";
-		if (r.Action >= AdminAction.Creative && r.Action is not (AdminAction.Pvp or AdminAction.OfflineRaidProtection or AdminAction.PcuLimit or AdminAction.SunRotation or AdminAction.SunPeriod or AdminAction.SunNudge or AdminAction.Motd))
+		if (r.Action >= AdminAction.Creative && r.Action is not (AdminAction.Pvp or AdminAction.OfflineRaidProtection or AdminAction.PcuLimit or AdminAction.SunRotation or AdminAction.SunPeriod or AdminAction.SunNudge or AdminAction.SunSet or AdminAction.Motd))
 		{
 			_world.OnAdminRequest(actorPeer, actorClientId, r);
 			return "";
@@ -218,8 +233,16 @@ public sealed partial class HostSession
 			break;
 		case AdminAction.SunNudge:
 			if (!(Math.Abs(r.Size) <= 360)) return "Move the sun by at most 360 degrees.";
+			if (r.Value) { lock (_sync) _sunGlide = (false, r.Size); return "Sun moving " + r.Size.ToString("+0.#;-0.#", System.Globalization.CultureInfo.InvariantCulture) + " degrees."; }
 			lock (_sync) _sunNudgeDeg += r.Size;
 			result = "Sun moved " + r.Size.ToString("+0.#;-0.#", System.Globalization.CultureInfo.InvariantCulture) + " degrees.";
+			break;
+		case AdminAction.SunSet:
+			if (!(r.Size >= 0 && r.Size <= 360)) return "Set the sun between 0 and 360 degrees.";
+			if (r.Value) { lock (_sync) _sunGlide = (true, r.Size); return "Sun moving to " + r.Size.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + " degrees."; }
+			lock (_sync) _sunTargetDeg = r.Size;
+			SunDegrees = r.Size;
+			result = "Sun set to " + r.Size.ToString("0", System.Globalization.CultureInfo.InvariantCulture) + " degrees.";
 			break;
 		case AdminAction.Motd:
 			result = _o.Access.SetMotd(r.Name);
@@ -232,7 +255,6 @@ public sealed partial class HostSession
 		default: return "";
 		}
 		_log.Info($"admin: {actorName} {r.Action} {(r.Target != 0 ? name + " (" + r.Target + ")" : "")}: {result}");
-		_adminSignature = "";
 		_nextAdminPushMs = 0;
 		return result;
 	}
@@ -281,22 +303,44 @@ public sealed partial class HostSession
 				}
 		if (now < _nextAdminPushMs) return;
 		_nextAdminPushMs = now + 1000;
-		var players = AccessPlayers();
-		string signature = _o.Access.Revision + "|" + string.Join(",", (_o.SafeZones?.Invoke() ?? Array.Empty<SafeZoneInfo>()).Select(z => z.NetId + ":" + z.Radius)) + "|" + string.Join(";", players.Select(p => p.SteamId + p.Name + p.Role + p.Connected + p.PingMs / 50));
-		bool changed = signature != _adminSignature;
-		_adminSignature = signature;
 		List<RemoteClient> clients;
-		// A joiner that finishes loading after the last roster change still needs its first copy.
-		lock (_sync) clients = _clients.Values.Where(c => c.Status == ClientStatus.Synced && (changed || !c.AdminStateSent)).ToList();
-		foreach (var c in clients)
+		lock (_sync) clients = _clients.Values.Where(c => c.Status == ClientStatus.Synced).ToList();
+		if (clients.Count == 0) return;
+		var players = SteadyPings(AccessPlayers(), now);
+		// One document per role, shared by every client of that role; only an action's reply differs per client.
+		var byRole = new JsonDoc[3];
+		lock (_adminDiffs)
 		{
-			string message;
-			lock (_sync) { _adminMessages.TryGetValue(c.Peer, out message); _adminMessages.Remove(c.Peer); }
-			var state = StateFor(RoleOf(c.Peer.Value), players, message ?? "");
-			byte[] data = SocialMessage.Encode(SyncMsg.AdminState, state);
-			_t.Send(c.Peer, data.Length > 8192 ? Channel.Bulk : Channel.Control, data);
-			c.AdminStateSent = true;
+			_adminDiffs.Clear();
+			foreach (var c in clients)
+			{
+				string message;
+				lock (_sync) _adminMessages.Remove(c.Peer, out message);
+				var role = RoleOf(c.Peer.Value);
+				var doc = byRole[(int)role] ??= JsonDoc.Of(StateFor(role, players, ""));
+				if (!string.IsNullOrEmpty(message)) doc = doc.With(nameof(AdminState.Message), JsonValue.Create(message));
+				SendDoc(c, c.AdminDoc, SyncMsg.AdminState, doc, _adminDiffs);
+			}
+			_adminDiffs.Clear();
 		}
+	}
+
+	// ponytail: every client gets every ping, O(players^2) bytes; refreshed only on a real move, and every 5 s per 64 players
+	// so the total stays linear in players. Send pings only to clients with the player list open if that gets too stale.
+	private AccessPlayer[] SteadyPings(AccessPlayer[] players, long now)
+	{
+		bool refresh = now >= _pingsDueMs;
+		if (refresh) _pingsDueMs = now + PingRefreshMs * Math.Max(1, players.Length / 64);
+		var shown = _shownPings;
+		for (int i = 0; i < players.Length; i++)
+		{
+			var p = players[i];
+			if (i >= shown.Length || shown[i].SteamId != p.SteamId || shown[i].Name != p.Name || shown[i].PingMs < 0 || p.PingMs < 0 || !p.Connected) continue;
+			int was = shown[i].PingMs;
+			if (!refresh || Math.Abs(p.PingMs - was) <= Math.Max(20, was / 5)) players[i] = p with { PingMs = was };
+		}
+		_shownPings = players;
+		return players;
 	}
 
 	/// <summary>The roster with roles; ping is -1 when unknown.</summary>
@@ -331,7 +375,7 @@ public sealed partial class HostSession
 		return new AdminState
 		{
 			Role = role, ServerName = _o.SessionName, Dedicated = !_o.HostCountsAsPlayer, Message = message, MaxPlayers = _o.MaxPlayers,
-			WhitelistOnly = _o.Access.WhitelistOnly, Pvp = Pvp, OfflineRaidProtection = OfflineRaidProtection, PcuLimit = _o.PcuInForce, SunRotation = _o.SunInForce.Rotation, SunPeriodMinutes = _o.SunInForce.PeriodMinutes, Motd = admin ? MotdTemplate : "", VoiceRadius = _o.VoiceRadiusMeters, HasPassword = !string.IsNullOrEmpty(_o.Password), Revision = _o.Access.Revision,
+			WhitelistOnly = _o.Access.WhitelistOnly, Pvp = Pvp, OfflineRaidProtection = OfflineRaidProtection, PcuLimit = _o.PcuInForce, SunRotation = _o.SunInForce.Rotation, SunPeriodMinutes = _o.SunInForce.PeriodMinutes, SunDegrees = SunDegrees, Motd = admin ? MotdTemplate : "", VoiceRadius = _o.VoiceRadiusMeters, HasPassword = !string.IsNullOrEmpty(_o.Password), Revision = _o.Access.Revision,
 			Players = admin ? players : players.Select(p => p with { SteamId = 0 }).ToArray(),
 			Bans = admin ? bans : Array.Empty<BanEntry>(), Whitelist = admin ? whitelist : Array.Empty<AccessEntry>(),
 			SafeZones = admin ? _o.SafeZones?.Invoke() ?? Array.Empty<SafeZoneInfo>() : Array.Empty<SafeZoneInfo>()
@@ -343,7 +387,6 @@ public sealed partial class HostSession
 	{
 		if (peer == null) { LocalAdminMessage = message; return; }
 		lock (_sync) _adminMessages[peer.Value] = message;
-		_adminSignature = "";
 		_nextAdminPushMs = 0;
 	}
 

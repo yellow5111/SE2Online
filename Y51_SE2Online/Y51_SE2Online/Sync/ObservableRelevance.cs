@@ -165,7 +165,8 @@ public sealed class ObservableRelevance<TPeer> where TPeer : notnull
 		}
 	}
 
-	public void OnChange(ObservableOp op, TPeer? origin = default, bool hasOrigin = false)
+	/// <param name="everyChange">An event member (a fresh value per occurrence, e.g. a transfer toast): every change is sent in order, never rate-capped.</param>
+	public void OnChange(ObservableOp op, TPeer? origin = default, bool hasOrigin = false, bool everyChange = false)
 	{
 		if (!_holders.ContainsKey(op.Oid))
 		{
@@ -180,7 +181,7 @@ public sealed class ObservableRelevance<TPeer> where TPeer : notnull
 				continue;
 			}
 			refs ??= op.Refs();
-			if (op.Kind == ObservableOpKind.Member && refs.Count == 0)
+			if (op.Kind == ObservableOpKind.Member && refs.Count == 0 && !everyChange)
 			{
 				(uint, string) key = (op.Oid, op.Text);
 				if (now == 0L)
@@ -200,13 +201,13 @@ public sealed class ObservableRelevance<TPeer> where TPeer : notnull
 			{
 				EnsureSent(peer, state, oid);
 			}
-			Append(state, op);
+			Append(state, op, everyChange);
 		}
 	}
 
-	private void Append(PeerState p, ObservableOp op)
+	private void Append(PeerState p, ObservableOp op, bool everyChange = false)
 	{
-		if (op.Kind == ObservableOpKind.Member && p.Out.Count > 0)
+		if (op.Kind == ObservableOpKind.Member && p.Out.Count > 0 && !everyChange)
 		{
 			ObservableOp last = p.Out[^1];
 			if (last != null && last.Kind == ObservableOpKind.Member && last.Oid == op.Oid && last.Text == op.Text)

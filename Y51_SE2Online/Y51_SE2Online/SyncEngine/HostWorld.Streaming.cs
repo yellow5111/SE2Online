@@ -50,7 +50,7 @@ using Y51_SE2Online.Sync;
 namespace Y51_SE2Online.SyncEngine;
 
 /// <summary>
-/// Per-joiner streaming radius: each joiner only gets the grids, characters and objects within
+/// Per-joiner streaming radius and state send rates (<see cref="StateBandsFor"/>): each joiner only gets the grids, characters and objects within
 /// <see cref="HostSession.StreamingRadiusMeters"/> of its character. Groups of mechanically connected grids move in and
 /// out together; planets, asteroids, safe zones and session-level entities are always sent. Out of range means removed
 /// on that joiner like a destroyed entity, and back in range is a fresh spawn bundle for that joiner only.
@@ -60,28 +60,42 @@ internal sealed partial class HostWorld
 	private sealed class StreamGroup
 	{
 		public readonly List<(Entity Root, uint Id)> Roots = new();
-		public readonly List<Vector3D> Positions = new();
-		public bool Always;
+		/// <summary>Each root's position and how far its blocks reach from it, so a big grid counts from its edge.</summary>
+		public readonly List<(Vector3D At, double Reach)> Positions = new();
+		public bool Always, Grid;
 
-		public double DistanceTo(Vector3D anchor) => Positions.Count == 0 ? 0 : Positions.Min(p => Vector3D.Distance(p, anchor));
+		public double DistanceTo(Vector3D anchor)
+		{
+			if (Positions.Count == 0) return 0;
+			double best = double.MaxValue;
+			foreach (var (at, reach) in Positions) best = Math.Min(best, Math.Max(0, Vector3D.Distance(at, anchor) - reach));
+			return best;
+		}
 	}
 
 	private sealed class StreamState
 	{
 		/// <summary>Root NetIds this joiner does not have. Guarded by <see cref="_streamSync"/>.</summary>
 		public readonly HashSet<uint> Out = new();
-		public bool Dirty;
+		/// <summary>Non-always roots in this joiner's range at the last update: the ones that can leave without a full scan.</summary>
+		public HashSet<uint> In = new();
+		public bool Dirty, AlwaysPending;
+		public int Updates;
 		public long StreamedIn, StreamedOut, EntitiesIn, EntitiesOut;
 	}
 
 	private const int StreamIntervalMs = 500;
 	private const int StreamInGroupsPerUpdate = 12;
 	private const int StreamInEntitiesPerUpdate = 4000;
+	/// <summary>Every this many updates all of a joiner's groups are checked, not just the grid cells around it.</summary>
+	private const int StreamFullScanEvery = 20;
 
 	private readonly ConcurrentDictionary<PeerId, StreamState> _streams = new();
 	private readonly object _streamSync = new();
 	private long _nextStreamMs, _nextStreamLogMs;
 	private volatile bool _streamingActive;
+	private int[] _streamVisit = Array.Empty<int>();
+	private int _streamStamp;
 
 	/// <summary>True while any joiner may have something streamed out; the per-entity root lookups only run then.</summary>
 	internal bool StreamingActive => _streamingActive;
@@ -133,7 +147,12 @@ internal sealed partial class HostWorld
 	{
 		group.Roots.Add((root, id));
 		group.Always |= AlwaysStreamed(root);
-		if (root.Data.TryGet<WorldTransform>(out var transform)) group.Positions.Add(transform.Position);
+		bool grid = root.TryGet<CubeGridComponent>() != null;
+		group.Grid |= grid;
+		if (!root.Data.TryGet<WorldTransform>(out var transform)) return;
+		double reach = 0;
+		if (grid && root.Data.TryGet<BoundingBoxData>(out var box)) reach = Math.Max(box.BoundingBox.Min.Length(), box.BoundingBox.Max.Length());
+		group.Positions.Add((transform.Position, reach));
 	}
 
 	private static Vector3D? AnchorOf(Entity? character)
@@ -141,6 +160,49 @@ internal sealed partial class HostWorld
 		if (character == null || EngineCodec.IsDead(character)) return null;
 		try { return character.Data.GetWorldTransform().Position; }
 		catch (Exception) { return null; }
+	}
+
+	/// <summary>Uniform grid over the groups' positions, cells one query radius wide: a query reads 27 cells.</summary>
+	private sealed class StreamIndex
+	{
+		private readonly double _cell;
+		private readonly Dictionary<(long, long, long), List<int>> _cells = new();
+		public readonly Dictionary<uint, int> GroupOf = new();
+		public readonly List<int> Always = new();
+
+		public StreamIndex(List<StreamGroup> groups, double cell)
+		{
+			_cell = cell;
+			for (int g = 0; g < groups.Count; g++)
+			{
+				foreach (var (_, id) in groups[g].Roots) GroupOf[id] = g;
+				if (groups[g].Always)
+				{
+					Always.Add(g);
+					continue;
+				}
+				foreach (var (at, _) in groups[g].Positions)
+				{
+					var key = KeyOf(at);
+					if (!_cells.TryGetValue(key, out var list)) _cells[key] = list = new List<int>();
+					if (list.Count == 0 || list[^1] != g) list.Add(g);
+				}
+			}
+		}
+
+		private (long, long, long) KeyOf(Vector3D p) => ((long)Math.Floor(p.X / _cell), (long)Math.Floor(p.Y / _cell), (long)Math.Floor(p.Z / _cell));
+
+		public IEnumerable<int> Near(Vector3D anchor)
+		{
+			var (x, y, z) = KeyOf(anchor);
+			for (long dx = -1; dx <= 1; dx++)
+				for (long dy = -1; dy <= 1; dy++)
+					for (long dz = -1; dz <= 1; dz++)
+					{
+						if (!_cells.TryGetValue((x + dx, y + dy, z + dz), out var list)) continue;
+						foreach (int g in list) yield return g;
+					}
+		}
 	}
 
 	private void UpdateStreaming(InProcessReplicationSessionComponent comp)
@@ -153,11 +215,14 @@ internal sealed partial class HostWorld
 		bool anyOut;
 		lock (_streamSync) anyOut = _streams.Values.Any(s => s.Out.Count > 0);
 		_streamingActive = radius > 0 || anyOut;
-		if (!_streamingActive) return;
 		var watch = Stopwatch.StartNew();
 		var groups = CollectStreamGroups(comp.Session, comp.Entity);
-		double collectMs = watch.Elapsed.TotalMilliseconds, outMs = 0, inMs = 0;
+		// Cells a radius plus the biggest likely grid wide, so 27 of them hold everything a joiner can keep.
+		var index = radius > 0 ? new StreamIndex(groups, radius * StreamingRules.OutFactor + 1000) : null;
+		if (_streamVisit.Length < groups.Count) _streamVisit = new int[Math.Max(groups.Count, _streamVisit.Length * 2)];
+		double collectMs = watch.Elapsed.TotalMilliseconds, outMs = 0, inMs = 0, bandsMs = 0;
 		var strategy = ((SceneContext)comp._context).Replication.ReplicationStrategy;
+		int fullScans = 0;
 		foreach (var j in _joiners.Values)
 		{
 			if (host.StatusOf(j.Peer) != HostSession.ClientStatus.Synced) continue;
@@ -167,11 +232,24 @@ internal sealed partial class HostWorld
 			if (anchor == null && radius > 0) continue;
 			var leaving = new List<uint>();
 			var arriving = new List<(double Distance, StreamGroup Group)>();
+			var kept = new List<(double Distance, int Group)>();
+			var nowIn = new HashSet<uint>();
+			bool full = index == null || stream.Updates++ % StreamFullScanEvery == 0;
+			fullScans += full ? 1 : 0;
+			int stamp = ++_streamStamp;
 			lock (_streamSync)
 			{
-				foreach (var group in groups)
+				void Visit(int g)
 				{
-					bool present = group.Roots.Any(r => !stream.Out.Contains(r.Id));
+					if (_streamVisit[g] == stamp) return;
+					_streamVisit[g] = stamp;
+					var group = groups[g];
+					bool present = false, missing = false;
+					foreach (var (_, id) in group.Roots)
+					{
+						if (stream.Out.Contains(id)) missing = true;
+						else present = true;
+					}
 					double distance = group.Always || anchor == null ? 0 : group.DistanceTo(anchor.Value);
 					bool keep = group.Always || StreamingRules.Keep(present, distance, radius);
 					if (present && !keep)
@@ -183,11 +261,36 @@ internal sealed partial class HostWorld
 						stream.StreamedOut++;
 						stream.Dirty = true;
 					}
-					else if (keep && group.Roots.Any(r => stream.Out.Contains(r.Id)))
+					else if (keep && missing)
 					{
 						arriving.Add((distance, group));
 					}
+					if (keep && !group.Always)
+					{
+						foreach (var (_, id) in group.Roots) nowIn.Add(id);
+						if (present) kept.Add((distance, g));
+					}
 				}
+				if (full)
+				{
+					for (int g = 0; g < groups.Count; g++) Visit(g);
+					stream.AlwaysPending = false;
+				}
+				else
+				{
+					foreach (int g in index!.Near(anchor!.Value)) Visit(g);
+					// Whatever was in range last time and is not near any more is leaving.
+					foreach (uint id in stream.In)
+					{
+						if (index.GroupOf.TryGetValue(id, out int g)) Visit(g);
+					}
+					if (stream.AlwaysPending)
+					{
+						stream.AlwaysPending = false;
+						foreach (int g in index.Always) Visit(g);
+					}
+				}
+				stream.In = nowIn;
 			}
 			double t = watch.Elapsed.TotalMilliseconds;
 			if (leaving.Count > 0)
@@ -219,20 +322,50 @@ internal sealed partial class HostWorld
 			}
 			PushStreamedOut(host, j.Peer, stream);
 			inMs += watch.Elapsed.TotalMilliseconds - t;
+			t = watch.Elapsed.TotalMilliseconds;
+			if (anchor != null) host.SetStateBands(j.Peer, StateBandsFor(j, groups, kept));
+			bandsMs += watch.Elapsed.TotalMilliseconds - t;
 		}
 		if (watch.ElapsedMilliseconds > 50)
 		{
-			_log.Warn($"streaming: slow update {watch.ElapsedMilliseconds} ms (collect {groups.Count} groups {collectMs:0} ms, out {outMs:0} ms, in {inMs:0} ms)");
+			_log.Warn($"streaming: slow update {watch.ElapsedMilliseconds} ms (collect {groups.Count} groups {collectMs:0} ms, out {outMs:0} ms, in {inMs:0} ms, bands {bandsMs:0} ms, {fullScans} full scans)");
 		}
-		if (now >= _nextStreamLogMs)
+		if (now >= _nextStreamLogMs && !_streams.IsEmpty)
 		{
 			_nextStreamLogMs = now + 30000;
 			lock (_streamSync)
 			{
-				_log.Info($"streaming: radius {(radius > 0 ? $"{radius:0} m" : "off")}, {groups.Count} root groups; " + string.Join("; ", _streams.Select(kv =>
-					$"{kv.Key}: {kv.Value.Out.Count} roots out, streamed in {kv.Value.StreamedIn} groups / {kv.Value.EntitiesIn} entities, out {kv.Value.StreamedOut} groups / {kv.Value.EntitiesOut} entities")));
+				_log.Info($"streaming: radius {(radius > 0 ? $"{radius:0} m" : "off")}, {groups.Count} root groups, last update {watch.Elapsed.TotalMilliseconds:0.0} ms ({fullScans} full scans); " + string.Join("; ", _streams.Select(kv =>
+					$"{kv.Key}: {kv.Value.Out.Count} roots out / {kv.Value.In.Count} in range, streamed in {kv.Value.StreamedIn} groups / {kv.Value.EntitiesIn} entities, out {kv.Value.StreamedOut} groups / {kv.Value.EntitiesOut} entities")));
 			}
 		}
+	}
+
+	/// <summary>
+	/// Send rates for one joiner's roots: its own character and seat grid first at full rate, then by distance; past the
+	/// nearest <see cref="StateBands.CrowdFull"/> characters and loose objects the rest go at half rate. Grids near the
+	/// joiner stay at full rate whatever the crowd. Roots not listed (new since this update) go at full rate.
+	/// </summary>
+	private Dictionary<uint, byte> StateBandsFor(Joiner j, List<StreamGroup> groups, List<(double Distance, int Group)> kept)
+	{
+		var bands = new Dictionary<uint, byte>();
+		uint own = j.Character != null ? RootIdOf(j.Character) : 0u;
+		uint seat = j.SeatRoot != null && _ids.TryGet(j.SeatRoot, out uint seatId) ? seatId : 0u;
+		kept.Sort((a, b) => a.Distance.CompareTo(b.Distance));
+		int crowd = 0;
+		foreach (var (distance, g) in kept)
+		{
+			var group = groups[g];
+			bool mine = false;
+			foreach (var (_, id) in group.Roots) mine |= id == own || id == seat;
+			byte band = mine ? StateBands.Own : StateBands.ForDistance(distance);
+			if (!mine && !group.Grid && band == StateBands.Full && ++crowd > StateBands.CrowdFull) band = StateBands.Half;
+			if (band == StateBands.Full) continue;
+			foreach (var (_, id) in group.Roots) bands[id] = band;
+		}
+		if (own != 0) bands[own] = StateBands.Own;
+		if (seat != 0) bands[seat] = StateBands.Own;
+		return bands;
 	}
 
 	private void PushStreamedOut(HostSession host, PeerId peer, StreamState stream)
@@ -398,13 +531,18 @@ internal sealed partial class HostWorld
 				if (any)
 				{
 					// The bundle builds every root in it on the joiner, so none of them is streamed out any more.
-					foreach (var (id, _, _, _) in roots) stream.Dirty |= stream.Out.Remove(id);
+					foreach (var (id, _, _, _) in roots)
+					{
+						stream.Dirty |= stream.Out.Remove(id);
+						stream.In.Add(id);
+					}
 				}
 				else if (always.Count > 0)
 				{
 					// Only far grids plus something every joiner needs (an asteroid spawned beside another player): hold the
 					// bundle back and send the needed roots on their own from the next streaming update.
 					foreach (var id in always) stream.Dirty |= stream.Out.Add(id);
+					stream.AlwaysPending = true;
 				}
 				if (stream.Dirty)
 				{
@@ -455,4 +593,32 @@ internal sealed partial class HostWorld
 	}
 
 	private void ForgetStream(PeerId peer) => _streams.TryRemove(peer, out _);
+
+	/// <summary>Load tests only (-y51testspread:&lt;metres&gt; next to -y51testtcp): suit spawns spread over a disc around the spawn point.</summary>
+	private static readonly double TestSpreadMeters = TestArgument("-y51testspread:");
+
+	private static double TestArgument(string prefix)
+	{
+		var args = Environment.GetCommandLineArgs();
+		if (!args.Any(a => a.StartsWith(NetHost.NetSession.TestTcpArgument, StringComparison.OrdinalIgnoreCase))) return 0;
+		string? arg = args.FirstOrDefault(a => a.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+		return arg != null && double.TryParse(arg.AsSpan(prefix.Length), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double v) ? v : 0;
+	}
+
+	private void TestSpread(Joiner j, Entity character, string via)
+	{
+		if (TestSpreadMeters <= 0 || !via.Contains("suit", StringComparison.Ordinal)) return;
+		try
+		{
+			var at = character.Data.GetWorldTransform();
+			// Golden-angle spiral: even cover of the disc whatever the player count.
+			double k = j.ClientId, r = TestSpreadMeters * Math.Sqrt(k * 0.6180339887 % 1.0), angle = k * 2.399963;
+			var offset = WorldTransform.TransformDirection(new Vector3D(Math.Cos(angle) * r, 2, Math.Sin(angle) * r), at);
+			character.Data.Set(new WorldTransform(at.Position + offset, at.Orientation));
+		}
+		catch (Exception ex)
+		{
+			_log.WarnOnce("test-spread", $"streaming: test spread failed ({ex.GetType().Name}: {ex.Message})");
+		}
+	}
 }

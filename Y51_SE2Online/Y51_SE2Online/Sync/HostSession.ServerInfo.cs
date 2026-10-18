@@ -34,11 +34,12 @@ public sealed partial class HostSession
 		Add("Server", "Name", _o.SessionName);
 		Add("Server", "Type", _o.Dedicated ? "Dedicated server" : "Hosted by " + _o.HostName);
 		Add("Server", "Players", online + " / " + _o.MaxPlayers);
+		if (Core.OnlineSettings.Unstable(_o.MaxPlayers)) Add("Server", "Warning", Core.OnlineSettings.UnstablePlayersWarning);
 		Add("Server", "Password", string.IsNullOrEmpty(_o.Password) ? "No" : "Yes");
 		Add("Server", "Whitelist only", _o.Access.WhitelistOnly ? "Yes" : "No");
 		Add("Server", "Uptime", ServerInfo.Duration(TimeSpan.FromMilliseconds(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _startedUnixMs)));
-		Add("Server", "Version", $"Y51 SE2 Online {_o.PluginVersion}, protocol {SyncProtocol.Version}, SE2 {_o.GameVersion}");
-		Add("Rules", "PvP", ServerInfo.OnOff(Pvp));
+		Add("Server", "Version", $"Space Engineers 2 Online {_o.PluginVersion}, protocol {SyncProtocol.Version}, SE2 {_o.GameVersion}");
+		Add("Rules", "Mode", Pvp ? "PvP: players can hurt each other" : "PvE: players can't hurt each other");
 		Add("Rules", "Offline raid protection", ServerInfo.OnOff(OfflineRaidProtection));
 		Add("Rules", "PCU per player", _o.PcuInForce == 0 ? "Unlimited" : _o.PcuInForce.ToString("N0", CultureInfo.InvariantCulture));
 		if (_o.Access.WorldPcu is int world) Add("Rules", "World PCU setting", world.ToString("N0", CultureInfo.InvariantCulture));

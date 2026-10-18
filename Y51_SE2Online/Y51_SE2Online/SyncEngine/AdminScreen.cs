@@ -47,6 +47,16 @@ public sealed class AdminScreen : ScreenView
     private readonly ContentControl _page = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
     private readonly TextBox _prefabSearch = OnlineUi.Input("Search prefabs", 64), _itemSearch = OnlineUi.Input("Search items", 64);
     private readonly TextBox _amount = OnlineUi.Input("100", 6);
+    private static readonly AccessPlayer Me = new(0, "Me", OnlineRole.Player, true, 0);
+    private readonly ComboBox _giveTo = new()
+    {
+        ItemsSource = new[] { Me }, SelectedIndex = 0, MinHeight = 40, MinWidth = 240, FontSize = 20, VerticalAlignment = VerticalAlignment.Center,
+        ItemTemplate = new FuncDataTemplate<AccessPlayer>((p, _) => p == null ? null : OnlineUi.Text(p.Name, size: 20, inheritForeground: true))
+    };
+    private readonly (Slider S, Control Row) _sunAngle = OnlineUi.Slider(0, 359, 1, v => v + "°", 360);
+    private bool _sunSyncing, _sunQueued;
+    private long _sunTouchedMs;
+    private double _sunStateDeg = double.NaN;
     private readonly (Slider S, Control Row) _distance = OnlineUi.Slider(5, 500, 5, v => v + " m", 260);
     private readonly TextBox _zoneName = OnlineUi.Input("Safe zone name", 64);
     private readonly (Slider S, Control Row) _zoneRadius = OnlineUi.Slider(10, 2000, 10, v => v + " m", 260), _resize = OnlineUi.Slider(10, 2000, 10, v => v + " m", 260);
@@ -97,6 +107,15 @@ public sealed class AdminScreen : ScreenView
             OnlineUi.Row(OnlineUi.Button("Set message", () => Send(new AdminRequest(AdminAction.Motd, Name: _motdInput.Text ?? "")), "AdminMotdSet", true),
                 OnlineUi.Button("Clear", () => Send(new AdminRequest(AdminAction.Motd, Name: "")), "AdminMotdClear", true)));
         _sun = OnlineUi.Text("", "SubTitle");
+        // Absolute angle, so repeated sends while dragging can't add up; sent at most every 150 ms.
+        _sunAngle.S.PropertyChanged += (_, e) =>
+        {
+            if (e.Property != Avalonia.Controls.Primitives.RangeBase.ValueProperty || _sunSyncing) return;
+            _sunTouchedMs = MpClock.NowMs();
+            if (_sunQueued) return;
+            _sunQueued = true;
+            DispatcherTimer.RunOnce(() => { _sunQueued = false; Send(new AdminRequest(AdminAction.SunSet, Size: _sunAngle.S.Value)); }, TimeSpan.FromMilliseconds(150));
+        };
         _dayInput.Width = 260;
         var sun = OnlineUi.Section("SUN",
             OnlineUi.Text("The sun turns once per day. Stop it to keep the light where it is, set how long a full day lasts, or move the sun to change the time of day for everyone. Changes are saved with the world.", null, 24),
@@ -105,21 +124,16 @@ public sealed class AdminScreen : ScreenView
                 OnlineUi.Button("Rotation off", () => Send(new AdminRequest(AdminAction.SunRotation, Value: false)), "AdminSunOff", true)),
             OnlineUi.Row(_dayInput,
                 OnlineUi.Button("Set day length", () => { double day = Number(_dayInput, 0); if (day >= 1 && day <= 10080) Send(new AdminRequest(AdminAction.SunPeriod, Size: day)); }, "AdminSunDay", true)),
-            OnlineUi.Row(OnlineUi.Text("Move the sun", "SubTitle"),
-                OnlineUi.Button("-45°", () => Send(new AdminRequest(AdminAction.SunNudge, Size: -45)), "AdminSunBack45"),
-                OnlineUi.Button("-10°", () => Send(new AdminRequest(AdminAction.SunNudge, Size: -10)), "AdminSunBack10"),
-                OnlineUi.Button("+10°", () => Send(new AdminRequest(AdminAction.SunNudge, Size: 10)), "AdminSunAhead10"),
-                OnlineUi.Button("+45°", () => Send(new AdminRequest(AdminAction.SunNudge, Size: 45)), "AdminSunAhead45"),
-                OnlineUi.Button("+180°", () => Send(new AdminRequest(AdminAction.SunNudge, Size: 180)), "AdminSunFlip")),
-            OnlineUi.Text("Server console: sun on|off, sun day <minutes>, sun move <degrees>. server.json: SunRotation, SunPeriodMinutes.", "SubtleNotice", 22));
+            OnlineUi.Row(OnlineUi.Text("Sun position", "SubTitle"), _sunAngle.Row),
+            OnlineUi.Text("Server console: sun on|off, sun day <minutes>, sun move <degrees>, sun set <0-360> (both glide smoothly). server.json: SunRotation, SunPeriodMinutes.", "SubtleNotice", 22));
 
         _spawn = OnlineUi.Button("Spawn in front of me", () => { if (_prefabList.SelectedItem is Entry e) Send(new AdminRequest(AdminAction.SpawnPrefab, Name: e.Id.ToString(), Size: _distance.S.Value)); }, "AdminSpawnPrefab", true);
         _prefabSearch.TextChanged += (_, _) => RefreshCatalogs();
         var spawn = Page(_prefabSearch, _prefabList, OnlineUi.Row(OnlineUi.Text("Distance", "SubTitle"), _distance.Row, _spawn));
 
-        _give = OnlineUi.Button("Give to me", () => { if (_itemList.SelectedItem is Entry e) Send(new AdminRequest(AdminAction.SpawnItem, Name: e.Id.ToString(), Size: Number(_amount, 1))); }, "AdminGiveItem", true);
+        _give = OnlineUi.Button("Give", () => { if (_itemList.SelectedItem is Entry e) Send(new AdminRequest(AdminAction.SpawnItem, (_giveTo.SelectedItem as AccessPlayer)?.SteamId ?? 0, Name: e.Id.ToString(), Size: Number(_amount, 1))); }, "AdminGiveItem", true);
         _itemSearch.TextChanged += (_, _) => RefreshCatalogs();
-        var items = Page(_itemSearch, _itemList, OnlineUi.Row(OnlineUi.Text("Amount", "SubTitle"), _amount, _give));
+        var items = Page(_itemSearch, _itemList, OnlineUi.Row(OnlineUi.Text("Amount", "SubTitle"), _amount, OnlineUi.Text("To", "SubTitle"), _giveTo, _give));
 
         _createZone = OnlineUi.Button("Create at my position", () => Send(new AdminRequest(AdminAction.CreateSafeZone, Name: _zoneName.Text ?? "", Size: _zoneRadius.S.Value)), "AdminCreateSafeZone", true);
         _resizeZone = OnlineUi.Button("Resize", () => { if (_zoneList.SelectedItem is SafeZoneInfo z) Send(new AdminRequest(AdminAction.DeleteSafeZone, z.NetId, Size: _resize.S.Value)); }, "AdminResizeSafeZone");
@@ -219,11 +233,18 @@ public sealed class AdminScreen : ScreenView
         var state = AdminAccess.State;
         _status.Text = AdminAccess.InSession ? (AdminAccess.Hosting ? "Hosting " : "Admin on ") + (string.IsNullOrWhiteSpace(state.ServerName) ? AdminAccess.ServerName : state.ServerName) : "Not in a multiplayer session";
         _message.Text = state.Message; _message.IsVisible = !string.IsNullOrWhiteSpace(state.Message);
-        _pvp.Text = "PvP is " + (state.Pvp ? "ON" : "OFF");
+        _pvp.Text = state.Pvp ? "PvP is ON" : "PvP is OFF (listed as PvE)";
         _raid.Text = "Offline raid protection is " + (state.OfflineRaidProtection ? "ON" : "OFF");
         _pcu.Text = "PCU limit per player: " + (state.PcuLimit <= 0 || state.PcuLimit == int.MaxValue ? "unlimited" : state.PcuLimit.ToString("N0"));
         _motd.Text = string.IsNullOrWhiteSpace(state.Motd) ? "No message of the day." : "Current: " + state.Motd;
         _sun.Text = "Sun rotation is " + (state.SunRotation ? "ON" : "OFF") + (state.SunPeriodMinutes > 0 ? ", one full day every " + AccessList.DayLength(state.SunPeriodMinutes) : "");
+        // Follow the host only when it reports a new angle, and not right after a drag, so a reply built before the
+        // world applied the change doesn't pull the slider back.
+        if (state.SunDegrees != _sunStateDeg && MpClock.NowMs() - _sunTouchedMs > 2000)
+        {
+            _sunStateDeg = state.SunDegrees;
+            _sunSyncing = true; _sunAngle.S.Value = Math.Round(state.SunDegrees) % 360; _sunSyncing = false;
+        }
         if (_page.Content == _pages[1] || _page.Content == _pages[2]) RefreshCatalogs();
         string zones = string.Join("|", state.SafeZones.Select(z => z.NetId + z.Name + z.Radius));
         if (zones != _zoneSignature)
@@ -239,6 +260,9 @@ public sealed class AdminScreen : ScreenView
             ulong selected = (_playerList.SelectedItem as AccessPlayer)?.SteamId ?? 0;
             _playerSignature = roster; _playerList.ItemsSource = players;
             _playerList.SelectedItem = players.FirstOrDefault(p => p.SteamId == selected);
+            ulong recipient = (_giveTo.SelectedItem as AccessPlayer)?.SteamId ?? 0;
+            var choices = new[] { Me }.Concat(players).ToArray();
+            _giveTo.ItemsSource = choices; _giveTo.SelectedItem = choices.FirstOrDefault(p => p.SteamId == recipient) ?? Me;
         }
         RefreshActions();
     }

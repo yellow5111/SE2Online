@@ -88,6 +88,7 @@ internal static class VoiceChat
 		bool now = !muted.Contains(player.Name, StringComparer.OrdinalIgnoreCase);
 		muted.RemoveAll(m => string.Equals(m, player.Name, StringComparison.OrdinalIgnoreCase));
 		if (now) muted.Add(player.Name);
+		if (muted.Count > OnlineSettings.MaxMutedVoices) muted.RemoveAt(0);
 		MpMenu.SaveSettings(MpMenu.Settings);
 		return now;
 	}

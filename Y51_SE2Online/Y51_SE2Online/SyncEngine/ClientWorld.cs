@@ -61,7 +61,7 @@ using Component = Keen.VRage.DCS.Components.Component;
 
 namespace Y51_SE2Online.SyncEngine;
 
-internal sealed class ClientWorld
+internal sealed partial class ClientWorld
 {
 	private sealed class Attempt
 	{
@@ -257,7 +257,7 @@ internal sealed class ClientWorld
 		}
 	}
 
-	private const double StallLeadMs = 100.0;
+	private const double StallLeadMs = 120.0, StallSoftMs = 80.0;
 
 	private static volatile bool _sprintIntent;
 
@@ -285,6 +285,11 @@ internal sealed class ClientWorld
 	private readonly HashSet<Entity> _controlled = new HashSet<Entity>(ReferenceEqualityComparer.Instance);
 
 	private readonly List<(uint NetId, byte[] Value)> _smoothOut = new List<(uint, byte[])>();
+
+	private readonly TickClock _ownClock = new();
+
+	private double _frameNow;
+
 
 	private const int CharacterWaitMs = 60000;
 
@@ -2299,7 +2304,7 @@ internal sealed class ClientWorld
 			return;
 		}
 		_smoothOut.Clear();
-		session.Smoother.Sample(now, _smoothOut);
+		session.Smoother.Sample(_frameNow, _smoothOut, evenTime: true);
 		NoteDeckSample(_smoothOut);
 		foreach (var (netId, value) in _smoothOut)
 		{
@@ -2417,7 +2422,7 @@ internal sealed class ClientWorld
 		}
 		while (taken < 64 && session.Lifecycle.TryPeek(out seq, out item))
 		{
-			if ((item.Type == SyncMsg.EntityBundle && item.Bundle.RequiredBlobs.Count > 0 && !BlobsReady(session, seq, item.Bundle, now)) || (item.Type == SyncMsg.SignalBatch && ((applies > 0 && !TargetsLive(item.Signals)) || !ConnectionTargetsLive(session, seq, item.Signals, now))) || !session.Lifecycle.TryTake(out uint takenSeq, out LifecycleItem next))
+			if ((item.Type == SyncMsg.EntityBundle && item.Bundle.RequiredBlobs.Count > 0 && !BlobsReady(session, seq, item.Bundle, now)) || (item.Type == SyncMsg.SignalBatch && ((applies > 0 && !TargetsLive(item.Signals)) || !ConnectionTargetsLive(session, seq, item.Signals, now))) || (item.Type is SyncMsg.DataTag or SyncMsg.DataRemove && applies > 0 && !item.Removes!.TrueForAll(r => _proxies.IsLive(r.NetId))) || !session.Lifecycle.TryTake(out uint takenSeq, out LifecycleItem next))
 			{
 				break;
 			}
@@ -2425,6 +2430,24 @@ internal sealed class ClientWorld
 			if (next.Type == SyncMsg.StringTable)
 			{
 				RegisterHostStrings(next.Strings);
+				_lifecycleApplied++;
+				taken++;
+			}
+			else if (next.Type is SyncMsg.DataTag or SyncMsg.DataRemove)
+			{
+				// Inline replay commands, like the host's own: a removal done from a closure here landed after a tag
+				// added later in the same frame, and the dampeners showed off while the host had them on.
+				foreach (var (id, key) in next.Removes!)
+				{
+					if (_proxies.IsLive(id) && _proxies.TryGet(id, out Entity target) && session.Types.TryResolve(key, out var dataType, out var dataSize))
+					{
+						if (next.Type == SyncMsg.DataTag)
+							w.Write_Keen_VRage_Multiplayer_Replications_InProcess_InProcessReplicationSessionComponent_PostDataSignal(baseIndex + 1, _sessionProxy, target, new InProcessReplicationSessionComponent.InProcessPayload(dataType, (ReadOnlySpan<byte>)new byte[dataSize]));
+						else
+							w.Write_Keen_VRage_Multiplayer_Replications_InProcess_InProcessReplicationSessionComponent_RemoveDataSignal(baseIndex + 2, _sessionProxy, target, dataType);
+						cmds++;
+					}
+				}
 				_lifecycleApplied++;
 				taken++;
 			}
@@ -2512,6 +2535,9 @@ internal sealed class ClientWorld
 				_log.WarnOnce("client-stories", "client: processing the host's story replies failed: " + ex.GetType().Name + ": " + ex.Message);
 			}
 		}
+		// One even time for the whole frame (see TickClock): remote bodies and the own body step with the local world, and
+		// catch up after a client hitch together, or a body flying 6 m behind ours passed through it.
+		_frameNow = _ownClock.Next(MpClock.NowMsExact());
 		if (!_smoothingFailed)
 		{
 			try
@@ -2550,6 +2576,7 @@ internal sealed class ClientWorld
 			}
 		}
 		LookWrite(session, w, baseIndex, ref cmds);
+		if (GameSession is { } ragdollSession) RagdollGuard.Feed(ragdollSession);
 		if (cmds == 0)
 		{
 			InProcessReplicationSessionComponent.ReturnCB(cb);
@@ -2572,8 +2599,8 @@ internal sealed class ClientWorld
 			case SyncMsg.Despawn:
 				Despawn(item.NetIds, item.DespawnMode);
 				break;
-			case SyncMsg.DataRemove:
-				RemoveData(item.Removes);
+			case SyncMsg.DesyncCheck:
+				CheckDesync(item.Check);
 				break;
 			}
 			_lifecycleApplied++;
@@ -3025,6 +3052,7 @@ internal sealed class ClientWorld
 			foreach (var netId in paired)
 			{
 				_proxies.MarkLive(netId);
+				_session?.State.Revive(netId);
 			}
 			_entitiesBuilt += built.Length;
 			a.BuiltRoots = built.Length;
@@ -3231,23 +3259,6 @@ internal sealed class ClientWorld
 				_log.WarnOnce("client-forget", $"client: forgetting NetworkId {id} threw {ex.GetType().Name}: {ex.Message}");
 			}
 			_proxies.Forget(id);
-		}
-	}
-
-	private void RemoveData(List<(uint NetId, ushort Key)> items)
-	{
-		var replay = _comp.ReplayContext;
-		var types = _session.Types;
-		foreach (var (id, key) in items)
-		{
-			if (_proxies.IsLive(id) && _proxies.TryGet(id, out Entity e) && types.TryResolve(key, out var localTypeId, out _))
-			{
-				bool skip = false;
-				if (replay.TranslateObject(e, ReplicationFailureStrategy.NullOnAnyFail, ref skip) is Entity entity && !EngineCodec.IsDead(entity))
-				{
-					entity.Scene.TryRemoveData(entity.Data, localTypeId);
-				}
-			}
 		}
 	}
 
@@ -3789,7 +3800,9 @@ internal sealed class ClientWorld
 			var move = _move;
 			if (move != null)
 			{
-				move.OnHost(now, e.HostMs);
+				move.OnHost(now, e.HostMs, session.Smoother.HostTickMs(e.HostMs), (x, y, z), _ownVel.GetValueOrDefault());
+				// The carry along the host's velocity (drifting, pushed) dates the sample the same way as the lead.
+				if (move.SampleLocalMs is double onLine) _ownHostLocalMs = onLine;
 				if (look.Mode == LookMode.Ground && _ownVel.HasValue)
 				{
 					var hostVel = _ownVel.GetValueOrDefault();
@@ -3809,6 +3822,7 @@ internal sealed class ClientWorld
 
 	private void LookWrite(ClientSession session, VRage.Multiplayer.Replication.CB.ReplicationCommandBufferWriterReader w, int baseIndex, ref int cmds)
 	{
+		double ownNow = _frameNow;
 		var look = _look;
 		if (look == null || _lookFailed || !_lookDirty)
 		{
@@ -3838,19 +3852,24 @@ internal sealed class ClientWorld
 			if (_body != null || _deckFrame || leading)
 			{
 				var (x, y, z, quaternion) = LookMath.ReadTransform(transform);
+				// Velocities are per simulated second, the lead and the carry run on real ms: on a host below 60 fps the body
+				// overshot by the difference and fell back at every sample (17 ms ticks: 2 %, 7 mm a frame at 20 m/s).
+				float rate = (float)session.Smoother.HostRate;
 				System.Numerics.Vector3 leadShown = default;
 				double ageShown = -1;
 				if (leading)
 				{
 					// A server stall pauses the host's simulation and never catches up: predicting through it put the body
-					// ahead of where the host resumed, and it was pulled back (the pop). Past 100 ms without a sample the lead
+					// ahead of where the host resumed, and it was pulled back (the pop). Past 120 ms without a sample the lead
 					// stops growing, so the body waits with the server and carries on from there.
-					long leadNow = MpClock.NowMs();
-					if (_ownHostLocalMs is double sampleAt && leadNow - sampleAt > StallLeadMs) leadNow = (long)(sampleAt + StallLeadMs);
-					var lead = LeadClamp.Clamp(_ownCharacter, x, y, z, quaternion, move.Lead(leadNow, look.LagMs));
-					OwnLeadProbe?.Invoke(leadNow, x, y, z, lead, look.LagMs);
+					double leadNow = MpClock.NowMsExact();
+					// Eased in from StallSoftMs: samples 80-120 ms late at a loaded host's frame hitches hit the hard stop at 100 ms
+					// about once a second, and the body slowed 10 % for a few frames, then caught up.
+					if (_ownHostLocalMs is double sampleAt && leadNow - sampleAt > StallSoftMs) leadNow = sampleAt + StallSoftMs + (StallLeadMs - StallSoftMs) * (1.0 - Math.Exp(-(leadNow - sampleAt - StallSoftMs) / (StallLeadMs - StallSoftMs)));
+					var lead = LeadClamp.Clamp(_ownCharacter, x, y, z, quaternion, move.Lead(leadNow, look.LagMs) * rate);
+					OwnLeadProbe?.Invoke((long)leadNow, x, y, z, lead, look.LagMs);
 					leadShown = lead;
-					if (_ownHostLocalMs is double sampleLocal) ageShown = MpClock.NowMs() - sampleLocal;
+					if (_ownHostLocalMs is double sampleLocal) ageShown = leadNow - sampleLocal;
 					x += lead.X;
 					y += lead.Y;
 					z += lead.Z;
@@ -3861,12 +3880,24 @@ internal sealed class ClientWorld
 					// along the host's velocity, or the body stands still on frames without a sample and doubles up after.
 					// Never with the input lead: its window already runs to now, and adding the sample's age on top
 					// wobbled the body by speed x 0-16 ms (0.8 m at 100 m/s).
-					double age = Math.Clamp(MpClock.NowMs() - hostLocal, 0.0, 100.0) / 1000.0;
+					double age = Math.Clamp(MpClock.NowMsExact() - hostLocal, 0.0, 100.0) / 1000.0;
 					ageShown = age * 1000.0;
-					double seconds = age;
+					double seconds = age * rate;
 					x += hostVel.X * seconds;
 					y += hostVel.Y * seconds;
 					z += hostVel.Z * seconds;
+				}
+				// The own body is drawn at the frame's even time like everything else: the prediction is for the wall clock,
+				// so it moves back (or on) along its velocity by the difference, a few ms, and after a client hitch the gap
+				// closes at half a frame per frame instead of in the one frame after the hitch.
+				// The velocity the host samples moved at (a flung jetpack body moves at it while the input model says 20 m/s): the
+				// reported velocity dips a few m/s for a tick or two, and the lead's own velocity brakes a body the host is carrying.
+				if (!_ownSmoothed && _ownClock.BehindMs != 0.0 && (move?.SampleVelocity ?? _ownVel) is System.Numerics.Vector3 catchUpVel)
+				{
+					double behind = _ownClock.BehindMs / 1000.0 * rate;
+					x -= catchUpVel.X * behind;
+					y -= catchUpVel.Y * behind;
+					z -= catchUpVel.Z * behind;
 				}
 				if (_body != null)
 				{
@@ -3880,7 +3911,7 @@ internal sealed class ClientWorld
 						source = leading ? "host's newest sample + movement lead" : "host's newest sample (raw)";
 					}
 					long bigBefore = _body.BlendedBig;
-					(x, y, z, quaternion) = _body.Filter(MpClock.NowMs(), x, y, z, quaternion, leading ? move.Velocity : _ownVel, look.LastStep, source, _bodyWhy, _ownSmoothed);
+					(x, y, z, quaternion) = _body.Filter(ownNow, x, y, z, quaternion, (leading ? move.Velocity : _ownVel) * rate, look.LastStep, source, _bodyWhy, _ownSmoothed);
 					_bodyWhy = null;
 					long nowMs = MpClock.NowMs();
 					if (_body.BlendedBig != bigBefore && nowMs - _bodyDetailMs >= 1000)
