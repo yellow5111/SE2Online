@@ -121,7 +121,7 @@ internal static class DesyncHash
 	public static bool TryPosition(Entity e, out double x, out double y, out double z)
 	{
 		x = y = z = 0;
-		if (e?.Data == null || !e.Data.TryGet<WorldTransform>(out var t)) return false;
+		if (EngineCodec.IsDead(e) || !e!.Data.TryGet<WorldTransform>(out var t)) return false;
 		(x, y, z) = (t.Position.X, t.Position.Y, t.Position.Z);
 		return true;
 	}

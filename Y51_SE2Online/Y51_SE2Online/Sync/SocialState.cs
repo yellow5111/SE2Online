@@ -112,6 +112,13 @@ public sealed class SocialState
     public bool AclOwners { get; set; }
     /// <summary>Players whose suit broadcast was last off; their parked character gets no name tag while they are offline.</summary>
     public HashSet<long> Silent { get; set; } = new();
+    /// <summary>
+    /// The own MP identity of whoever last hosted this world as <see cref="PlayerIdentities.HotfixIdentity"/>. The game's
+    /// save keeps that identity on their grids; a dedicated server, where nobody plays as it, gives the grids to this one.
+    /// </summary>
+    public long HostIdentity { get; set; }
+    /// <summary>Dedicated: the owner for grids the save gives to <see cref="PlayerIdentities.HotfixIdentity"/>; 0 when nobody is known.</summary>
+    [JsonIgnore] public long HostHeir => PlayerIdentities.IsHuman(HostIdentity) && HostIdentity != PlayerIdentities.HotfixIdentity ? HostIdentity : 0;
     public const int MaxMotd = 300;
 
     public static bool CanAccess(long owner, long actor, GridSharing sharing, IEnumerable<OnlineFaction> factions)
@@ -298,7 +305,11 @@ public sealed class SocialState
         const long host = PlayerIdentities.HotfixIdentity;
         var saved = Players.Find(p => p.Identity == host);
         if (saved == null) return;
-        if (Namesake(saved) is long other) Merge(host, other);
+        if (Namesake(saved) is long other)
+        {
+            Merge(host, other);
+            if (HostHeir == 0) HostIdentity = other;
+        }
         else if (FactionOf(host) is not { Members.Count: 1 }) Forget(host);
     }
 
@@ -360,7 +371,8 @@ public sealed class SocialState
     {
         if (HostKey == null) return Serialize();
         var copy = Deserialize(Serialize());
-        copy.Merge(PlayerIdentities.HotfixIdentity, PlayerIdentities.Derive(HostKey));
+        copy.HostIdentity = PlayerIdentities.Derive(HostKey);
+        copy.Merge(PlayerIdentities.HotfixIdentity, copy.HostIdentity);
         return copy.Serialize();
     }
 

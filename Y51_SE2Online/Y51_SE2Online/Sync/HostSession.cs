@@ -393,6 +393,9 @@ public sealed partial class HostSession : IStorySink
 					{
 						client.LastPhase = ((ClientPhase)phase).ToString();
 						clientId = client.Player?.ClientId ?? 0;
+						// A social snapshot that overtook the JoinAccept was dropped (the client did not know its identity yet),
+						// and an unchanged one is never sent again: send it whole once the client has the accept.
+						if (phase == (byte)ClientPhase.SnapshotReceived) client.SocialDoc.RequestFull();
 					}
 				}
 				if (phase == (byte)ClientPhase.NotSeated && clientId != 0)

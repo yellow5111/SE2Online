@@ -24,10 +24,13 @@ public static class WorldPick
         string wanted = (explicitId ? saveId : worldName ?? "").Trim();
         string setting = explicitId ? "SaveId" : "WorldName";
         var found = Find(wanted, saves);
-        if (found.HasValue) return new Result(found.Value.Id, null, null);
+        if (found.Count > 1)
+            return new Result(null, $"{setting} '{wanted}' is the shown name of {found.Count} saves in {folder}: " + string.Join(", ", found.Select(Describe))
+                + ". Set SaveId to the folder of the one to load.", null);
+        if (found.Count == 1) return new Result(found[0].Id, null, null);
 
         string text = $"{setting} '{wanted}' is not a save in {folder}.";
-        var elsewhere = gameSaves == null ? null : Find(wanted, gameSaves);
+        var elsewhere = gameSaves == null ? null : Find(wanted, gameSaves).Cast<Save?>().FirstOrDefault();
         if (elsewhere.HasValue)
             text += $" It is in the game's own saves: copy the whole folder {System.IO.Path.Combine(gameFolder ?? "", elsewhere.Value.Id)} into {folder}.";
         var close = Close(wanted, saves);
@@ -42,15 +45,25 @@ public static class WorldPick
         return new Result(null, null, close.Count > 0 || elsewhere.HasValue ? text + " Creating a new world named '" + wanted + "' instead." : null);
     }
 
-    private static Save? Find(string wanted, IReadOnlyList<Save> saves)
+    /// <summary>A folder match is unique; a shown name can belong to several folders (a renamed or duplicated save).</summary>
+    private static List<Save> Find(string wanted, IReadOnlyList<Save> saves)
     {
         foreach (var compare in new[] { StringComparison.Ordinal, StringComparison.OrdinalIgnoreCase })
         {
-            foreach (var save in saves) if (string.Equals(save.Id, wanted, compare)) return save;
-            foreach (var save in saves) if (string.Equals(save.Name?.Trim(), wanted, compare)) return save;
+            foreach (var save in saves) if (string.Equals(save.Id, wanted, compare)) return new List<Save> { save };
+            var named = saves.Where(s => string.Equals(s.Name?.Trim(), wanted, compare)).ToList();
+            if (named.Count > 0) return named;
         }
-        return null;
+        return new List<Save>();
     }
+
+    /// <summary>
+    /// The name a dedicated server saves under (SE2 saves into the folder named after it): the profile folder the world was
+    /// loaded from or last saved to, never its shown name or WorldName, which can be another save's folder. Null for a world
+    /// loaded from content, so SE2 picks a free folder for its first save.
+    /// </summary>
+    public static string SaveName(string ownFolder, bool hasContainer, string worldName) =>
+        !string.IsNullOrEmpty(ownFolder) ? ownFolder : hasContainer ? null : worldName;
 
     private static string Describe(Save s) => string.IsNullOrEmpty(s.Name) || s.Name == s.Id ? $"'{s.Id}'" : $"'{s.Name}' (folder '{s.Id}')";
 

@@ -42,6 +42,10 @@ public static class WireTypes
 
 	public static int CacheCount => Cache.Count;
 
+	// A host model replicates as its [Replicate] base (ToolbarActionHintServerModel -> ToolbarActionHintModel), and Keen's
+	// story result translation hands a story declared to return the server type that client replica.
+	public static bool IsReplicaOf(Type declared, Type replica) => replica != typeof(object) && declared.IsSubclassOf(replica);
+
 	public static bool IsGameAssembly(string? name)
 	{
 		if (name == null || !(name == "SpaceEngineers2" || name.StartsWith("Game2.", StringComparison.Ordinal) || name.StartsWith("VRage.", StringComparison.Ordinal)))

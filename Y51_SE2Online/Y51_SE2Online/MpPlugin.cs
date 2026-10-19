@@ -165,6 +165,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			Optional("animator guard", () => AnimatorGuard.Install(_harmony));
 			Optional("ragdoll smoothing", () => RagdollGuard.Install(_harmony));
 			Optional("sound range", () => SoundRange.Install(_harmony));
+			Optional("other players' cockpit and landing gear sounds", () => AudioGate.Install(_harmony));
 			Optional("procedural voxel handoff", () => ProceduralVoxelHandoff.Install(_harmony));
 			Optional("flora sector fix", () => FloraSectorSpawnFix.Install(_harmony));
 			Optional("host-only saves", () => HostOnlySaves.Install(_harmony));

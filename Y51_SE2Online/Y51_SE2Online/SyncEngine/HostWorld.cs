@@ -1240,6 +1240,11 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 		{
 			return null;
 		}
+		// A button panel's toolbar is not the seat's: anyone with access may press it, seated or not.
+		if (declaringType.Name == "BlockToolbarServerComponent" && !Encloses(root, seat))
+		{
+			return null;
+		}
 		root = RootOf(root);
 		// Vanilla only reaches these stories from a cockpit's input handler; passenger seats have none.
 		bool passenger = !IsControlSeat(seat);
@@ -1259,6 +1264,15 @@ internal sealed partial class HostWorld : IHostWorld, IS2CTap
 	}
 
 	private static bool IsControlSeat(Entity? seat) => seat != null && seat.TryGet<CockpitComponent>() != null && !PassengerSeats.IsPassengerSeat(seat);
+
+	private static bool Encloses(Entity block, Entity? e)
+	{
+		for (int depth = 0; depth < 16 && e != null; depth++, e = e.TryGet<HierarchyComponent>()?.Parent)
+		{
+			if (e == block) return true;
+		}
+		return false;
+	}
 
 	private static Entity RootOf(Entity e)
 	{

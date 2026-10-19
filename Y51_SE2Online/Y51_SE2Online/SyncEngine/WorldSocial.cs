@@ -102,19 +102,36 @@ internal sealed class WorldSocial
         WatchTransfers(world.OwnedSession);
         bool shared = MpPlugin.Controller?.Current?.Grids == GridPermissionMode.Team
             || (MpPlugin.Controller?.Current == null && MpMenu.Settings.TeamGrids);
+        const long host = PlayerIdentities.HotfixIdentity;
+        long heir = DedicatedRuntime.Requested ? State.HostHeir : 0;
         foreach (var entity in world.OwnedSession.Entities)
         {
             var grid = entity.TryGet<CubeGridComponent>(); var permissions = entity.TryGet<GridPermissionsComponent>();
             if (grid == null || permissions == null || !PlayerIdentities.IsHuman(TeamPermissions.OwnerOf(entity))) continue;
-            // Dedicated worlds have no host player to manage legacy host-owned grids.
-            if (DedicatedRuntime.Requested && TeamPermissions.OwnerOf(entity) == PlayerIdentities.HotfixIdentity)
+            // Nobody plays as the host's identity on a dedicated server: its grids go to that host's own identity when the
+            // save names it, else they are left for anyone to claim.
+            if (DedicatedRuntime.Requested && TeamPermissions.OwnerOf(entity) == host)
             {
-                SetOwner(entity, 0);
-                SetSharing(entity, GridSharing.Everyone);
-                continue;
+                SetOwner(entity, heir);
+                if (heir == 0)
+                {
+                    SetSharing(entity, GridSharing.Everyone);
+                    continue;
+                }
             }
             if (IsExplicit(permissions.BuildPermissions)) continue;
             SetSharing(entity, shared ? GridSharing.Everyone : SharingOf(entity));
+        }
+        if (heir != 0)
+        {
+            string hostId = host.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            foreach (var block in world.OwnedSession.GetEntitiesOfType<BlockPermissionsComponent>())
+            {
+                var permissions = block.Get<BlockPermissionsComponent>();
+                string text = permissions.AccessGroup.String;
+                if (BlockAcl.IsAcl(text) && text.Contains(hostId, StringComparison.Ordinal))
+                    permissions.AccessGroup = StringId.Get(BlockAcl.Parse(text).Renamed(host, heir).ToString());
+            }
         }
         if (!State.AclOwners)
         {

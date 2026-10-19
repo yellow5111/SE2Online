@@ -210,7 +210,8 @@ internal sealed partial class HostWorld
 		{
 			if (_desyncScanPos % DesyncScanSteps == 0 && Stopwatch.GetTimestamp() >= budget) return;
 			var entity = _desyncScan[_desyncScanPos++];
-			if (entity == comp.Entity || entity.Data.Has<ParentData>() || !_ids.TryGet(entity, out uint id) || !replay.HasPairingLocal(entity) || EngineCodec.IsDead(entity)) continue;
+			// The copy is a few frames old: entities removed since are dead and their data is gone.
+			if (entity == comp.Entity || EngineCodec.IsDead(entity) || entity.Data.Has<ParentData>() || !_ids.TryGet(entity, out uint id) || !replay.HasPairingLocal(entity)) continue;
 			_desyncScanSeen!.Add(id);
 			if (_desyncRoots.TryGetValue(id, out var root)) root.Root = entity;
 			else _desyncRoots[id] = new DesyncRoot { Root = entity, Id = id, FirstSeenMs = now };

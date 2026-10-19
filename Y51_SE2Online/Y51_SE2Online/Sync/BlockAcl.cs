@@ -53,6 +53,14 @@ public sealed record BlockAcl(long[] Allow, long[] Deny, bool ShowTag = false, l
     /// <summary>The lists in force while <paramref name="owner"/> owns the grid: none unless that owner wrote them.</summary>
     public BlockAcl For(long owner) => (Owner == owner && PlayerIdentities.IsHuman(owner)) || Allow.Length + Deny.Length == 0 ? this : this with { Allow = Array.Empty<long>(), Deny = Array.Empty<long>() };
 
+    /// <summary>These lists with <paramref name="from"/> named <paramref name="to"/> instead (owner and both lists).</summary>
+    public BlockAcl Renamed(long from, long to)
+    {
+        long[] Swap(long[] ids) => ids.Select(i => i == from ? to : i).Distinct().ToArray();
+        long[] deny = Swap(Deny);
+        return this with { Allow = Swap(Allow).Except(deny).ToArray(), Deny = deny, Owner = Owner == from ? to : Owner };
+    }
+
     private static string Join(IEnumerable<long> ids) => string.Join(",", ids.Select(i => i.ToString(CultureInfo.InvariantCulture)));
 
     /// <summary>Adds or removes a player on one list; a player is never on both.</summary>

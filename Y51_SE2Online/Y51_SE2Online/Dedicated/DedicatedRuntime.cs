@@ -265,9 +265,10 @@ internal static class DedicatedRuntime
             }
             else if (Config.WorkshopIds.Length > 0)
                 GameLog.Instance.Info("dedicated: Mods applies to headless servers; this server's own Steam client loads the world's mods");
+            bool inProfile = save.HasValue && (resumed || (string.IsNullOrWhiteSpace(Config.StartContent) && Config.StartWorkshopId == 0));
             var load = new WorldLoadArgs
             {
-                SaveId = save, OverrideDisplayName = Config.WorldName, EnableAutosave = Config.EnableAutosave,
+                SaveId = save, OverrideDisplayName = inProfile ? null : Config.WorldName, EnableAutosave = Config.EnableAutosave,
                 PlayMission = Config.PlayMission, SkipDebugMenuWarning = true, SkipNewerSaveWarning = true,
                 OverrideModList = mods
             };
@@ -279,10 +280,15 @@ internal static class DedicatedRuntime
             // Content has to be saved into the profile once. A profile save is already durable, and saving it straight back
             // can deadlock SE2: the commit holds the save collection, a world area spawning its blocking bundle on the main
             // thread waits for a voxel blob from that collection, and the commit's continuation needs the main thread.
-            bool inProfile = save.HasValue && (resumed || (string.IsNullOrWhiteSpace(Config.StartContent) && Config.StartWorkshopId == 0));
             if (inProfile)
             {
                 _savedId = (world.SaveContainerId ?? save.Value).ToString();
+                // SE2 saves into the folder named after the shown name, so a shown name that is another folder's name would overwrite that save.
+                if (world.SaveContainerId.HasValue && world.DisplayName != _savedId)
+                {
+                    GameLog.Instance.Info($"dedicated: save '{_savedId}' shows the name '{world.DisplayName}'; it is saved back into its own folder under its folder name");
+                    await world.SetDisplayName(_savedId);
+                }
                 _nextSave = MpClock.NowMs() + Config.SaveIntervalSeconds * 1000L;
             }
             else await Save(world, false);
@@ -338,7 +344,7 @@ internal static class DedicatedRuntime
             for (int attempt = 0; attempt < 20 && result == SaveResults.FailureSaveInProgress; attempt++)
             {
                 await world.WaitForSavingToFinish();
-                result = await world.TrySaveWorldSession(world.SaveContainerId.HasValue ? null : Config.WorldName, variant: null);
+                result = await world.TrySaveWorldSession(WorldPick.SaveName(world.SaveContainerId.HasValue ? _savedId : null, world.SaveContainerId.HasValue, Config.WorldName), variant: null);
             }
             if (result != SaveResults.Success) throw new InvalidOperationException("Native world save returned " + result);
             var state = new ResumeState(world.SaveContainerId.Value.ToString(), Config.SaveId, Config.StartContent, Config.WorldName, Config.StartWorkshop);

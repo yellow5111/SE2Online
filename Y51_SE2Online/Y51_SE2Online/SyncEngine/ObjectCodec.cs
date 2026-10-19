@@ -343,7 +343,7 @@ internal static class ObjectCodec
 		fail.Contains("is not on this side", StringComparison.Ordinal)
 		&& (fail.Contains("observable #", StringComparison.Ordinal) || fail.Contains("observed list #", StringComparison.Ordinal));
 
-	public static object? Decode(WireValue v, Type declared, ObjectSpace sp, bool translated, ref string? fail, int depth = 0, bool inCollection = false)
+	public static object? Decode(WireValue v, Type declared, ObjectSpace sp, bool translated, ref string? fail, int depth = 0, bool inCollection = false, bool storyResult = false)
 	{
 		if (fail != null)
 		{
@@ -421,7 +421,8 @@ internal static class ObjectCodec
 				fail = $"observable #{v.Id} is not on this side";
 				return null;
 			}
-			if (!(Nullable.GetUnderlyingType(declared) ?? declared).IsInstanceOfType(observable))
+			Type want = Nullable.GetUnderlyingType(declared) ?? declared;
+			if (!want.IsInstanceOfType(observable) && !(storyResult && WireTypes.IsReplicaOf(want, observable.GetType())))
 			{
 				fail = $"observable #{v.Id} is a {observable.GetType().Name} here, not a {declared.Name}";
 				return null;

@@ -18,8 +18,8 @@ using Y51_SE2Online.SyncEngine;
 [assembly: IgnoresAccessChecksTo("VRage.Physics")]
 [assembly: AssemblyCompany("Y51_SE2Online")]
 [assembly: AssemblyConfiguration("Release")]
-[assembly: AssemblyFileVersion("0.15.5.0")]
-[assembly: AssemblyInformationalVersion("0.15.5")]
+[assembly: AssemblyFileVersion("0.15.6.0")]
+[assembly: AssemblyInformationalVersion("0.15.6")]
 [assembly: AssemblyProduct("Y51_SE2Online")]
 [assembly: AssemblyTitle("Y51_SE2Online")]
 [assembly: IndexMetadata]
@@ -30,8 +30,8 @@ using Y51_SE2Online.SyncEngine;
 	"VRage.Platform.Windows, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Render, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Render12, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Scripting, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Steam, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.UI, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.UI.Shared, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Voxels.Client, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Voxels, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Water.Client, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null",
 	"VRage.Water, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "Game2.Client, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "Game2.Simulation, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "SpaceEngineers2, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Multiplayer, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null"
 })]
-[assembly: Bundle("Y51_SE2Online", "0.15.5.0")]
-[assembly: AssemblyVersion("0.15.5.0")]
+[assembly: Bundle("Y51_SE2Online", "0.15.6.0")]
+[assembly: AssemblyVersion("0.15.6.0")]
 [module: ModuleIndexedAttributes(typeof(WithLifetimeAdapterAttribute), new Type[] { typeof(NametagMarkerProvider) }, new string[] { })]
 [module: ModuleIndexedAttributes(typeof(IndexedComponentAttribute), new Type[] { typeof(NametagMarkerProvider), typeof(Y51_SE2Online.Dedicated.HeadlessEngine.HeadlessParallelInitComponent), typeof(Y51_SE2Online.Dedicated.HeadlessEngine.ServerParallelInitComponent), typeof(WorldSocial.WorldSocialSaveComponent) }, new string[] { })]
 

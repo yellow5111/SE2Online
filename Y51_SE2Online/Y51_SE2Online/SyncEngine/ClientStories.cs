@@ -360,7 +360,7 @@ internal sealed class ClientStories
 					Type type = StoryState.ResultType(story.Context);
 					space.ClearLocalIds();
 					space.LocalStubs.Clear();
-					storyResult = type == typeof(DBNull) ? DBNull.Value : ObjectCodec.Decode(finish.Result, type, space, translated: false, ref fail);
+					storyResult = type == typeof(DBNull) ? DBNull.Value : ObjectCodec.Decode(finish.Result, type, space, translated: false, ref fail, storyResult: true);
 					if (fail != null && IsWaitable(fail) && nowMs - since < WaitMs(fail))
 					{
 						_waiting.Add((finish, since));
@@ -507,13 +507,27 @@ internal sealed class ClientStories
 				{
 					result = Activator.CreateInstance(type);
 				}
-				story.GetType().GetMethod("SetResult", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic).Invoke(story, new object?[] { result, ex });
+				MethodInfo setResult = story.GetType().GetMethod("SetResult", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+				if (result != null && !type.IsValueType && !type.IsInstanceOfType(result))
+				{
+					SetReplicaResult.MakeGenericMethod(type).Invoke(null, new object?[] { story, setResult, result, ex });
+				}
+				else
+				{
+					setResult.Invoke(story, new object?[] { result, ex });
+				}
 			}
 		}
 		catch (Exception)
 		{
 		}
 	}
+
+	private static readonly MethodInfo SetReplicaResult = typeof(ClientStories).GetMethod(nameof(SetReplica), BindingFlags.NonPublic | BindingFlags.Static)!;
+
+	// Reflection refuses a base-typed replica (WireTypes.IsReplicaOf) for a server-typed result; Keen's translation writes it unchecked too.
+	private static void SetReplica<T>(object story, MethodInfo setResult, object result, Exception? ex) where T : class =>
+		setResult.CreateDelegate<Action<T, Exception?>>(story)(Unsafe.As<T>(result), ex);
 
 	private void RunToolbarLocally(string name, object box, Keen.VRage.Multiplayer.Replications.InProcess.InProcessReplicationSessionComponent comp, NetworkStoryContext context)
 	{

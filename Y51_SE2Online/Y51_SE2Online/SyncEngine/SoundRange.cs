@@ -7,17 +7,19 @@ using Keen.VRage.Audio.EngineComponents;
 using Keen.VRage.Core;
 using Keen.VRage.Core.Game.GameSystems.Audio;
 using Keen.VRage.Library.Mathematics;
+using Y51_SE2Online.Sync;
 
 namespace Y51_SE2Online.SyncEngine;
 
 /// <summary>
-/// SE2's FMOD events do no distance attenuation of their own; the game silences a 3D sound only when it moves out of
-/// its event's max distance (AudioEventInstance3D.SetTransform -> OnInRangeChanged -> Pause). IsInRange starts false and
-/// is only refreshed by the tracker, so a sound that STARTS out of range never gets that transition and plays at full
-/// volume at any distance. In single player every tool, footstep and build sound starts next to the listener; online,
-/// another player's welder, grinder or drill hundreds of kilometres away was heard as if held here. Out-of-range
-/// sounds now start the way they would have ended up: loops paused (the game resumes them when they come in range),
-/// one-shots not played. The distance is measured fresh, as SetTransform does; a reused instance's IsInRange can be stale.
+/// SE2's spatializers fade most events to silence at their max distance, but some carry unspatialized layers
+/// (survival kit, hydrogen engine, ion push, reactor explosions are still -10 to -60 dB kilometres away, measured
+/// offline on the shipped banks), so the game also pauses a 3D sound when it moves out of its event's max distance
+/// (AudioEventInstance3D.SetTransform -> OnInRangeChanged -> Pause). IsInRange starts false and only changes on that
+/// transition, so a sound that STARTS out of range never gets it: every machine of a world loading (the listen host
+/// measured 161 of its 163 playing loops beyond their max, up to 11 km away), and online other players' tools and
+/// explosions start anywhere. Out-of-range sounds now start the way they would have ended up: loops paused (the game
+/// resumes them when they come in range), one-shots not played. The distance is measured fresh, as SetTransform does; a reused instance's IsInRange can be stale.
 /// </summary>
 internal static class SoundRange
 {
@@ -35,7 +37,11 @@ internal static class SoundRange
 		harmony.Patch(AccessTools.Method(typeof(AudioEventInstance), nameof(AudioEventInstance.Play)), prefix: new HarmonyMethod(typeof(SoundRange), nameof(OneShotPrefix)));
 		harmony.Patch(AccessTools.Method(typeof(AudioEngineComponent), nameof(AudioEngineComponent.Play), new[] { typeof(AudioEvent), typeof(WorldTransform), typeof(float) }), prefix: new HarmonyMethod(typeof(SoundRange), nameof(PlayAtPrefix)));
 		harmony.Patch(AccessTools.Method(typeof(AudioEventLoopingInstance3D), nameof(AudioEventLoopingInstance3D.Stop)), prefix: new HarmonyMethod(typeof(SoundRange), nameof(StopPrefix)));
+		harmony.Patch(AccessTools.Method(typeof(AudioEventLoopingInstance3D), nameof(AudioEventLoopingInstance3D.Resume)), prefix: new HarmonyMethod(typeof(SoundRange), nameof(ResumePrefix)));
+		harmony.Patch(AccessTools.Method(typeof(AudioEventInstance3D), nameof(AudioEventInstance3D.UpdatePosition)), postfix: new HarmonyMethod(typeof(SoundRange), nameof(PlacedPostfix)));
 	}
+
+	internal static Vector3D ListenerPosition => _listener!().Position;
 
 	private static readonly AccessTools.FieldRef<AudioEventInstance, FMOD.Studio.EventInstance> Fmod = AccessTools.FieldRefAccess<AudioEventInstance, FMOD.Studio.EventInstance>("_fmodInstance");
 
@@ -47,21 +53,34 @@ internal static class SoundRange
 		if (fadeOut && !__instance.IsInvalid && Fmod(__instance).getPaused(out bool paused) == FMOD.RESULT.OK && paused) fadeOut = false;
 	}
 
-	private static bool Online => ClientWorld.Current != null || HostWorld.Current != null;
-
 	private static bool OutOfRange(AudioEventInstance3D sound)
 	{
-		if (!sound.IsAttached || !Online) return false;
-		double max = sound.MaxDistance;
-		// No max distance (0) means the event is not range-limited; a zero position means it has not been placed yet.
-		if (!(max > 0)) return false;
-		Vector3D at = _position!(sound);
-		if (at == Vector3D.Zero) return false;
-		double distance = (at - _listener!().Position).Length();
-		if (distance < max) return false;
-		Note(sound.ToString(), distance, max);
+		double distance = Distance(sound), max = Range(sound);
+		if (!AudioRouting.OutOfRange(distance, max)) return false;
+		Note(sound.Path.Path, distance, max);
 		return true;
 	}
+
+	// From the listener; 0 when not known yet.
+	private static double Distance(AudioEventInstance3D sound)
+	{
+		if (sound.IsInvalid) return 0;
+		if (sound.IsAttached)
+		{
+			Vector3D at = _position!(sound);
+			return at == Vector3D.Zero ? 0 : (at - _listener!().Position).Length();
+		}
+		// Explosions, shots, impacts and construction stages are not attached; UpdatePosition leaves their
+		// listener-relative position in the FMOD instance (zero until placed).
+		if (Fmod(sound).get3DAttributes(out FMOD.ATTRIBUTES_3D a) != FMOD.RESULT.OK) return 0;
+		return Math.Sqrt(a.position.x * a.position.x + a.position.y * a.position.y + a.position.z * a.position.z);
+	}
+
+	// MaxDistance is the event's capped at AudioConfiguration.MaximumUpdateDistance (500 m): the distance at which
+	// the game pauses a loop. Nothing cuts a one-shot there; explosions are mixed to be heard out to 2 km.
+	private static double Range(AudioEventInstance3D sound) =>
+		sound is AudioEventOneShotInstance3D && Fmod(sound).getDescription(out FMOD.Studio.EventDescription description) == FMOD.RESULT.OK
+			&& description.getMinMaxDistance(out _, out float eventMax) == FMOD.RESULT.OK ? eventMax : sound.MaxDistance;
 
 	private static int _noted;
 
@@ -79,20 +98,45 @@ internal static class SoundRange
 		Interlocked.Increment(ref Silenced);
 	}
 
+	// TickManagementComponent.PauseClient (world load, in-game menu, leaving) calls Set3DScenePaused(false), which
+	// resumes every borrowed sound, including loops the game paused for being out of range; nothing pauses them again
+	// until they cross the range edge twice, so a base's machines kept playing from anywhere.
+	private static bool ResumePrefix(AudioEventLoopingInstance3D __instance) => !OutOfRange(__instance);
+
+	// Explosions call Play before UpdatePosition, so the start-time check could not know where they are.
+	private static void PlacedPostfix(AudioEventInstance3D __instance)
+	{
+		if (__instance.IsAttached || __instance.IsInRange || !OutOfRange(__instance)) return;
+		if (__instance is AudioEventLoopingInstance3D loop) loop.Pause();
+		else Fmod(__instance).stop(FMOD.Studio.STOP_MODE.IMMEDIATE);
+		Interlocked.Increment(ref Silenced);
+	}
+
 	private static bool OneShotPrefix(AudioEventInstance __instance)
 	{
-		if (__instance is not AudioEventOneShotInstance3D oneShot || !OutOfRange(oneShot)) return true;
-		Interlocked.Increment(ref Silenced);
-		return false;
+		if (__instance is not AudioEventOneShotInstance3D oneShot) return true;
+		if (OutOfRange(oneShot))
+		{
+			Interlocked.Increment(ref Silenced);
+			return false;
+		}
+		// Construction and deconstruction stage sounds (Progress_Construction/Deconstruction) are 2D events played on
+		// the block: FMOD ignores their position, so every client heard another player's welding at full volume out to
+		// the event's range. They now fade with distance like a 3D event, full volume within a hand tool's reach.
+		var fmod = Fmod(oneShot);
+		if (fmod.getDescription(out FMOD.Studio.EventDescription description) == FMOD.RESULT.OK && description.is3D(out bool is3D) == FMOD.RESULT.OK && !is3D
+			&& Distance(oneShot) is var distance and > 0 && fmod.getVolume(out float volume) == FMOD.RESULT.OK)
+			fmod.setVolume(volume * AudioRouting.FlatSoundGain(distance, Range(oneShot)));
+		return true;
 	}
 
 	// ISpatialAudioPlayer.Play(event, transform): a one-shot at a point, started before the game ever positions it.
 	private static bool PlayAtPrefix(AudioEngineComponent __instance, AudioEvent audioEvent, WorldTransform transform)
 	{
-		if (!Online || __instance.GetEventDescription(audioEvent) is not { } description || description.getMinMaxDistance(out _, out float max) != FMOD.RESULT.OK) return true;
-		if (!(max > 0) || transform.Position == Vector3D.Zero) return true;
+		if (__instance.GetEventDescription(audioEvent) is not { } description || description.getMinMaxDistance(out _, out float max) != FMOD.RESULT.OK) return true;
+		if (transform.Position == Vector3D.Zero) return true;
 		double distance = __instance.GetDistanceToListener(transform);
-		if (distance < max) return true;
+		if (!AudioRouting.OutOfRange(distance, max)) return true;
 		Note(audioEvent.ToString(), distance, max);
 		Interlocked.Increment(ref Silenced);
 		return false;
