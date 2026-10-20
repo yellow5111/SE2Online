@@ -10,8 +10,8 @@ public static class StreamingRules
 
 	public const double MaxRadius = 1_000_000;
 
-	/// <summary>Dedicated servers stream by default (server.json Network.StreamingRadiusMeters 0 turns it off); listen hosts do not.</summary>
-	public const double DedicatedDefaultRadius = 5000;
+	/// <summary>Dedicated servers send the whole world by default, as SE2 4.0 itself does; server.json Network.StreamingRadiusMeters opts in to streaming.</summary>
+	public const double DedicatedDefaultRadius = 0;
 
 	/// <summary>Whether a joiner should have a group at <paramref name="distance"/> metres; 0 or less turns streaming off.</summary>
 	public static bool Keep(bool present, double distance, double radius) =>

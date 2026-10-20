@@ -5,6 +5,7 @@ using Avalonia.Controls.Templates;
 using Avalonia.Threading;
 using Keen.VRage.Library.Utils;
 using Keen.VRage.UI.Screens;
+using Y51_SE2Online.KeenNetcode;
 using Y51_SE2Online.Sync;
 
 namespace Y51_SE2Online.SyncEngine;
@@ -24,7 +25,7 @@ public sealed class RespawnScreen : ScreenView
     /// <summary>Opens the screen while the host waits for our choice, and closes it once we have chosen.</summary>
     internal static void Tick()
     {
-        var menu = ClientWorld.Current?.BoundSession?.SpawnMenu;
+        var menu = KeenRespawn.Menu;
         if (menu == null)
         {
             if (_open != null) { _open.Dispose(); _open = null; }
@@ -55,13 +56,13 @@ public sealed class RespawnScreen : ScreenView
     private void Choose()
     {
         if (_menu == null || _options.SelectedItem is not SpawnOption { Available: true } option) return;
-        ClientWorld.Current?.BoundSession?.ChooseSpawn(Array.IndexOf(_menu.Options, option));
+        KeenRespawn.Choose(Array.IndexOf(_menu.Options, option));
         _model?.Close();
     }
 
     private void Refresh()
     {
-        var menu = ClientWorld.Current?.BoundSession?.SpawnMenu;
+        var menu = KeenRespawn.Menu;
         if (menu == null || ReferenceEquals(menu, _menu)) return;
         _menu = menu;
         _status.Text = menu.Message.Length > 0 ? menu.Message : menu.Respawn ? "You died. Choose where to respawn." : "Choose where to spawn.";

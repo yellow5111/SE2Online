@@ -26,14 +26,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Reference Include="Avalonia.Base;Avalonia.Controls;Avalonia.Markup;Avalonia.Markup.Xaml;Game2.Client;Game2.Game;Game2.Simulation;SpaceEngineers2;Steamworks.NET;VRage.Animation;VRage.Animation.Client;VRage.Audio;VRage.Core;VRage.Core.Game;VRage.DCS;VRage.Game;VRage.Game.Client;VRage.Input;VRage.Library;VRage.Multiplayer;VRage.Physics;VRage.Render;VRage.UI;VRage.UI.Shared;VRage.Voxels;VRage.Water;VRage.Water.Client">
+    <Reference Include="Avalonia.Base;Avalonia.Controls;Avalonia.Markup;Avalonia.Markup.Xaml;Game2.Client;Game2.Game;Game2.Simulation;SpaceEngineers2;Steamworks.NET;VRage.Animation.Client;VRage.Audio;VRage.Core;VRage.Core.Game;VRage.DCS;VRage.Game;VRage.Game.Client;VRage.Input;VRage.Library;VRage.Multiplayer;VRage.Physics;VRage.Steam;VRage.Render;VRage.UI;VRage.UI.Shared;VRage.Voxels;VRage.Water;VRage.Water.Client">
       <HintPath>$(SE2Bin)\%(Identity).dll</HintPath>
       <Private>False</Private>
     </Reference>
-    <Publicize Include="Game2.Client;Game2.Simulation;SpaceEngineers2;VRage.Multiplayer;VRage.Water" IncludeVirtualMembers="false" />
+    <Publicize Include="Game2.Client;Game2.Game;Game2.Simulation;SpaceEngineers2;VRage.Multiplayer;VRage.Steam;VRage.Water" IncludeVirtualMembers="false" />
     <Publicize Include="VRage.Physics" IncludeVirtualMembers="false" />
   </ItemGroup>
-
   <ItemGroup>
     <None Update="Content\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Remove="Tools\**" />

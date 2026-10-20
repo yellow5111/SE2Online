@@ -31,7 +31,7 @@ public sealed class OnlineScreenViewModel : ScreenViewModel
     protected override void OnCloseRequested() { if (!KeyBindButton.Listening) base.OnCloseRequested(); }
 }
 
-public sealed class OnlineScreen : ScreenView
+public sealed partial class OnlineScreen : ScreenView
 {
     private readonly TextBlock _status = OnlineUi.Text("Offline", "SubTitle");
     private readonly TextBlock _message = OnlineUi.Text("", "SubtleNotice", 21);
@@ -48,6 +48,7 @@ public sealed class OnlineScreen : ScreenView
     private readonly Grid _sessionPage = new() { RowDefinitions = new RowDefinitions("Auto,*") };
     private readonly TextBox _address = OnlineUi.Input("IP address:port", 100);
     private readonly TextBox _steamId = OnlineUi.Input("Host's SteamID64", 17);
+    private readonly TextBox _joinCode = OnlineUi.Input("ABCD-1234", 9);
     private readonly TextBox _name = OnlineUi.Input("Use Steam name", 32);
     private readonly TextBox _sessionName = OnlineUi.Input("My SE2 session", 80);
     private readonly TextBox _description = OnlineUi.Input("Describe your world", 500);
@@ -57,11 +58,9 @@ public sealed class OnlineScreen : ScreenView
     private readonly TextBox _bind = OnlineUi.Input("0.0.0.0", 100);
     private readonly TextBox _port = OnlineUi.Input("7742", 5);
     private readonly TextBox _publicAddress = OnlineUi.Input("Optional public IP address:port", 100);
-    private readonly OnlineToggle _advertise = new OnlineToggle("List this session in the public directory");
     private readonly OnlineToggle _directIp = new OnlineToggle("Allow connections by IP address");
     private readonly OnlineToggle _waterSync = new OnlineToggle("Water sync (experimental)", "Synchronizes water between players.",
         "Performance heavy and uses extra bandwidth; not meant for full time use as water is not officially in the game yet!");
-    private readonly OnlineToggle _friendsOnly = new OnlineToggle("Only Steam friends may join");
     private readonly OnlineToggle _team = new OnlineToggle("Keep existing grids shared when upgrading an older world");
     private readonly OnlineToggle _research = new OnlineToggle("Share research progression");
     private readonly OnlineToggle _turrets = new OnlineToggle("PvP: players can damage each other; turrets attack players outside your faction");
@@ -80,6 +79,7 @@ public sealed class OnlineScreen : ScreenView
     private readonly TextBox _password = new() { Watermark = "No password", MaxLength = 64, FontSize = 24, MinHeight = 50, PasswordChar = '*' };
     private readonly KeyBindButton _chatKey = new(), _playersKey = new(), _adminKey = new(), _broadcastKey = new(), _voiceKey = new(), _emoteKey = new();
     private readonly OnlineToggle _raid = new OnlineToggle("Offline raid protection: players cannot damage the grids of players who are offline");
+    private readonly OnlineToggle _offlineStats = new OnlineToggle("Pause offline players' survival stats: suit energy, oxygen and hydrogen stay as they were until the player is back");
     private readonly TextBox _pcu = OnlineUi.Input("World's limit", 9), _dayLength = OnlineUi.Input("World's setting", 6), _streaming = OnlineUi.Input("0", 7);
     private static readonly string[] SunChoices = { "World's setting", "The sun moves", "The sun is stopped" };
     private readonly ComboBox _sun = new()
@@ -103,48 +103,48 @@ public sealed class OnlineScreen : ScreenView
     private readonly (Slider S, Control Row) _playerInventory = SizeSlider(), _cargoInventory = SizeSlider();
     private static (Slider, Control) SizeSlider() => OnlineUi.Slider(InventoryMultipliers.Min * 10, InventoryMultipliers.Max * 10, 1, v => ResourceMultipliers.Format(v / 10.0));
     private static (Slider, Control) Usage() => OnlineUi.Slider(0, ResourceMultipliers.Max * 10, 1, v => ResourceMultipliers.Format(v / 10.0));
-    private readonly Button _host, _joinAddress, _joinId, _leave, _load, _create, _save, _hostSave, _players;
+    private readonly Button _joinAddress, _joinId, _joinByCode, _leave, _save, _players;
+    private Button _host, _load, _create, _hostSave;
     private readonly Button[] _navigation;
     private readonly Button[] _sessionButtons;
     private readonly Control[] _pages;
     private OnlineScreenViewModel _model;
     private bool _closed;
 
+    /// <summary>The open Online screen (test screenshots).</summary>
+    internal static OnlineScreen Last => _last != null && _last.TryGetTarget(out var screen) && !screen._closed ? screen : null;
+    private static WeakReference<OnlineScreen> _last;
+
+    internal void Close() => (DataContext as OnlineScreenViewModel)?.Close();
+
     public OnlineScreen()
     {
+        _last = new WeakReference<OnlineScreen>(this);
         OnDisposing += _ => { _closed = true; if (_model != null) _model.Refresh -= QueueRefresh; };
         _limit.S.PropertyChanged += (_, e) => { if (e.Property == Avalonia.Controls.Primitives.RangeBase.ValueProperty) _limitWarning.IsVisible = OnlineSettings.Unstable((int)Math.Round(_limit.S.Value)); };
         ReadSettings();
         _limitWarning.IsVisible = OnlineSettings.Unstable((int)Math.Round(_limit.S.Value));
         _joinAddress = OnlineUi.Button("Connect to address", () => MpMenu.JoinAddress(_address.Text ?? ""), "ConnectAddress", true);
         _joinId = OnlineUi.Button("Join Steam host", () => MpMenu.Activate(MpMenu.Settings.JoinOptions(MpOptions.ParseSteamId(_steamId.Text), false)), "ConnectSteam");
+        _joinByCode = OnlineUi.Button("Join with code", () => MpMenu.JoinCode(_joinCode.Text ?? ""), "ConnectCode", true);
         _address.TextChanged += (_, _) => RefreshControls();
         _steamId.TextChanged += (_, _) => RefreshControls();
-        var direct = OnlineUi.Columns(
+        _joinCode.TextChanged += (_, _) => RefreshControls();
+        _joinCode.FontSize = 32; _joinCode.MinHeight = 60;
+        var direct = OnlineUi.Columns(OnlineUi.Scroll(OnlineUi.Stack(
             OnlineUi.Section("DIRECT CONNECT", OnlineUi.Text("Connect directly to a dedicated server or a player's IP address."),
                 OnlineUi.Text("Ask the host for their address and port. Enter IPv6 addresses in brackets.", "SubtleNotice", 22),
-                _address, OnlineUi.Text("IPv4: 203.0.113.10:7742\nIPv6: [2001:db8::10]:7742", "SubtleNotice", 22), _joinAddress),
+                _address, OnlineUi.Text("IPv4: 203.0.113.10:7742\nIPv6: [2001:db8::10]:7742", "SubtleNotice", 22), _joinAddress))),
+            OnlineUi.Scroll(OnlineUi.Stack(
+            OnlineUi.Section("JOIN CODE", OnlineUi.Text("Enter the 8-character code from the host's Host page."), _joinCode, _joinByCode),
             OnlineUi.Section("STEAM HOST", OnlineUi.Text("Join a player-hosted session using the host's Steam ID."), _steamId, _joinId,
-                OnlineUi.Text("Both players need the same multiplayer version. Friends-only sessions still require a Steam friendship.", "SubtleNotice", 22)), "*,24,600");
-        _host = OnlineUi.Button("Start hosting", StartHost, "StartHosting", true);
-        _load = OnlineUi.Button(OnlineUi.Localize("MenuLoadGame", "Load world"), () => MpMenu.ChooseWorld(false), "LoadWorld", true);
-        _create = OnlineUi.Button(OnlineUi.Localize("MenuNewGame", "New world"), () => MpMenu.ChooseWorld(true), "CreateWorld", true);
-        _hostSave = OnlineUi.Button("Apply host settings", Save, "SaveHostSettings");
-        var hosting = OnlineUi.Scroll(OnlineUi.Stack(
-            OnlineUi.Section("HOST A SESSION", OnlineUi.Text("Host your current world, or start hosting and then load or create a world."),
-                OnlineUi.Row(_host, _load, _create), OnlineUi.Field("Session name", _sessionName), OnlineUi.Field("Description", _description), OnlineUi.Field("Country", _country, "auto finds it from your IP, or a 2-letter code like US, GB, DE"),
-                OnlineUi.Field("Maximum players", _limit.Row, $"{OnlineSettings.MinPlayers}-{OnlineSettings.PlayerLimit} players, including you", _limitWarning), OnlineUi.Field("Join password", _password, "Optional. Admins can join without it."), _friendsOnly, _advertise,
-                _waterSync, _buildGhosts),
-            OnlineUi.Section("MESSAGE OF THE DAY", OnlineUi.Text("Shown to each player after they spawn. {player}, {server}, {online} and {max} are filled in.", "SubtleNotice", 21),
-                OnlineUi.Field("Title", _motdTitle, "Empty uses the session name"), OnlineUi.Field("Message", _motd, "A message set in the admin panel replaces this one for that world")),
-            OnlineUi.Section("DIRECT IP CONNECTIONS", _directIp, OnlineUi.Field("Bind address", _bind, "0.0.0.0 listens on all IPv4 interfaces"),
-                OnlineUi.Field("Listen port", _port), OnlineUi.Field("Public address", _publicAddress, "Shown in the directory for direct connections"),
-                OnlineUi.Text("Remote players need a reachable IP address and the listen port open on your router and firewall.", "SubtleNotice", 22), _hostSave)));
+                OnlineUi.Text("Both players need the same multiplayer version. Friends-only sessions still require a Steam friendship.", "SubtleNotice", 22)))), "*,24,640");
+        var hosting = BuildHostPage();
         _save = OnlineUi.Button(OnlineUi.Localize("SaveSettings", "Save settings"), Save, "SaveOnlineSettings", true);
         var settings = OnlineUi.Scroll(OnlineUi.Stack(
             OnlineUi.Section("PLAYER", OnlineUi.Field("Player name", _name), _nametags, OnlineUi.Field("Name tag range", _range.Row, "How far away player name tags show"),
                 OnlineUi.Text("Connection diagnostics: press F11 in game until the Space Engineers 2 Online stats page shows.", "SubtleNotice", 21)),
-            OnlineUi.Section("WORLD RULES", OnlineUi.Text("New grids are private. Use Grid ownership and Factions in the pause menu to control sharing.", "SubtleNotice", 21), _team, _research, _turrets, _raid, _spawn,
+            OnlineUi.Section("WORLD RULES", OnlineUi.Text("New grids are private. Use Grid ownership and Factions in the pause menu to control sharing.", "SubtleNotice", 21), _team, _research, _turrets, _raid, _offlineStats, _spawn,
                 OnlineUi.Field("PCU limit per player", _pcu, "Empty keeps the world's limit, 0 is unlimited"),
                 OnlineUi.Field("Energy usage", _energyUse.Row, "Suit energy, jetpack and tools, and block power use. x1 is normal, x0 uses none"),
                 OnlineUi.Field("Hydrogen usage", _hydrogenUse.Row, "Jetpack boost and hydrogen thrusters and engines"),
@@ -194,7 +194,7 @@ public sealed class OnlineScreen : ScreenView
         RefreshControls();
     }
 
-    private void SelectPage(int index)
+    internal void SelectPage(int index)
     {
         _page.Content = _pages[index];
         for (int i = 0; i < _navigation.Length; i++) { if (i == index) _navigation[i].Classes.Add("Selected"); else _navigation[i].Classes.Remove("Selected"); }
@@ -221,14 +221,17 @@ public sealed class OnlineScreen : ScreenView
         string directoryMessage = hosting ? NetSession.Current?.DirectoryError : (_page.Content is OnlineDirectoryView || _page.Content == _sessionPage && _sessionSource.Content == _sessions) ? MpMenu.DirectoryError : "";
         _message.Text = string.Join("  /  ", new[] { actionMessage, directoryMessage }.Where(m => !string.IsNullOrWhiteSpace(m)).Distinct());
         _message.IsVisible = !string.IsNullOrWhiteSpace(_message.Text);
+        RefreshHostPage(busy, hosting);
         _host.IsEnabled = !busy && !hosting && MpPlugin.SteamAvailable;
+        _joinByCode.IsEnabled = !busy && MpPlugin.SteamAvailable && Keen.VRage.Core.Services.GameSessions.SessionJoinCode.TryParse(_joinCode.Text?.Trim(), out _);
         _load.IsEnabled = _create.IsEnabled = !busy && !MpMenu.HasWorld && hosting;
         _joinAddress.IsEnabled = !busy && !string.IsNullOrWhiteSpace(_address.Text);
         _joinId.IsEnabled = !busy && MpPlugin.SteamAvailable && ulong.TryParse(_steamId.Text, out var id) && id != 0;
         // Joiners leave with Exit to Menu / Exit to Windows; retrying lives in the join failure dialog.
-        _leave.IsVisible = hosting;
+        _leave.IsVisible = hosting && _page.Content != _pages?[3];
         _leave.IsEnabled = !busy;
         _players.IsEnabled = controller?.Current != null;
+        _players.IsVisible = _page.Content != _pages?[3] || !hosting;
         _save.IsEnabled = _hostSave.IsEnabled = !busy;
         _bind.IsEnabled = _port.IsEnabled = _publicAddress.IsEnabled = _directIp.IsChecked == true;
         if (_page.Content is OnlineDirectoryView browser) browser.Refresh();
@@ -240,8 +243,8 @@ public sealed class OnlineScreen : ScreenView
     {
         var s = MpMenu.Settings;
         _name.Text = s.PlayerName; _sessionName.Text = s.SessionName; _description.Text = s.Description; _country.Text = s.Country;
-        _limit.S.Value = Math.Clamp(s.MaxPlayers, OnlineSettings.MinPlayers, OnlineSettings.PlayerLimit); _friendsOnly.IsChecked = s.FriendsOnly;
-        _advertise.IsChecked = s.Advertise; _directIp.IsChecked = s.AllowDirectIp; _waterSync.IsChecked = s.WaterSync; _buildGhosts.IsChecked = s.BuildGhosts;
+        _limit.S.Value = Math.Clamp(s.MaxPlayers, OnlineSettings.MinPlayers, OnlineSettings.PlayerLimit); ReadVisibility(s);
+        _directIp.IsChecked = s.AllowDirectIp; _waterSync.IsChecked = s.WaterSync; _buildGhosts.IsChecked = s.BuildGhosts;
         _bind.Text = s.BindAddress; _port.Text = s.ListenPort.ToString(CultureInfo.InvariantCulture); _publicAddress.Text = s.PublicAddress;
         _team.IsChecked = s.TeamGrids; _research.IsChecked = s.SharedResearch; _turrets.IsChecked = s.Pvp; _nametags.IsChecked = s.Nametags;
         _range.S.Value = Math.Clamp(s.NametagRange, 50, 10000); _spawn.IsChecked = s.SpawnNearHost;
@@ -251,7 +254,7 @@ public sealed class OnlineScreen : ScreenView
         _hacking.IsChecked = s.Hacking; _hackPlayers.IsChecked = s.AllowHackingPlayerGrids; _hackTime.S.Value = Math.Clamp(s.HackTimeMultiplier * 10, 1, 100);
         _voice.IsChecked = s.VoiceEnabled; _openMic.IsChecked = s.VoiceOpenMic; _voiceVolume.S.Value = Math.Clamp(s.VoiceVolume, 0, 200); _voiceRadius.S.Value = Math.Clamp(s.VoiceRadiusMeters, 0, 500);
         _reconnect.IsChecked = s.AutoReconnect; _updates.IsChecked = s.CheckForUpdates; _autoUpdate.IsChecked = s.AutoUpdate; _smoothing.S.Value = Math.Clamp(s.InterpolationMs, 0, 250); _bandwidth.S.Value = Math.Clamp(s.StateBudgetKiB, 32, 4096);
-        _raid.IsChecked = s.OfflineRaidProtection; _pcu.Text = s.PcuLimit?.ToString(CultureInfo.InvariantCulture) ?? "";
+        _raid.IsChecked = s.OfflineRaidProtection; _offlineStats.IsChecked = s.PauseOfflineStats; _pcu.Text = s.PcuLimit?.ToString(CultureInfo.InvariantCulture) ?? "";
         _sun.SelectedIndex = s.SunRotation switch { null => 0, true => 1, false => 2 }; _dayLength.Text = s.SunPeriodMinutes?.ToString(CultureInfo.InvariantCulture) ?? "";
         _streaming.Text = s.StreamingRadiusMeters.ToString(CultureInfo.InvariantCulture);
         foreach (var (toggle, key) in _ships) toggle.IsChecked = s.RespawnShips is not { Count: > 0 } || s.RespawnShips.Contains(key, StringComparer.OrdinalIgnoreCase);
@@ -273,15 +276,15 @@ public sealed class OnlineScreen : ScreenView
         {
             ServersDirectory = MpMenu.Settings.ServersDirectory, SessionsDirectory = MpMenu.Settings.SessionsDirectory,
             PlayerName = _name.Text ?? "", SessionName = _sessionName.Text ?? "", Description = _description.Text ?? "", Country = _country.Text ?? "", MaxPlayers = limit,
-            FriendsOnly = _friendsOnly.IsChecked == true, Advertise = _advertise.IsChecked == true, AdvertiseChosen = true, AllowDirectIp = _directIp.IsChecked == true, WaterSync = _waterSync.IsChecked == true, BuildGhosts = _buildGhosts.IsChecked == true,
+            FriendsOnly = _visibility == FriendsOnly, Advertise = _visibility == Public, AdvertiseChosen = true, AllowDirectIp = _directIp.IsChecked == true, WaterSync = _waterSync.IsChecked == true, BuildGhosts = _buildGhosts.IsChecked == true,
             BindAddress = _bind.Text ?? "", ListenPort = port, PublicAddress = _publicAddress.Text ?? "",
             TeamGrids = _team.IsChecked == true, SharedResearch = _research.IsChecked == true, Pvp = _turrets.IsChecked == true, Nametags = _nametags.IsChecked == true, NametagRange = range,
             SpawnNearHost = _spawn.IsChecked == true, AutoReconnect = _reconnect.IsChecked == true, CheckForUpdates = _updates.IsChecked == true, AutoUpdate = _autoUpdate.IsChecked == true, InterpolationMs = smoothing, StateBudgetKiB = bandwidth,
             Password = _password.Text ?? "", ChatKey = _chatKey.Binding, PlayersKey = _playersKey.Binding, AdminKey = _adminKey.Binding, BroadcastKey = _broadcastKey.Binding, SuitBroadcast = MpMenu.Settings.SuitBroadcast, SkippedUpdate = MpMenu.Settings.SkippedUpdate,
-            StreamingRadiusMeters = streaming ?? 0, OfflineRaidProtection = _raid.IsChecked, PcuLimit = (int?)pcu,
+            StreamingRadiusMeters = streaming ?? 0, OfflineRaidProtection = _raid.IsChecked, PauseOfflineStats = _offlineStats.IsChecked, PcuLimit = (int?)pcu,
             SunRotation = _sun.SelectedIndex switch { 1 => true, 2 => false, _ => null }, SunPeriodMinutes = day,
             // Every ship ticked is stored as "all", so ships a later version adds are offered too.
-            RespawnShips = ships.Length == _ships.Length ? new() : ships.ToList(), RespawnShipCooldownMinutes = (int)Math.Round(_shipCooldown.S.Value),
+            RespawnShips = ships.Length == _ships.Length ? new() : ships.Length == 0 ? new() { RespawnShips.None } : ships.ToList(), RespawnShipCooldownMinutes = (int)Math.Round(_shipCooldown.S.Value),
             Motd = _motd.Text ?? "", MotdTitle = (_motdTitle.Text ?? "").Trim(), MaxModDownloadGiB = MpMenu.Settings.MaxModDownloadGiB,
             VoiceKey = _voiceKey.Binding, EmoteKey = _emoteKey.Binding, VoiceEnabled = _voice.IsChecked == true, VoiceOpenMic = _openMic.IsChecked == true, VoiceVolume = (int)Math.Round(_voiceVolume.S.Value), VoiceRadiusMeters = Math.Round(_voiceRadius.S.Value),
             MutedVoices = MpMenu.Settings.MutedVoices,

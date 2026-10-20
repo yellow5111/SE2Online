@@ -108,24 +108,4 @@ internal static class NameSync
         return false;
     }
 
-    private static readonly ConditionalWeakTable<object, object> Followed = new();
-
-    /// <summary>Called while a control panel is open: its grid and block rows follow their models' names.</summary>
-    internal static void Follow(ControlPanelViewModel panel)
-    {
-        foreach (var grid in panel._grids)
-        {
-            Follow(grid, grid.Model, () => grid.DisplayName = grid.Model.DisplayName);
-            foreach (var block in grid.Blocks)
-                Follow(block, block._visualsDetailModel, () => block.DisplayName = block._visualsDetailModel.DisplayName);
-        }
-    }
-
-    private static void Follow(object row, INotifyPropertyChanged source, Action apply)
-    {
-        if (source == null || Followed.TryGetValue(row, out _)) return;
-        Followed.Add(row, null);
-        source.PropertyChanged += (_, e) => { if (e.PropertyName == "DisplayName") apply(); };
-        apply();
-    }
 }

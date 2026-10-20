@@ -52,8 +52,8 @@ internal static class StatusOverlay
 				_lost = _root.RegisterChild("State packets lost", StatKind.Raw, "0");
 				_gaps = _root.RegisterChild("Sequence gaps", StatKind.Raw, "0");
 				_errors = _root.RegisterChild("Protocol errors", StatKind.Raw, "0");
-				_desyncRepairs = _root.RegisterChild("Desync repairs (host)", StatKind.Raw, "0");
-				_desyncMismatches = _root.RegisterChild("Desync mismatches (host: reported to it, client: reported)", StatKind.Raw, "0");
+				_desyncRepairs = _root.RegisterChild("Stale replication entries and signals skipped", StatKind.Raw, "0");
+				_desyncMismatches = _root.RegisterChild("Access refused (server)", StatKind.Raw, "0");
 				_peers = _root.RegisterChild("Ping per player (ms)", StatKind.None);
 				_frames = _root.RegisterChild("Server frames (host, last second)", StatKind.None);
 				_frameP50 = _frames.RegisterChild("Frame p50 (ms)", StatKind.Raw, "0.0");
@@ -85,7 +85,7 @@ internal static class StatusOverlay
 			_rtt.Set((float)rtt); _avgRtt.Set((float)avg); _maxRtt.Set((float)max);
 			_sent.Set((float)sent); _received.Set((float)received); _queued.Set((float)queued);
 			_lost.Set((float)lost); _gaps.Set((float)gaps); _errors.Set((float)errors);
-			_desyncRepairs.Set(Sync.DesyncStats.Repairs); _desyncMismatches.Set(Sync.DesyncStats.Mismatches + Sync.DesyncStats.ReportedOut);
+			_desyncRepairs.Set(KeenNetcode.ResilientReplication.Dropped + KeenNetcode.ResilientReplication.SignalsSkipped); _desyncMismatches.Set(KeenNetcode.ServerAccess.Refused);
 			_worstQueue.Set((float)worstQueue);
 			if (ServerProfiler.LastSecond is { Frames: > 0 } second)
 			{

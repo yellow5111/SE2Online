@@ -240,6 +240,7 @@ public sealed partial class HostSession : IStorySink
 
 	public HostSession(ITransport transport, IMpLog log, IHostWorld world, TypeKeyTable keys, HostSyncOptions options, Func<long>? clock = null)
 	{
+		AccessBypass.Clear();
 		_t = transport;
 		_log = log;
 		_world = world;
@@ -579,10 +580,13 @@ public sealed partial class HostSession : IStorySink
 	/// <summary>The host player's stable identity key, the one its identity would be derived from as a client.</summary>
 	public string HostKey => PlayerIdentities.KeyFor(new PeerId(_o.HostSteamId), string.IsNullOrWhiteSpace(_o.HostName) ? "?" : _o.HostName.Trim());
 
+	/// <summary>The hosting player's identity in the loaded world (SE2 4.0 picks it when the world loads).</summary>
+	public long HostIdentity { get => _o.HostIdentity; set { _o.HostIdentity = value; Interlocked.Increment(ref PlayerTableVersion); } }
+
 	public List<PlayerInfo> PlayerTable()
 	{
 		var table = new List<PlayerInfo>();
-		if (_o.HostCountsAsPlayer) table.Add(new PlayerInfo(1, 1559595546L, -1559595548L, _o.HostName, Connected: true));
+		if (_o.HostCountsAsPlayer) table.Add(new PlayerInfo(1, _o.HostIdentity, _o.HostIdentity, _o.HostName, Connected: true));
 		lock (_sync)
 		{
 			foreach (PlayerRecord p in _players.Values)
@@ -923,6 +927,11 @@ public sealed partial class HostSession : IStorySink
 				_log.Warn($"sync(host): ClientId {player.ClientId} asked for a character before its world was captured; ignored");
 				break;
 			}
+			if (reason == CharacterRequestMessage.Possessed)
+			{
+				_world.OnPossessed(player.ClientId);
+				break;
+			}
 			if (player.CharacterNetId != 0)
 			{
 				_t.Send(peer, Channel.Control, PlayerAssignMessage.Encode(player.ClientId, 0, player.CharacterNetId, "already assigned"));
@@ -1207,6 +1216,7 @@ public sealed partial class HostSession : IStorySink
 				}
 			}
 		}
+		List<(List<int> At, byte[] Encoded)>? filtered = null;
 		lock (_sync)
 		{
 			foreach (RemoteClient client in _clients.Values)
@@ -1218,22 +1228,33 @@ public sealed partial class HostSession : IStorySink
 				byte[] mine = batch;
 				int count = commands.Count;
 				var streamedOut = client.StreamedOut;
+				bool shared = false;
 				if (roots != null && streamedOut.Count > 0)
 				{
 					Predicate<uint> isOut = streamedOut.Contains;
-					var kept = new List<WireCommand>(commands.Count);
+					var keptAt = new List<int>(commands.Count);
 					for (int i = 0; i < commands.Count; i++)
 					{
-						if (!Array.Exists(roots[i], isOut)) kept.Add(commands[i]);
+						if (!Array.Exists(roots[i], isOut)) keptAt.Add(i);
 					}
-					if (kept.Count == 0)
+					if (keptAt.Count == 0)
 					{
 						continue;
 					}
-					if (kept.Count != commands.Count)
+					if (keptAt.Count != commands.Count)
 					{
-						mine = SignalBatchMessage.Encode(0u, hostTick, kept);
-						count = kept.Count;
+						// Players near each other keep the same commands: one encode per distinct selection, not per player.
+						int match = filtered?.FindIndex(f => f.At.SequenceEqual(keptAt)) ?? -1;
+						byte[] encoded;
+						if (match >= 0) encoded = filtered![match].Encoded;
+						else
+						{
+							encoded = SignalBatchMessage.Encode(0u, hostTick, keptAt.ConvertAll(i => commands[i]));
+							(filtered ??= new()).Add((keptAt, encoded));
+						}
+						mine = encoded;
+						shared = true;
+						count = keptAt.Count;
 					}
 				}
 				int length = mine.Length;
@@ -1245,7 +1266,7 @@ public sealed partial class HostSession : IStorySink
 				}
 				else
 				{
-					copy = mine == batch ? (byte[])batch.Clone() : mine;
+					copy = mine == batch || shared ? (byte[])mine.Clone() : mine;
 					EntityBundleMessage.SetLifeSeq(copy, client.NextLifeSeq++);
 				}
 				_t.Send(client.Peer, length > 8192 ? Channel.Bulk : Channel.Control, copy);
@@ -1345,6 +1366,31 @@ public sealed partial class HostSession : IStorySink
 	{
 		_log.Error($"sync(host): rejecting {peer}: {why}");
 		_t.Send(peer, Channel.Control, TextMessage.Encode(SyncMsg.JoinReject, code, why));
+		_world.Rejected(peer, why);
+	}
+
+	/// <summary>SE2 4.0: Keen's netcode sends the world, so an admitted player gets the accept and nothing else.</summary>
+	public void AcceptKeen(PeerId peer)
+	{
+		if (!BeginCapture(peer, 0, out _)) return;
+		RemoteClient client;
+		lock (_sync)
+		{
+			_clients.TryGetValue(peer, out client);
+		}
+		if (client == null) return;
+		var accept = new JoinAccept
+		{
+			WorldName = _world.WorldName,
+			ClientId = client.Player?.ClientId ?? 0,
+			Settings = _o.Settings,
+			IdentityId = client.Player?.IdentityId ?? 0,
+			PlayerId = client.Player?.PlayerId ?? 0,
+			Players = PlayerTable(),
+			Mods = _world.Mods.ToList()
+		};
+		_t.Send(peer, Channel.Control, accept.Encode());
+		_log.Info($"sync(host): {peer} '{client.Name}' admitted; the game's own netcode sends the world");
 	}
 
 	public bool BeginCapture(PeerId peer, out uint worldLifeSeq) => BeginCapture(peer, 1, out worldLifeSeq);

@@ -32,6 +32,49 @@ public static class StateBands
 }
 
 /// <summary>
+/// One player's bands: the roots near it listed one by one, every other root of a shared set (built once for all
+/// players) <see cref="StateBands.Far"/>, anything else unlisted. Building it costs what is near the player, not the world.
+/// </summary>
+public sealed class BandMap : IReadOnlyDictionary<uint, byte>
+{
+	private readonly Dictionary<uint, byte> _near;
+	private readonly IReadOnlySet<uint> _far;
+
+	public BandMap(Dictionary<uint, byte> near, IReadOnlySet<uint> far)
+	{
+		_near = near;
+		_far = far;
+	}
+
+	public bool TryGetValue(uint key, out byte value)
+	{
+		if (_near.TryGetValue(key, out value)) return true;
+		value = StateBands.Far;
+		return _far.Contains(key);
+	}
+
+	public byte this[uint key] => TryGetValue(key, out byte v) ? v : throw new KeyNotFoundException();
+
+	public bool ContainsKey(uint key) => _near.ContainsKey(key) || _far.Contains(key);
+
+	/// <summary>Roots below full rate are not counted one by one; this is the near list plus the shared set.</summary>
+	public int Count => _near.Count + _far.Count;
+
+	public IEnumerable<uint> Keys { get { foreach (var kv in this) yield return kv.Key; } }
+
+	public IEnumerable<byte> Values { get { foreach (var kv in this) yield return kv.Value; } }
+
+	public IEnumerator<KeyValuePair<uint, byte>> GetEnumerator()
+	{
+		foreach (var kv in _near) yield return kv;
+		foreach (uint id in _far)
+			if (!_near.ContainsKey(id)) yield return new KeyValuePair<uint, byte>(id, StateBands.Far);
+	}
+
+	System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+}
+
+/// <summary>
 /// Host state fan-out. One shared table holds the newest encoded value per (NetId, key), grouped by root entity; the
 /// per-key rate caps apply there once for everyone, and a value that did not change goes out again at most once a
 /// second. Each client only keeps, per root, what it was last sent and when that root is due again (its band sets the
@@ -56,6 +99,7 @@ public sealed class StateFanout
 		public int CapMs;
 		public bool Held, Dead;
 		public Root? Owner;
+		public LinkedListNode<Slot>? Node;
 	}
 
 	private sealed class Root
@@ -65,7 +109,9 @@ public sealed class StateFanout
 		public int Gen;
 		public long Seq;
 		public long ListedTick = -1;
-		public readonly List<Slot> Slots = new();
+		/// <summary>Oldest send first: a client's unsent values are a tail of this list, so a big grid with one changed
+		/// block costs that block, not all of its values, per client and emit.</summary>
+		public readonly LinkedList<Slot> Slots = new();
 	}
 
 	public sealed class Client
@@ -270,10 +316,8 @@ public sealed class StateFanout
 				continue;
 			}
 			int cost = 0;
-			foreach (var slot in root.Slots)
-			{
-				if (slot.Seq > c.SentSeq[i]) cost += slot.Wire.Length;
-			}
+			long sentSeq = c.SentSeq[i];
+			for (var node = root.Slots.Last; node != null && node.Value.Seq > sentSeq; node = node.Previous) cost += node.Value.Wire.Length;
 			if (cost == 0)
 			{
 				c.IsPending[i] = false;
@@ -297,8 +341,11 @@ public sealed class StateFanout
 			}
 			var root = _roots[i]!;
 			long sent = c.SentSeq[i];
-			foreach (var slot in root.Slots)
+			var first = root.Slots.Last;
+			while (first?.Previous != null && first.Previous.Value.Seq > sent) first = first.Previous;
+			for (var node = first; node != null; node = node.Next)
 			{
+				var slot = node.Value;
 				if (slot.Seq <= sent) continue;
 				if (pos + slot.Wire.Length > maxMessageBytes && pos > StateBatchMessage.HeaderBytes)
 				{
@@ -372,6 +419,11 @@ public sealed class StateFanout
 		slot.Held = false;
 		var root = slot.Owner!;
 		root.Seq = slot.Seq;
+		if (slot.Node != null && slot.Node != root.Slots.Last)
+		{
+			root.Slots.Remove(slot.Node);
+			root.Slots.AddLast(slot.Node);
+		}
 		if (root.ListedTick != _tick)
 		{
 			root.ListedTick = _tick;
@@ -398,7 +450,10 @@ public sealed class StateFanout
 			_rootById[rootId] = root;
 		}
 		slot.Owner = root;
-		root.Slots.Add(slot);
+		// In send order: a slot moving over keeps its old Seq until its next bump.
+		var after = root.Slots.Last;
+		while (after != null && after.Value.Seq > slot.Seq) after = after.Previous;
+		slot.Node = after == null ? root.Slots.AddFirst(slot) : root.Slots.AddAfter(after, slot);
 		root.Seq = Math.Max(root.Seq, slot.Seq);
 	}
 
@@ -407,7 +462,8 @@ public sealed class StateFanout
 		var root = slot.Owner;
 		if (root == null) return;
 		slot.Owner = null;
-		root.Slots.Remove(slot);
+		if (slot.Node != null) root.Slots.Remove(slot.Node);
+		slot.Node = null;
 		if (root.Slots.Count > 0) return;
 		_rootById.Remove(root.Id);
 		_roots[root.Index] = null;

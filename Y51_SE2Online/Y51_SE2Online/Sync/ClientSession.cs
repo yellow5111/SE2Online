@@ -214,6 +214,7 @@ public sealed class ClientSession
 
 	public ClientSession(ITransport transport, IMpLog log, ClientSyncOptions options, Func<string, (int TypeId, int Size)?> resolveType, Func<long>? clock = null)
 	{
+		AccessBypass.Clear();
 		_t = transport;
 		_log = log;
 		_o = options;
@@ -339,6 +340,12 @@ public sealed class ClientSession
 	{
 		Players = players;
 		PlayersVersion++;
+		// SE2 4.0: the game makes the player's identity after the accept, when its client asks for the world.
+		if (Accept is { IdentityId: 0 } accept && players.FirstOrDefault(p => p.ClientId == accept.ClientId) is { Identity: not 0 } own)
+		{
+			accept.IdentityId = own.Identity;
+			accept.PlayerId = own.Player;
+		}
 		_log.Info("sync(client): player table: " + DescribePlayers(Players));
 	}
 
@@ -347,6 +354,8 @@ public sealed class ClientSession
 		if (snapshot.Actor != IdentityId || snapshot.Players == null || snapshot.Factions == null || snapshot.Grids == null) return;
 		try { new SocialState { Players = snapshot.Players.ToList(), Factions = snapshot.Factions.ToList() }.Validate(); }
 		catch (InvalidOperationException error) { throw new ArgumentException("Invalid social snapshot.", error); }
+		if (Social == null || Social.Factions?.Length != snapshot.Factions.Length || Social.Grids?.Length != snapshot.Grids?.Length)
+			_log.Info($"social(client): {snapshot.Players.Length} players, {snapshot.Factions.Length} factions ({string.Join(", ", snapshot.Factions.Select(f => f.Tag))}), {snapshot.Grids?.Length ?? 0} grids; this player is {snapshot.Actor}");
 		Social = snapshot;
 	}
 
@@ -358,6 +367,7 @@ public sealed class ClientSession
 		if (!_adminSeen || state.Role != Admin.Role) _log.Info($"admin(client): this player's role on the server is {state.Role}");
 		_adminSeen = true;
 		Admin = state;
+		AccessBypass.Set(IdentityId, state.AccessBypass);
 	}
 
 	private void OnNames(uint version, List<PlayerTag> tags)
@@ -377,6 +387,9 @@ public sealed class ClientSession
 		{
 			JoinAccept accept = JoinAccept.Decode(data);
 			Accept = accept;
+			// Before the game builds this client's session (its water renderer depends on it) and before any water arrives.
+			WaterGridsMessage.Enabled = accept.Settings.WaterSync;
+			if (accept.Settings.WaterSync) _log.Info("sync(client): the host streams water (water sync); this client session gets the water renderer");
 			Players = Accept.Players;
 			PlayersVersion++;
 			_phase = Phase.Accepted;

@@ -54,15 +54,21 @@ internal static class PlayerInteraction
         Clear();
     }
 
+    private static long _retryAtMs;
+
+    // A failure (typically a player leaving mid-update, while their world part unloads) pauses this for a moment; it used
+    // to switch looking at players off until the host loaded another world.
     internal static void Tick()
     {
-        if (_failed) return;
+        if (_failed && MpClock.NowMs() < _retryAtMs) return;
+        _failed = false;
         try { Update(); }
         catch (Exception ex)
         {
             _failed = true;
+            _retryAtMs = MpClock.NowMs() + 2000;
             Clear();
-            GameLog.Instance.Warn("player options: looking at players is off for this session: " + ex);
+            GameLog.Instance.WarnOnce("player-options-failed", "player options: an update failed, retrying: " + ex);
         }
     }
 
@@ -79,7 +85,8 @@ internal static class PlayerInteraction
     private static void Update()
     {
         var (session, players) = NametagOverlay.Last;
-        if (!AdminAccess.InSession || session == null || players == null) { Clear(); return; }
+        // The roster's session can be the one just closed (a client leaving, a host reloading).
+        if (!AdminAccess.InSession || session == null || players == null || !ReferenceEquals(session, MpPlugin.App?.ClientSession)) { Clear(); return; }
         var interactor = session.GetEntitiesOfType<InteractorEntityComponent>().Select(e => e.Get<InteractorEntityComponent>())
             .FirstOrDefault(i => i.IsControlledByLocalPlayer);
         var controller = session.SessionComponents.TryGet<ClientPlayersSessionComponent>()?.LocalPlayerController;

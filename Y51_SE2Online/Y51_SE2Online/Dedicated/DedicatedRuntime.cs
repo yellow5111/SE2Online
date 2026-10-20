@@ -16,6 +16,7 @@ using Keen.VRage.Library.Serialization;
 using Keen.VRage.Library.Threading;
 using Keen.VRage.Library.Utils;
 using Y51_SE2Online.Core;
+using Y51_SE2Online.KeenNetcode;
 using Y51_SE2Online.Sync;
 using Y51_SE2Online.NetHost;
 using Y51_SE2Online.SyncEngine;
@@ -74,21 +75,14 @@ internal static class DedicatedRuntime
         {
             _statusPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(selected.Substring(Argument.Length))), "dedicated-status.json");
             DedicatedConsoleLog.Initialize(Path.GetDirectoryName(_statusPath));
-            if (args.Contains("-localDedicatedServer") || args.Contains("-localDedicatedClient") || args.Contains("-useExperimentalNetworking"))
-                throw new ArgumentException("Y51 dedicated hosting supplies its own replication; remove the experimental native dedicated switches.");
+            // SE2 4.0: the game's own dedicated server (Steam game server + network replication) needs this switch.
+            if (!args.Contains("-localDedicatedServer"))
+                throw new ArgumentException("SE2 4.0 dedicated hosting runs on the game's own dedicated server; start the game with -localDedicatedServer (the runner adds it).");
             Config = DedicatedConfig.Read(selected.Substring(Argument.Length));
-            if (Headless)
-            {
-                var options = Config.Network.HostOptions(false);
-                if (options.Identities)
-                {
-                    HostIdentities.Install(GameLog.Instance, new Y51_SE2Online.Sync.HostSettings(options.Identities, options.Grids, options.Research));
-                    harmony.Patch(EngineMembers.Method(HookTargets.PerPlayerInit),
-                        prefix: new HarmonyMethod(typeof(HostIdentities), nameof(HostIdentities.InitPrefix)),
-                        postfix: new HarmonyMethod(typeof(HostIdentities), nameof(HostIdentities.InitPostfix)));
-                }
-            }
-            if (Headless) DedicatedMods.Install(harmony);
+            KeenNet.DedicatedListen = (new System.Net.IPEndPoint(System.Net.IPAddress.TryParse(Config.Network.BindAddress, out var bind) ? bind : System.Net.IPAddress.Any, Config.Network.ListenPort), Config.Network.SessionName);
+            // Steam runs as a game server on every 4.0 dedicated server, so the Workshop is fetched through it either way.
+            DedicatedMods.Install(harmony);
+            if (Headless) HeadlessEngine.Install(harmony);
             NativeSessionSettings.Install(harmony);
             NativeDefinitionSettings.Install(harmony);
             harmony.Patch(AccessTools.Method(typeof(GameApp), "StartPlayerExperienceAsync"),
@@ -131,7 +125,7 @@ internal static class DedicatedRuntime
         if (frame != null && _loaded && frame.FrameMs > ServerProfiler.SlowFrameMs && MpClock.NowMs() - _lastSlowLogMs > 2000)
         {
             _lastSlowLogMs = MpClock.NowMs();
-            GameLog.Instance.Warn($"dedicated: slow server frame {frame.Describe()}; last status write {_statusCostMs} ms");
+            GameLog.Instance.Warn($"dedicated: slow server frame {frame.Describe()}; last status write {_statusCostMs} ms, command {_commandCostMs} ms, save start {_saveStartCostMs} ms");
         }
         try { TickCore(app); }
         finally
@@ -141,14 +135,18 @@ internal static class DedicatedRuntime
         }
     }
 
+    private static long _commandCostMs, _saveStartCostMs;
+
     private static void TickCore(GameAppComponent app)
     {
         if (Requested) WriteStatus();
         if (Requested && Config == null && Error != null) { app.ExitGame(); return; }
         if (Requested && Config != null && !_exiting)
         {
+            long commandStarted = MpClock.NowMs();
             try { CheckCommand(app); }
             catch (Exception ex) { GameLog.Instance.Error("dedicated: command failed: " + ex); }
+            _commandCostMs = MpClock.NowMs() - commandStarted;
             if (_shutdownAtMs != 0 && !_exiting) TickCountdown(app);
             else if (_loaded && !_exiting) TickRestart(app);
         }
@@ -162,7 +160,7 @@ internal static class DedicatedRuntime
                 Load(app).SkipWait();
                 return;
             }
-            if (!_loaded || app.Server == null || (!Headless && app.Client == null) || app._isTransitioning.IsSet) return;
+            if (!_loaded || app.Server == null || app._isTransitioning.IsSet) return;
             if (!_networkRequested)
             {
                 NativeSessionSettings.Finish();
@@ -208,7 +206,12 @@ internal static class DedicatedRuntime
             }
             long now = MpClock.NowMs();
             if (!_saving && Config.SaveIntervalSeconds > 0 && now >= _nextSave && now - _gameSaveMs >= GameSaveGapMs)
+            {
+                // The game serializes the world on this thread before the save goes async: a big world's save start is a
+                // frame of several hundred ms (the slow-frame warning names it), which no plugin code can move off it.
                 Save(world, false).SkipWait();
+                _saveStartCostMs = MpClock.NowMs() - now;
+            }
         }
         catch (Exception ex) { Fail("runtime", ex); }
     }
@@ -258,13 +261,9 @@ internal static class DedicatedRuntime
                     ?? new ContainerId(SaveHelper.GetContentContainerIdString(Config.StartContent));
             ModList mods = Config.OverrideModList.HasValue
                 ? SerializationHelper.DeserializeFromJson<ModList>(Config.OverrideModList.Value.GetRawText()) : null;
-            if (Headless)
-            {
-                Status = "Downloading Workshop mods";
-                mods = await DedicatedMods.PrepareAsync(app, Config, save, mods);
-            }
-            else if (Config.WorkshopIds.Length > 0)
-                GameLog.Instance.Info("dedicated: Mods applies to headless servers; this server's own Steam client loads the world's mods");
+            // SE2 4.0 dedicated servers run Steam as a game server, windowed or not: the Workshop comes through it.
+            Status = "Downloading Workshop mods";
+            mods = await DedicatedMods.PrepareAsync(app, Config, save, mods);
             bool inProfile = save.HasValue && (resumed || (string.IsNullOrWhiteSpace(Config.StartContent) && Config.StartWorkshopId == 0));
             var load = new WorldLoadArgs
             {
@@ -272,8 +271,8 @@ internal static class DedicatedRuntime
                 PlayMission = Config.PlayMission, SkipDebugMenuWarning = true, SkipNewerSaveWarning = true,
                 OverrideModList = mods
             };
-            if (Headless) await HeadlessWorldLoading.Load(app, load);
-            else await app.LoadGameAsync(load);
+            // SE2 4.0: Keen's own dedicated server session (Steam game server listener + network replication).
+            await app.LoadDedicatedServerAsync(load);
             var world = app.Server.Entity.Get<WorldSessionComponent>();
             NativeSessionSettings.Finish();
             NativeDefinitionSettings.Finish();
@@ -675,10 +674,9 @@ internal static class DedicatedRuntime
                 }).ToArray(),
                 Headless, NativeClientPresent = MpPlugin.App?.Client != null,
                 NativePlayerClientIds = _loaded ? MpPlugin.App?.Server?.Entity.Get<WorldSessionComponent>()?.OwnedSession.SessionComponents
-                    .Get<Keen.Game2.Simulation.GameSystems.Player.PlayersSessionComponent>().GetClientIds().Select(id => id.Id).ToArray() : null,
+                    .Get<Keen.Game2.Simulation.GameSystems.Identities.IdentitiesSessionComponent>().GetClientIds().Select(id => id.Id).ToArray() : null,
                 PresentationComponents = Headless ? MpPlugin.App?.Scene.Engine?.Components
                     .Where(c => HeadlessEngine.IsGraphical(c.GetType())).Select(c => c.GetType().FullName).ToArray() : null,
-                ReplicationFrames = Headless ? HeadlessReplication.FramesPublished : 0,
                 WorldSync = HostWorld.Current?.Stats(),
                 ControllerState = MpPlugin.Controller?.State.ToString(),
                 NetworkFailure = network?.Failure, DirectoryError = network?.DirectoryError,

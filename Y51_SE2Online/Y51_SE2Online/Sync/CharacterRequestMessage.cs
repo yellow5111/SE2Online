@@ -8,6 +8,9 @@ public static class CharacterRequestMessage
 
 	public const byte Respawn = 1;
 
+	/// <summary>SE2 4.0: the client possesses the character the host gave it.</summary>
+	public const byte Possessed = 2;
+
 	/// <summary>Choice is the index in the host's last spawn menu, or -1 to ask for the menu.</summary>
 	public static byte[] Encode(byte reason, int choice = -1)
 	{

@@ -45,8 +45,15 @@ internal static class MarkerColors
 
     private static bool PvpOn => AdminAccess.Hosting ? AdminAccess.Host.Pvp : AdminAccess.Client?.Admin.Pvp ?? true;
 
-    private static readonly List<Entity> AntennaEntities = new();
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, Entity> MarkerAntenna = new();
+    // Antenna blocks by where their markers were at the last scan, and when an unmatched marker may look again: a marker
+    // with no antenna near it (a player's suit) looked through every antenna of the world every frame.
+    private const double CellMeters = 50;
+    private const int RetryMs = 500;
+    private static readonly Dictionary<(long, long, long), List<Entity>> AntennaCells = new();
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, System.Runtime.CompilerServices.StrongBox<long>> MarkerRetry = new();
+
+    private static (long, long, long) CellOf(Vector3D p) => ((long)Math.Floor(p.X / CellMeters), (long)Math.Floor(p.Y / CellMeters), (long)Math.Floor(p.Z / CellMeters));
 
     /// <summary>
     /// Every frame: places each antenna marker on its antenna as drawn here and colours it by owner. The marker's own
@@ -68,10 +75,15 @@ internal static class MarkerColors
         if (now >= _nextScanMs)
         {
             _nextScanMs = now + 1000;
-            AntennaEntities.Clear();
+            AntennaCells.Clear();
             // Antenna blocks only: characters carry a suit antenna too, and a marker near a player got pinned to their feet.
-            AntennaEntities.AddRange(((Session)SessionProperty.GetValue(renderer)).GetEntitiesOfType<AntennaComponent>()
-                .Where(e => e.TryGet<Keen.Game2.Simulation.WorldObjects.CubeBlocks.CubeBlockComponent>() != null));
+            foreach (var e in ((Session)SessionProperty.GetValue(renderer)).GetEntitiesOfType<AntennaComponent>())
+            {
+                if (e.TryGet<Keen.Game2.Simulation.WorldObjects.CubeBlocks.CubeBlockComponent>() == null || EngineCodec.IsDead(e)) continue;
+                var key = CellOf(MarkerPoint(e));
+                if (!AntennaCells.TryGetValue(key, out var list)) AntennaCells[key] = list = new List<Entity>(2);
+                list.Add(e);
+            }
         }
         bool colour = SocialUi.Snapshot.Actor != 0;
         foreach (var marker in markers)
@@ -80,14 +92,27 @@ internal static class MarkerColors
             {
                 // The host puts each marker at its antenna's marker offset: match on that point, not the block centre.
                 antenna = null;
+                var retry = MarkerRetry.GetValue(marker, _ => new System.Runtime.CompilerServices.StrongBox<long>(long.MinValue));
+                if (now < retry.Value) continue;
                 double best = 20 * 20;
-                foreach (Entity candidate in AntennaEntities)
+                var (cx, cy, cz) = CellOf(marker.Position);
+                for (long dx = -1; dx <= 1; dx++)
+                    for (long dy = -1; dy <= 1; dy++)
+                        for (long dz = -1; dz <= 1; dz++)
+                        {
+                            if (!AntennaCells.TryGetValue((cx + dx, cy + dy, cz + dz), out var cell)) continue;
+                            foreach (Entity candidate in cell)
+                            {
+                                if (EngineCodec.IsDead(candidate)) continue;
+                                double distance = Vector3D.DistanceSquared(MarkerPoint(candidate), marker.Position);
+                                if (distance < best) { best = distance; antenna = candidate; }
+                            }
+                        }
+                if (antenna == null)
                 {
-                    if (EngineCodec.IsDead(candidate)) continue;
-                    double distance = Vector3D.DistanceSquared(MarkerPoint(candidate), marker.Position);
-                    if (distance < best) { best = distance; antenna = candidate; }
+                    retry.Value = now + RetryMs;
+                    continue;
                 }
-                if (antenna == null) continue;
                 MarkerAntenna.AddOrUpdate(marker, antenna);
             }
             marker._position = MarkerPoint(antenna);

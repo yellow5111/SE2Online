@@ -11,7 +11,7 @@ namespace Y51_SE2Online.Core;
 
 /// <summary>
 /// Live ping to dedicated servers for the server browser. A dedicated server is a Steam game server, which answers
-/// A2S_INFO on its query port (game port + 1, see SteamDedicatedSession) without involving the plugin; any answer,
+/// A2S_INFO on its query port (the game port on SE2 4.0, game port + 1 on SE2 Online 0.15 servers) without involving the plugin; any answer,
 /// the anti-spoofing challenge included, times one round trip. Nothing reaches the server's game connection.
 /// </summary>
 public sealed class ServerPinger : IDisposable
@@ -60,11 +60,38 @@ public sealed class ServerPinger : IDisposable
                 if (IPAddress.TryParse(host, out var ip)) _resolved[address] = target = new IPEndPoint(Map(ip), port);
                 else { Resolve(address, host, port); continue; }
             }
-            _sent[target] = (address, now);
-            try { _udp.Send(Query, Query.Length, target); }
-            catch (SocketException) { }
-            catch (ObjectDisposedException) { return; }
+            // SE2 4.0 servers answer on the game port itself (Steam shares the game socket); 0.15 servers on port + 1.
+            foreach (var to in new[] { target, new IPEndPoint(target.Address, target.Port - 1) })
+            {
+                _sent[to] = (address, now);
+                try { _udp.Send(Query, Query.Length, to); }
+                catch (SocketException) { }
+                catch (ObjectDisposedException) { return; }
+            }
         }
+    }
+
+    /// <summary>
+    /// Whether a Steam server query answers on this game port: an SE2 4.0 dedicated server does, a co-op host's direct
+    /// IP listener does not. Blocks up to about 2 s.
+    /// </summary>
+    public static bool AnswersQuery(IPEndPoint endpoint)
+    {
+        using var udp = new UdpClient(endpoint.AddressFamily);
+        udp.Client.ReceiveTimeout = 700;
+        if (OperatingSystem.IsWindows()) udp.Client.IOControl(-1744830452, new byte[4], null);
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                udp.Send(Query, Query.Length, endpoint);
+                var from = new IPEndPoint(IPAddress.Any, 0);
+                byte[] reply = udp.Receive(ref from);
+                if (reply.Length >= 5 && reply[0] == 0xFF) return true;
+            }
+            catch (SocketException) { }
+        }
+        return false;
     }
 
     /// <summary>The last measured round trip in ms, or -1 when the server has not answered lately.</summary>

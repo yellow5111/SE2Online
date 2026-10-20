@@ -170,7 +170,7 @@ public sealed partial class HostSession
 	{
 		long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 		if (!Enum.IsDefined(r.Action)) return "Unknown action.";
-		if (r.Action >= AdminAction.Creative && r.Action is not (AdminAction.Pvp or AdminAction.OfflineRaidProtection or AdminAction.PcuLimit or AdminAction.SunRotation or AdminAction.SunPeriod or AdminAction.SunNudge or AdminAction.SunSet or AdminAction.Motd))
+		if (r.Action >= AdminAction.Creative && r.Action is not (AdminAction.Pvp or AdminAction.OfflineRaidProtection or AdminAction.PcuLimit or AdminAction.SunRotation or AdminAction.SunPeriod or AdminAction.SunNudge or AdminAction.SunSet or AdminAction.Motd or AdminAction.AccessBypass))
 		{
 			_world.OnAdminRequest(actorPeer, actorClientId, r);
 			return "";
@@ -202,7 +202,10 @@ public sealed partial class HostSession
 				if (account == _o.HostSteamId) return "You cannot demote the host.";
 				if (_o.Access.IsAdmin(account)) return "Only the host can demote another admin.";
 			}
-			result = _o.Access.SetAdmin(account, name, r.Action == AdminAction.Promote); break;
+			result = _o.Access.SetAdmin(account, name, r.Action == AdminAction.Promote);
+			if (r.Action == AdminAction.Demote)
+				foreach (var p in Players().Where(p => p.Peer is { } peer && PeerAlias.SteamOf(peer.Value) == account)) AccessBypass.Set(p.IdentityId, false);
+			break;
 		case AdminAction.WhitelistAdd:
 			if (KnownName(r.Target) == null)
 			{
@@ -247,6 +250,16 @@ public sealed partial class HostSession
 		case AdminAction.Motd:
 			result = _o.Access.SetMotd(r.Name);
 			break;
+		case AdminAction.AccessBypass:
+		{
+			// Only for the admin asking (the host included); the dedicated console has no player of its own.
+			long identity = actorClientId == SyncProtocol.HostClientId ? _o.HostIdentity : Players().FirstOrDefault(p => p.ClientId == actorClientId)?.IdentityId ?? 0;
+			if (identity == 0) return "There is no player of yours in the world to bypass access for.";
+			AccessBypass.Set(identity, r.Value);
+			result = $"Access bypass {(r.Value ? "on" : "off")} for {actorName}.";
+			_log.Info($"access bypass {(r.Value ? "on" : "off")} for {actorName} (identity {identity})");
+			break;
+		}
 		case AdminAction.OfflineRaidProtection:
 			result = _o.Access.SetOfflineRaid(r.Value);
 			_o.OfflineRaidChanged?.Invoke(r.Value);
@@ -319,6 +332,7 @@ public sealed partial class HostSession
 				var role = RoleOf(c.Peer.Value);
 				var doc = byRole[(int)role] ??= JsonDoc.Of(StateFor(role, players, ""));
 				if (!string.IsNullOrEmpty(message)) doc = doc.With(nameof(AdminState.Message), JsonValue.Create(message));
+				if (c.Player is { IdentityId: not 0 } player && AccessBypass.IsOn(player.IdentityId)) doc = doc.With(nameof(AdminState.AccessBypass), JsonValue.Create(true));
 				SendDoc(c, c.AdminDoc, SyncMsg.AdminState, doc, _adminDiffs);
 			}
 			_adminDiffs.Clear();
@@ -375,6 +389,7 @@ public sealed partial class HostSession
 		return new AdminState
 		{
 			Role = role, ServerName = _o.SessionName, Dedicated = !_o.HostCountsAsPlayer, Message = message, MaxPlayers = _o.MaxPlayers,
+			AccessBypass = role == OnlineRole.Host && AccessBypass.IsOn(_o.HostIdentity),
 			WhitelistOnly = _o.Access.WhitelistOnly, Pvp = Pvp, OfflineRaidProtection = OfflineRaidProtection, PcuLimit = _o.PcuInForce, SunRotation = _o.SunInForce.Rotation, SunPeriodMinutes = _o.SunInForce.PeriodMinutes, SunDegrees = SunDegrees, Motd = admin ? MotdTemplate : "", VoiceRadius = _o.VoiceRadiusMeters, HasPassword = !string.IsNullOrEmpty(_o.Password), Revision = _o.Access.Revision,
 			Players = admin ? players : players.Select(p => p with { SteamId = 0 }).ToArray(),
 			Bans = admin ? bans : Array.Empty<BanEntry>(), Whitelist = admin ? whitelist : Array.Empty<AccessEntry>(),

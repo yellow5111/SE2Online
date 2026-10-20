@@ -27,6 +27,9 @@ public sealed class ObservableRelevance<TPeer> where TPeer : notnull
 
 		public readonly Dictionary<(uint Oid, string Member), long> LastSent = new Dictionary<(uint, string), long>();
 
+		/// <summary>Send times only matter for 50 ms; past this count the old ones go (one per member ever sent piled up).</summary>
+		public int LastSentPruneAt = 4096;
+
 		public readonly Dictionary<(uint Oid, string Member), ObservableOp> Held = new Dictionary<(uint, string), ObservableOp>();
 	}
 
@@ -196,6 +199,11 @@ public sealed class ObservableRelevance<TPeer> where TPeer : notnull
 				}
 				state.LastSent[key] = now;
 				state.Held.Remove(key);
+				if (state.LastSent.Count >= state.LastSentPruneAt)
+				{
+					foreach (var old in state.LastSent.Where(kv => now - kv.Value >= 50 && !state.Held.ContainsKey(kv.Key)).Select(kv => kv.Key).ToList()) state.LastSent.Remove(old);
+					state.LastSentPruneAt = Math.Max(4096, state.LastSent.Count * 2);
+				}
 			}
 			foreach (uint oid in refs)
 			{

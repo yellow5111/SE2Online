@@ -33,6 +33,7 @@ internal static class SoundRange
 		_position = AccessTools.MethodDelegate<Func<AudioEventInstance3D, Vector3D>>(AccessTools.Method(typeof(AudioEventInstance3D), "GetWorldPosition"));
 		Type manager = AccessTools.TypeByName("Keen.VRage.Audio.AudioManager");
 		_listener = Expression.Lambda<Func<WorldTransform>>(Expression.Property(Expression.Property(null, AccessTools.Property(manager.BaseType, "Instance")), AccessTools.Property(manager, "ListenerTransform"))).Compile();
+		_listenerValid = Expression.Lambda<Func<bool>>(Expression.Field(Expression.Property(null, AccessTools.Property(manager.BaseType, "Instance")), AccessTools.Field(manager, "_hasValidListenerTransform"))).Compile();
 		harmony.Patch(AccessTools.Method(typeof(AudioEventLoopingInstance3D), nameof(AudioEventLoopingInstance3D.Play)), postfix: new HarmonyMethod(typeof(SoundRange), nameof(LoopPostfix)));
 		harmony.Patch(AccessTools.Method(typeof(AudioEventInstance), nameof(AudioEventInstance.Play)), prefix: new HarmonyMethod(typeof(SoundRange), nameof(OneShotPrefix)));
 		harmony.Patch(AccessTools.Method(typeof(AudioEngineComponent), nameof(AudioEngineComponent.Play), new[] { typeof(AudioEvent), typeof(WorldTransform), typeof(float) }), prefix: new HarmonyMethod(typeof(SoundRange), nameof(PlayAtPrefix)));
@@ -42,6 +43,10 @@ internal static class SoundRange
 	}
 
 	internal static Vector3D ListenerPosition => _listener!().Position;
+
+	private static Func<bool>? _listenerValid;
+
+	private static bool ListenerValid => _listenerValid?.Invoke() ?? true;
 
 	private static readonly AccessTools.FieldRef<AudioEventInstance, FMOD.Studio.EventInstance> Fmod = AccessTools.FieldRefAccess<AudioEventInstance, FMOD.Studio.EventInstance>("_fmodInstance");
 
@@ -64,7 +69,8 @@ internal static class SoundRange
 	// From the listener; 0 when not known yet.
 	private static double Distance(AudioEventInstance3D sound)
 	{
-		if (sound.IsInvalid) return 0;
+		// Without a listener SE2 holds every sound back itself; ListenerTransform is then the world origin.
+		if (sound.IsInvalid || !ListenerValid) return 0;
 		if (sound.IsAttached)
 		{
 			Vector3D at = _position!(sound);
@@ -101,7 +107,9 @@ internal static class SoundRange
 	// TickManagementComponent.PauseClient (world load, in-game menu, leaving) calls Set3DScenePaused(false), which
 	// resumes every borrowed sound, including loops the game paused for being out of range; nothing pauses them again
 	// until they cross the range edge twice, so a base's machines kept playing from anywhere.
-	private static bool ResumePrefix(AudioEventLoopingInstance3D __instance) => !OutOfRange(__instance);
+	// Only loops the game itself holds out of range: one it still counts in range would never get the transition
+	// that resumes it.
+	private static bool ResumePrefix(AudioEventLoopingInstance3D __instance) => __instance.IsInRange || !OutOfRange(__instance);
 
 	// Explosions call Play before UpdatePosition, so the start-time check could not know where they are.
 	private static void PlacedPostfix(AudioEventInstance3D __instance)

@@ -15,7 +15,7 @@ internal sealed partial class HostWorld
     private void UpdateVoicePositions()
     {
         foreach (var joiner in _joiners.Values) Note(joiner.ClientId, joiner.Character);
-        Note(SyncProtocol.HostClientId, Dedicated.DedicatedRuntime.Headless ? null : _hostCharacterServer);
+        Note(SyncProtocol.HostClientId, Dedicated.DedicatedRuntime.Requested ? null : _hostCharacterServer);
         foreach (ushort id in _voicePositions.Keys)
             if (id != SyncProtocol.HostClientId && !_joiners.ContainsKey(id)) _voicePositions.TryRemove(id, out _);
 

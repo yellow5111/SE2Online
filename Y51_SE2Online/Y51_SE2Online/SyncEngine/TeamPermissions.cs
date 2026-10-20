@@ -119,6 +119,7 @@ internal static class TeamPermissions
 
 	private static bool ApplyAccess(Entity target, long actor, ref bool result)
 	{
+		if (AccessBypass.IsOn(actor)) { result = true; return true; }
 		bool? access = WorldSocial.Access(target, actor);
 		if (!access.HasValue) return false;
 		if (access.Value && !result) Interlocked.Increment(ref Overrides);
@@ -139,10 +140,34 @@ internal static class TeamPermissions
 	{
 		long owner = OwnerOf(target);
 		if (!PlayerIdentities.IsHuman(owner) || !PlayerIdentities.IsHuman(source)) return;
-		__result = owner == (long)source;
+		__result = owner == (long)source || SameOnlineFaction(owner, (long)source);
+	}
+
+	/// <summary>Both identities are members of one SE2 Online faction (this game's view: the host's state, or a client's snapshot).</summary>
+	internal static bool SameOnlineFaction(long a, long b)
+	{
 		if (ClientWorld.Current?.BoundSession is { } client)
-			__result |= client.Social.Factions.Any(f => f.Members.Contains(owner) && f.Members.Contains((long)source));
-		else if (HostWorld.Current?.Social is { } social)
-			lock (social.Sync) __result |= social.State.Factions.Any(f => f.Members.Contains(owner) && f.Members.Contains((long)source));
+			return client.Social?.Factions.Any(f => f.Members.Contains(a) && f.Members.Contains(b)) ?? false;
+		if (HostWorld.Current?.Social is { } social)
+			lock (social.Sync) return social.State.Factions.Any(f => f.Members.Contains(a) && f.Members.Contains(b));
+		return false;
+	}
+
+	// SE2 4.0 puts every player into one default faction, and its permission rule gives a faction member the owner's
+	// access: every player owned every grid, was friendly to every turret and filled one shared PCU pool. In an SE2
+	// Online session the faction is the player's SE2 Online faction. Research keeps the default faction: 4.0 stores
+	// unlocks on it, and SE2 Online's shared/own research setting decides who gets them.
+	public static bool InSameFactionPrefix(IdentityId playerA, IdentityId playerB, ref bool __result)
+	{
+		if (!AdminAccess.InSession) return true;
+		__result = (long)playerA == (long)playerB || SameOnlineFaction((long)playerA, (long)playerB);
+		return false;
+	}
+
+	public static bool PcuPoolPrefix(IdentityId owner, ref IdentityId __result)
+	{
+		if (!AdminAccess.InSession) return true;
+		__result = owner;
+		return false;
 	}
 }

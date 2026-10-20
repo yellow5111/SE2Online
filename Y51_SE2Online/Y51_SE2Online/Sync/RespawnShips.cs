@@ -27,7 +27,7 @@ public static class RespawnShips
         new(new("0581d25e-1e6b-4801-a2d6-cfed4af6cabd"), "Dropship", "Renegade Dropship", "Hydrogen lander: survival kit, refinery, assembler, O2/H2 generator, turret", 34.2, "Renegade Dropship", Space: false, Ion: false),
     };
 
-    // The candidates that pass the survival checklist after the spawn top-up (E:\SE2MP\artifacts\ships\ship-checklist.md).
+    // The candidates that pass the survival checklist after the spawn top-up (E:\SE2Online\artifacts\ships\ship-checklist.md).
     // Both CentreLines have no oxygen source at all. ponytail: re-run the rig probe (shipprobe/shipreport) after a game update.
     public static readonly RespawnShip[] Catalog = Candidates.Where(s => s.Key is "Pathfinder" or "Nova35" or "RenegadePathfinder" or "Gladius" or "Dropship").ToArray();
 
@@ -48,7 +48,8 @@ public static class RespawnShips
     /// Gap under a piloted lander's hull at the spawn: clear of the terrain bumps a site may still have, and the dampeners
     /// (kept on by the spawn) hold it there under its pilot: an offered lander lifts at least <see cref="LiftMargin"/> times the planet's gravity.
     /// </summary>
-    public const double LanderHoverMeters = 20;
+    // Well up in the atmosphere, not just over the ground: the pilot starts with room to fly and no terrain to catch.
+    public const double LanderHoverMeters = 2000;
 
     /// <summary>Gap for a lander nobody sits in: it settles onto its gear, so the player standing beside it can board.</summary>
     public const double LanderRestMeters = 1.5;
@@ -60,6 +61,9 @@ public static class RespawnShips
     public const int MaxCooldownMinutes = 1440;
 
     /// <summary>The ships a host offers: every catalog ship, or only the ones its settings name.</summary>
+    /// <summary>The list entry that turns respawn ships off; an empty list offers every ship.</summary>
+    public const string None = "none";
+
     public static RespawnShip[] Offered(IReadOnlyCollection<string>? allowed)
         => allowed is { Count: > 0 } ? Catalog.Where(s => allowed.Contains(s.Key, StringComparer.OrdinalIgnoreCase)).ToArray() : Catalog;
 
@@ -67,9 +71,10 @@ public static class RespawnShips
     {
         if (cooldownMinutes < 0 || cooldownMinutes > MaxCooldownMinutes) return $"Respawn ship cooldown must be between 0 and {MaxCooldownMinutes} minutes.";
         if (allowed == null || allowed.Count > Catalog.Length) return "Too many respawn ships listed.";
+        if (allowed.Contains(None, StringComparer.OrdinalIgnoreCase)) return allowed.Count == 1 ? null : $"\"{None}\" turns respawn ships off and cannot be combined with ship names.";
         foreach (string key in allowed)
             if (!Catalog.Any(s => string.Equals(s.Key, key, StringComparison.OrdinalIgnoreCase)))
-                return $"Unknown respawn ship '{key}'. Use any of: {string.Join(", ", Catalog.Select(s => s.Key))}.";
+                return $"Unknown respawn ship '{key}'. Use any of: {string.Join(", ", Catalog.Select(s => s.Key))}, or \"{None}\" for no respawn ships.";
         return null;
     }
 }

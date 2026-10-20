@@ -56,7 +56,8 @@ internal static class VoiceChat
 
 	public static void Tick(bool inSession, bool free)
 	{
-		if (_failed) return;
+		// A dedicated server only relays voice (HostSession, net thread); it has no player, microphone or Steam client.
+		if (_failed || Dedicated.DedicatedRuntime.Requested) return;
 		try
 		{
 			if (!_installed)
@@ -66,7 +67,8 @@ internal static class VoiceChat
 			}
 			var settings = MpMenu.Settings;
 			bool active = inSession && settings.VoiceEnabled && MpPlugin.SteamAvailable && RadiusOn;
-			Capture(active && (settings.VoiceOpenMic ? free && !ChatUi.InputOpen : PushToTalkHeld(settings.VoiceKey)));
+			// Typing in chat never transmits, even when a letter of the message is the push-to-talk key.
+			Capture(active && !ChatUi.InputOpen && (settings.VoiceOpenMic ? free : PushToTalkHeld(settings.VoiceKey)));
 			Play(active, settings);
 		}
 		catch (Exception ex)

@@ -401,6 +401,7 @@ public sealed class TransformSmoother
 			// Fractional: rounding the playout time to whole milliseconds jittered fast bodies by speed x 0.5 ms.
 			double sharedPlayTime = localNowMs - _lag;
 			_underrun = false;
+			double minAhead = double.PositiveInfinity;
 			foreach (var (netId, track) in _tracks)
 			{
 				if (!track.Active || track.Samples.Count == 0)
@@ -412,6 +413,9 @@ public sealed class TransformSmoother
 				double playTime = sharedPlayTime - track.ExtraMs;
 				var samples = track.Samples;
 				var newest = samples[samples.Count - 1];
+				// Moving: sampled at its send rate (not a body at rest resent once a second) and not coming to a stop, which
+				// ends its samples too.
+				if (samples.Count >= 2 && newest.T - samples[samples.Count - 2].T <= 250.0 && playTime - newest.T < MaxExtrapolateMs && PathVelocity(samples[samples.Count - 2], newest).Length > 1.0) minAhead = Math.Min(minAhead, playTime - newest.T);
 				if ((double)(playTime - newest.T) > CurrentDelayMs + track.ExtraMs + MaxExtrapolateMs + IdleMs)
 				{
 					if (!track.FinalApplied)
@@ -465,6 +469,7 @@ public sealed class TransformSmoother
 					}
 				}
 			}
+			_minAheadMs = double.IsPositiveInfinity(minAhead) ? double.NegativeInfinity : minAhead;
 		}
 	}
 
@@ -472,6 +477,22 @@ public sealed class TransformSmoother
 	// offset steps +-10 ms every few seconds and the old delay slewed 3-6 %, so ships surged 2-6 % at steady flight.
 	// It grows faster only while bodies run out of samples, never past what arrivals need, and shrinks very slowly.
 	public const double LagRate = 0.005, UnderrunRate = 0.04, ShrinkRate = 0.0025;
+
+	// A server stall (GC, autosave, a slow tick) starves every moving body at once. The playout used to run on into the
+	// 100 ms extrapolation window and then hold: a 250 ms stall froze everything for 150 ms and then surged to catch up.
+	// Once every moving body is StallFromMs past its newest sample, the playout slows (to 1 - StallRate of real time at
+	// StallFullMs), so bodies glide through the stall instead of stopping; the lag that adds goes back at RecoverRate.
+	// One body stopping while others still move is not a stall: the others are not starved.
+	public const double StallFromMs = 40, StallFullMs = 80, StallRate = 0.85, RecoverRate = 0.01;
+
+	// Lag the stall slowdown added; it alone goes back at RecoverRate (normal shrinking stays slow, see ShrinkRate).
+	private double _stallDebt;
+
+	// How far the least starved moving body was past its newest sample last frame (negative: it had one ahead).
+	private double _minAheadMs = double.NegativeInfinity;
+
+	/// <summary>The share of real time the playout skips while every moving body is <paramref name="minAheadMs"/> past its newest sample.</summary>
+	public static double StallSlowdown(double minAheadMs) => StallRate * Math.Clamp((minAheadMs - StallFromMs) / (StallFullMs - StallFromMs), 0.0, 1.0);
 
 	private void UpdateDelay(double now)
 	{
@@ -507,9 +528,17 @@ public sealed class TransformSmoother
 			target = double.IsNaN(_targetLag) ? _playOffset + DelayMs : Math.Clamp(_targetLag, _playOffset + DelayMs, _playOffset + Math.Max(DelayMs, MaxDelayMs));
 			_targetDelay = target - _playOffset;
 		}
+		double slow = Adaptive ? StallSlowdown(_minAheadMs) : 0;
 		if (double.IsNaN(_lag) || Math.Abs(target - _lag) > 250.0 || !Adaptive)
 		{
 			_lag = target;
+			_stallDebt = 0;
+		}
+		else if (slow > 0 && _lag < _playOffset + MaxDelayMs)
+		{
+			double added = Math.Min(slow * elapsed, _playOffset + MaxDelayMs - _lag);
+			_lag += added;
+			_stallDebt += added;
 		}
 		else if (target > _lag)
 		{
@@ -517,7 +546,9 @@ public sealed class TransformSmoother
 		}
 		else if (_lag - target > 5.0)
 		{
-			_lag -= Math.Min(_lag - target - 5.0, ShrinkRate * elapsed);
+			double shrink = Math.Min(_lag - target - 5.0, (_stallDebt > 0 ? RecoverRate : ShrinkRate) * elapsed);
+			_lag -= shrink;
+			_stallDebt = Math.Max(0, _stallDebt - shrink);
 		}
 		_curDelay = _lag - _playOffset;
 		if (_curDelay > MaxDelaySeenMs)
@@ -542,7 +573,17 @@ public sealed class TransformSmoother
 	{
 		var position = new Vec3D(BinaryPrimitives.ReadDoubleLittleEndian(raw.AsSpan(0)), BinaryPrimitives.ReadDoubleLittleEndian(raw.AsSpan(8)), BinaryPrimitives.ReadDoubleLittleEndian(raw.AsSpan(16)));
 		double dt = track.HasOut ? Math.Clamp(now - track.LastOutMs, 0.0, 100.0) / 1000.0 : 0.0;
+		Vec3D owed = track.Offset;
 		track.Offset *= Math.Exp(-dt * 10.0);
+		// The payback runs at most PaybackShare of the path speed: a 10 m overshoot at 100 m/s used to decay faster than the
+		// body moved, the backward clamp then held it still, and the ship froze for 200-400 ms under ordinary network jitter.
+		double pathSpeed = pathVelocity.Length;
+		if (pathSpeed > 1.0)
+		{
+			Vec3D paid = owed - track.Offset;
+			double most = PaybackShare * pathSpeed * dt;
+			if (paid.Length > most) track.Offset = owed - paid * (most / paid.Length);
+		}
 		if (track.HasOut && dt > 0.0)
 		{
 			// A new sample while still coasting moves the extrapolation's start: on a stall the host spreads, that start
@@ -567,11 +608,14 @@ public sealed class TransformSmoother
 		if (track.Offset.Length < 1e-4) track.Offset = default;
 		// Paying back an overshoot (extrapolated through a server stall) must not drive the body backwards: it waits
 		// until the real track catches up instead.
-		if (track.Offset != default && track.HasOut && now < track.PaybackUntilMs && track.Heading != default)
+		// The direction is the path's now: a heading kept from before the correction pinned a turning ship in place once
+		// its path had turned away from that heading.
+		Vec3D heading = pathSpeed > 1.0 ? pathVelocity * (1.0 / pathSpeed) : track.Heading;
+		if (track.Offset != default && track.HasOut && now < track.PaybackUntilMs && heading != default)
 		{
 			Vec3D step = position + track.Offset - track.LastShown;
-			double back = step.X * track.Heading.X + step.Y * track.Heading.Y + step.Z * track.Heading.Z;
-			if (back < 0.0) track.Offset -= track.Heading * back;
+			double back = step.X * heading.X + step.Y * heading.Y + step.Z * heading.Z;
+			if (back < 0.0) track.Offset -= heading * back;
 		}
 		track.WasExtrapolating = extrapolated;
 		track.BaseT = baseT;
@@ -588,6 +632,9 @@ public sealed class TransformSmoother
 	}
 
 	private const long PaybackMs = 500;
+
+	/// <summary>Share of the path speed an extrapolation overshoot is paid back at, so the body slows instead of stopping.</summary>
+	public const double PaybackShare = 0.5;
 
 	/// <summary>A gap larger than this is a teleport; a fast ship's extrapolation error (its speed over a quarter second) is not.</summary>
 	public static double TeleportMeters(double speed) => 5.0 + speed * 0.25;

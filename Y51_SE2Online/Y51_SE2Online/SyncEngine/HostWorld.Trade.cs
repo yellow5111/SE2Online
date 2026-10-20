@@ -241,7 +241,7 @@ internal sealed partial class HostWorld
 
     private PlayerCreditsData Credits(Session session, ushort player)
     {
-        long identity = player == SyncProtocol.HostClientId ? PlayerIdentities.HotfixIdentity : IdentityOf(player);
+        long identity = player == SyncProtocol.HostClientId ? _hostIdentity : IdentityOf(player);
         return identity == 0 ? null : session.Get<IPerPlayerData>().GetPerPlayerData<PlayerCreditsData>(new IdentityId(identity));
     }
 

@@ -19,6 +19,15 @@ public sealed class MpOptions
 
 	public bool Dedicated { get; internal set; }
 
+	/// <summary>SE2 4.0: the game's own join (invite, join code) already started the client; SE2 Online only rides along.</summary>
+	public bool KeenAttached { get; internal set; }
+
+	/// <summary>SE2 4.0: the game session to join (Steam lobby or server address) when the game itself picked it.</summary>
+	public Keen.VRage.Core.Services.GameSessions.GameSessionID? KeenSession { get; internal set; }
+
+	/// <summary>The game's join code of the co-op session to find and join (Steam lobby data "code").</summary>
+	public Keen.VRage.Core.Services.GameSessions.SessionJoinCode? JoinCode { get; internal set; }
+
 	public bool Advertise { get; internal set; }
 
 	public string SessionName { get; internal set; } = "My SE2 session";

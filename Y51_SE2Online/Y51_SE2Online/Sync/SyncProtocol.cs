@@ -4,7 +4,7 @@ namespace Y51_SE2Online.Sync;
 
 public static class SyncProtocol
 {
-	public const ushort Version = 15;
+	public const ushort Version = 16;
 
 	public const ushort HostClientId = 1;
 

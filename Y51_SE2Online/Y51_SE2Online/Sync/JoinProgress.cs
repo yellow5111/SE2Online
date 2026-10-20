@@ -201,6 +201,15 @@ public sealed class JoinProgress
 		}
 	}
 
+	/// <summary>SE2 4.0: bytes of the game's own traffic received since this join started.</summary>
+	public void ReceivedSinceJoin(long bytes)
+	{
+		lock (_sync)
+		{
+			_received = Math.Max(0L, bytes);
+		}
+	}
+
 	public void PartReceived()
 	{
 		lock (_sync)
@@ -402,16 +411,19 @@ public sealed class JoinProgress
 			{
 				double seconds = Math.Max(0.5, (now - _receivingSinceMs) / 1000.0);
 				double rate = _received / seconds;
-				double got = _expected > 0 ? Math.Min(1.0, (double)_received / _expected) : 0;
+				// SE2 4.0 does not say how big the world is: without a size the bar eases towards 40% as data comes in.
+				double got = _expected > 0 ? Math.Min(1.0, (double)_received / _expected) : 1 - Math.Exp(-_received / (16.0 * 1024 * 1024));
 				percent = got * 40;
 				string eta = _expected > 0 && rate > 1024 && _received < _expected ? "  /  " + Clock((long)((_expected - _received) / rate * 1000)) + " left" : "";
-				what = $"{Mib(Math.Min(_received, Math.Max(_expected, _received)))} of {Mib(_expected)} MiB from {Cut(_host, 32)}  /  {Mib((long)rate)} MiB/s{eta}";
+				what = _expected > 0
+					? $"{Mib(Math.Min(_received, Math.Max(_expected, _received)))} of {Mib(_expected)} MiB from {Cut(_host, 32)}  /  {Mib((long)rate)} MiB/s{eta}"
+					: $"{Mib(_received)} MiB from {Cut(_host, 32)}  /  {Mib((long)rate)} MiB/s";
 				if (_mods != null) what += "\n" + _mods;
 				break;
 			}
 			case JoinStage.Loading:
-				percent = 40 + Math.Min(18, (now - _loadingSinceMs) / 2000.0);
-				what = _mods ?? $"Terrain, planets and physics  /  {Clock(now - _loadingSinceMs)}";
+				percent = 40 + 55 * (1 - Math.Exp(-(now - _loadingSinceMs) / 15000.0));
+				what = _mods ?? (_received > 0 ? $"Building the world, {Mib(_received)} MiB received  /  {Clock(now - _loadingSinceMs)}" : $"Terrain, planets and physics  /  {Clock(now - _loadingSinceMs)}");
 				break;
 			case JoinStage.Building:
 			{

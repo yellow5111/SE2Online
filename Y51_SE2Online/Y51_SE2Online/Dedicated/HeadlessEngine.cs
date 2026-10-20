@@ -6,7 +6,17 @@ using HarmonyLib;
 using Keen.Game2;
 using Keen.Game2.Game.EngineComponents;
 using Keen.Game2.Game.Helpers;
+using Keen.Game2.Game.GameComponents;
+using Keen.Game2.Game.Networking;
+using Keen.Game2.Game.RuntimeSystems.GameSessions;
+using Keen.Game2.Game.SessionComponents;
+using Keen.Game2.OutOfProcess;
+using Keen.Game2.Simulation.GameSystems.Missions;
+using Keen.Game2.Simulation.RuntimeSystems;
+using Keen.Game2.Simulation.RuntimeSystems.CoreConfigurations;
 using Keen.Game2.Simulation.RuntimeSystems.CoreScenes;
+using Keen.Game2.Simulation.RuntimeSystems.GameData;
+using Keen.Game2.Simulation.RuntimeSystems.Saves;
 using Keen.VRage.Core.EngineComponents;
 using Keen.VRage.Core.Extensions;
 using Keen.VRage.Core.Game.Extensions;
@@ -14,15 +24,21 @@ using Keen.VRage.Core.Game.Systems;
 using Keen.VRage.Core.Platform.CrashReporting;
 using Keen.VRage.Core.Project;
 using Keen.VRage.Core.StreamingResources;
+using Keen.VRage.Core.Worlds;
 using Keen.VRage.DCS.Builders;
 using Keen.VRage.DCS.Components;
 using Keen.VRage.DCS.Internal;
 using Keen.VRage.Library.Localization;
 using Keen.VRage.Library.Utils;
+using Keen.VRage.Multiplayer.Replications;
+using Keen.VRage.Multiplayer.Transport;
+using Keen.VRage.Multiplayer.Transport.OutOfProcess.Server;
 using Y51_SE2Online.Core;
+using Task = Keen.VRage.Library.Threading.Task;
 
 namespace Y51_SE2Online.Dedicated;
 
+/// <summary>Composes SE2's engine for a dedicated server without renderer, window, UI, input or audio device, so it runs on GPU-less hosts.</summary>
 internal static class HeadlessEngine
 {
     private static bool _loggedAppMetadata;
@@ -38,6 +54,10 @@ internal static class HeadlessEngine
             postfix: new HarmonyMethod(typeof(HeadlessEngine), nameof(ComponentInfoPostfix)));
         harmony.Patch(AccessTools.Method(typeof(GameApp), "CreateEngine"),
             prefix: new HarmonyMethod(typeof(HeadlessEngine), nameof(CreateEnginePrefix)));
+        harmony.Patch(AccessTools.Method(typeof(GameAppComponent), "Init"),
+            prefix: new HarmonyMethod(typeof(HeadlessEngine), nameof(AppInitPrefix)));
+        harmony.Patch(AccessTools.Method(typeof(GameAppComponent), nameof(GameAppComponent.LoadDedicatedServerAsync)),
+            prefix: new HarmonyMethod(typeof(HeadlessEngine), nameof(LoadPrefix)));
     }
 
     private static void FatalPrefix(Exception ex, ref bool userReport)
@@ -72,12 +92,6 @@ internal static class HeadlessEngine
             __result.Services = __result.Services.Where(s => s.Field.FieldType.FullName != "Keen.VRage.Render.EngineComponents.RenderEngineComponent").ToArray();
     }
 
-    internal static void Prepare(EntityBuilder builder)
-    {
-        foreach (var component in builder.Components)
-            ComponentInfoPostfix(component.Type, RuntimeComponentInfo.For(component.Type));
-    }
-
     private static bool IsPresentationDependency(FieldInfo field) => field.Name == "_windows" || field.Name == "_ui" || field.Name == "_gameRender"
         || field.FieldType.FullName == "Keen.VRage.Core.Platform.IPlatformWindows"
         || field.FieldType.FullName == "Keen.VRage.UI.EngineComponents.UIEngineComponent"
@@ -86,6 +100,7 @@ internal static class HeadlessEngine
     private static bool CreateEnginePrefix(GameApp __instance, string[] args)
     {
         if (!DedicatedRuntime.Headless) return true;
+       
         __instance.ApplicationLoop.TargetFrequency = 60;
         __instance.ApplicationLoop.WaitForInterval = true;
         var engine = new EngineBuilder(__instance, args);
@@ -93,6 +108,7 @@ internal static class HeadlessEngine
         __instance.CoreScene = scene;
         engine.EntitySerializer = scene.Serializer;
         engine.SceneBuilder.UserObject = scene;
+        engine.SceneBuilder.AddJobsFromType(typeof(GameServerNetworkingComponent));
         engine.AddService(VersionExt.FromAssembly(typeof(GameApp).Assembly));
         var projects = ((IEnumerable<VRageProject>)AccessTools.Method(typeof(GameApp), "GetProjects")
             .Invoke(null, new object[] { args })).ToList();
@@ -126,9 +142,10 @@ internal static class HeadlessEngine
         {
             MemoryPoolBudgets = new MemoryPoolSize(1_000_000_000L, 0L)
         });
-        Extend(engine, "VRage.Animation", "Keen.VRage.Animation.Resources.Extensions.EngineBuilderExtensions", "AddAnimationsStreaming");
+        Extend(engine, "VRage.Animation.Client", "Keen.VRage.Animation.Client.Resources.Extensions.EngineBuilderExtensions", "AddAnimationsStreaming");
         Add(engine, "VRage.Game", "Keen.VRage.Game.ProceduralGeneration.ProceduralGeneratorEngineComponent");
         Add(engine, "Game2.Simulation", "Keen.Game2.Simulation.GameSystems.ProceduralGeneration.ProceduralGeneratorGameEngineComponent");
+        Add(engine, "VRage.Game", "Keen.VRage.Game.Multiplayer.MotionParentEngineComponent");
         Add(engine, "Game2.Simulation", "Keen.Game2.Simulation.GameSystems.Water.WaterSessionServerConfiguratorComponent");
         engine.AddLocalization();
         engine.AddDebugDrawServer(new DebugDrawServerEngineComponent.ObjectBuilder
@@ -138,6 +155,7 @@ internal static class HeadlessEngine
         engine.Add<Keen.VRage.Audio.EngineComponents.MinimalAudioEngineComponent>();
         engine.AddUgcArbiterService();
         AddSteam(engine, __instance);
+        engine.AddOfflineGameServiceFallbacks();
         Extend(engine, "VRage.Voxels", "Keen.VRage.Voxels.Extensions.EngineBuilderExtensions", "AddVoxelsServer", (object)args);
         Extend(engine, "VRage.Voxels", "Keen.VRage.Voxels.Extensions.EngineBuilderExtensions", "AddStreamedStorages");
         Extend(engine, "VRage.Voxels", "Keen.VRage.Voxels.Extensions.EngineBuilderExtensions", "AddPlanetTextureStreaming");
@@ -148,18 +166,22 @@ internal static class HeadlessEngine
         Add(engine, "VRage.Platform.Windows", "Keen.VRage.Platform.Windows.EngineComponents.WinSystemEngineComponent");
         Add(engine, "VRage.Platform.Windows", "Keen.VRage.Platform.Windows.EngineComponents.WinMemoryEngineComponent");
         engine.Add<WallTimeProviderComponent>(__instance.ApplicationLoop);
+        string maxPlayers = args.FirstOrDefault(a => a.StartsWith("-maxPlayers:", StringComparison.Ordinal));
+        if (maxPlayers != null && int.TryParse(maxPlayers.Substring("-maxPlayers:".Length), out int max) && max >= 1)
+            engine.Configure<GameCoreConfigurationObjectBuilder>().MaxPlayers = max;
         engine.Add<GameAppComponent>(new GameAppComponentObjectBuilder());
         if (args.Contains("-loadScripts")) AccessTools.Method(typeof(GameApp), "AddScripting").Invoke(null, new object[] { engine });
         __instance._plugins?.InvokeOnBeforeEngineInstantiated(engine);
-        if (engine.EntityBuilder.Components.Any(c => IsGraphical(c.Type)))
-            throw new InvalidOperationException("A plugin attempted to add graphics or client components to the dedicated engine.");
+        var graphical = engine.EntityBuilder.Components.Where(c => IsGraphical(c.Type)).Select(c => c.Type.FullName).ToArray();
+        if (graphical.Length > 0)
+            throw new InvalidOperationException("A plugin added graphics or client components to the headless server engine: " + string.Join(", ", graphical));
         foreach (var component in engine.EntityBuilder.Components)
             ComponentInfoPostfix(component.Type, RuntimeComponentInfo.For(component.Type));
         engine.EntityBuilder.CompileObjectBuilder();
         engine.EntityBuilder.OnEntityAllocatedCallback += entity => PostEngineInit(scene);
         if (__instance._plugins != null) engine.EntityBuilder.OnEntityAllocatedCallback += __instance._plugins.PostEngineInit;
         engine.Dispose();
-        GameLog.Instance.Info("dedicated: server engine composed without renderer, window, UI, input, audio device, or game client; 60 Hz loop");
+        GameLog.Instance.Info("dedicated: headless server engine composed without renderer, window, UI, input, audio device, or game client; 60 Hz loop");
         return false;
     }
 
@@ -167,7 +189,7 @@ internal static class HeadlessEngine
     {
         scene.Dynamic().Create("Dedicated Core Game Systems",
             typeof(FailureResolutionComponent),
-            Resolve("Game2.Simulation", "Keen.Game2.Simulation.RuntimeSystems.CoreScenes.LoadStatsLoggerComponent"),
+            typeof(LoadStatsLoggerComponent),
             typeof(TickManagementComponent),
             new EntityBuilder.ComponentBuildInfo
             {
@@ -179,12 +201,109 @@ internal static class HeadlessEngine
         failure.SetShouldDisplayLoadingFailure(false);
         failure.SetLoadingFailureStrategy(FailureResolutionComponent.LoadingFailureStrategy.Exit);
         scene.Dynamic().Create("Dedicated Core Game Data",
-            Resolve("Game2.Simulation", "Keen.Game2.Simulation.RuntimeSystems.CoreScenes.SceneWideServiceProviderComponent"),
+            typeof(SceneWideServiceProviderComponent),
             Resolve("Game2.Simulation", "Keen.Game2.Simulation.RuntimeSystems.Serialization.GameWorldsComponent"),
-            Resolve("Game2.Simulation", "Keen.Game2.Simulation.RuntimeSystems.GameData.GameDataLoaderComponent"));
-        scene.Single<Keen.Game2.Simulation.RuntimeSystems.GameData.GameDataLoaderComponent>()
-            .AdditionalWorldServiceComponents.Add(typeof(Keen.VRage.Game.Armor.Components.ArmorMesherComponent));
+            typeof(GameDataLoaderComponent));
+        scene.Single<GameDataLoaderComponent>().AdditionalWorldServiceComponents.Add(
+            (ComponentType: typeof(Keen.VRage.Game.Armor.Components.ArmorMesherComponent), ObjectBuilder: new Keen.VRage.Game.Armor.Components.ArmorMesherObjectBuilder()));
         Singleton<TextManager>.Instance.InitializeBaseCulture();
+    }
+
+    // GameAppComponent.Init hides the (absent) window until the first world shows.
+    private static bool AppInitPrefix(GameAppComponent __instance, GameAppComponentObjectBuilder ob)
+    {
+        if (!DedicatedRuntime.Headless) return true;
+        __instance._instanceIndex = ob.InstanceIndex.GetValueOrDefault();
+        __instance.EnableTransitionDelay = false;
+        return false;
+    }
+
+    // Keen's TransitionToGame waits for UI pins and the renderer fence and shows the window, and R2R inlines it into
+    // BuildAndRunDedicatedServerGame, so the whole dedicated load is replaced: same server entity, headless transition.
+    private static bool LoadPrefix(GameAppComponent __instance, WorldLoadArgs args, ref Task __result)
+    {
+        if (!DedicatedRuntime.Headless) return true;
+        __result = LoadDedicatedServer(__instance, args);
+        return false;
+    }
+
+    private static async Task LoadDedicatedServer(GameAppComponent app, WorldLoadArgs args)
+    {
+        await Task.SetLifetime(app.Scene);
+        if (!app._isTransitioning.Set()) throw new InvalidOperationException("A world transition is already running.");
+        try
+        {
+            await app.WaitForSaveToFinish();
+            bool mission = await MissionScreenSessionComponent.IsMissionWorld(args, app);
+            var server = app.Scene.Dynamic();
+            server.WithComponent<DedicatedServerWorldTickMockComponent>();
+            server.WithComponent<ReplicationServerCoreComponent>();
+            server.WithComponent<GameSessionDedicatedServerComponent>(new GameSessionDedicatedServerComponentObjectBuilder
+            {
+                ListenEndpoint = new System.Net.IPEndPoint(System.Net.IPAddress.Any, 27015),
+                ServerName = "Dedicated server"
+            }, StringId.Get("IGameSessionProvider"), StringId.Get("IServerGameSessionProvider"));
+            server.WithComponent<GameServerNetworkingComponent>(new GameServerNetworkingComponentObjectBuilder());
+            server.WithComponent<OutOfProcessServerTransportCoreComponent>();
+            server.WithComponent<LoggingIncidentReportingCoreComponent>();
+            var ob = GameWorldBuilder.CreateBaseGame(ref server, true, app._instanceIndex, mission);
+            GameWorldBuilder.BuildGameServer(ref server);
+            if (args.SaveId.HasValue)
+                ob.WorldContainerToLoad = new WorldSessionComponentObjectBuilder.ContainerLoadData
+                {
+                    WorldContainerToLoad = args.SaveId, ContainerBackupId = args.SaveBackupId,
+                    DetachFromContainerAfterLoad = args.PlayMission == true
+                };
+            if (args.OverrideModList != null) ob.OverrideModList = args.OverrideModList;
+            await Transition(app, server);
+            var world = app.Server.Entity.Get<WorldSessionComponent>();
+            var session = world.OwnedSession;
+            bool content = false;
+            if (args.SaveId.HasValue)
+            {
+                var source = await SaveHelper.TryGetSaveAsync(args.SaveId.Value);
+                content = source.HasValue && source.Value.IsExternal;
+                if (content && args.SaveId.Value.ToString().StartsWith("$Content:", StringComparison.Ordinal))
+                    session.SessionComponents.Get<GameSaveInfoSessionComponent>().UsedDebugMenu = false;
+            }
+            if (args.EnableAutosave.HasValue) session.SessionComponents.Get<SaveSessionComponent>().EnableAutosave = args.EnableAutosave.Value;
+            if (args.OverrideDisplayName != null) await world.SetDisplayName(args.OverrideDisplayName);
+            session.SessionComponents.TryGet<MissionSessionComponent>()?.Configure(args.PlayMission, content);
+        }
+        catch (Exception ex)
+        {
+            app.NotifySessionLoadFinished(ex);
+            throw;
+        }
+        finally { app._isTransitioning.Clear(); }
+    }
+
+    private static async Task Transition(GameAppComponent app, EntityBuilder? server)
+    {
+        await Task.SetLifetime(app.Scene);
+        await app.WaitForSaveToFinish();
+        app.NotifySessionLoadFinished(new System.Threading.Tasks.TaskCanceledException());
+        var data = app.Scene.Single<GameDataLoaderComponent>();
+        if (server.HasValue)
+        {
+            // Pauses single player while a menu or video is open; it needs the UI and renderer.
+            server.Value.Components.RemoveAll(c => c.Type == typeof(AutoPauseWorldComponent));
+            var world = server.Value.OBsOfType<WorldSessionComponentObjectBuilder>().Single();
+            if (world.OverrideModList != null) data.SetRequiredProjects(world.OverrideModList);
+            else if (world.WorldContainerToLoad?.WorldContainerToLoad is { } save)
+                data.SetRequiredProjects(await SaveHelper.TryGetModList(save, app));
+        }
+        if (!data.CurrentProjectsMatchRequired)
+        {
+            app.Scene.UnloadAllScenes();
+            await data.PreloadWorldDataIfNeeded();
+        }
+        app.Scene.UnloadAllScenes();
+        await data.LoadWorldDataIfNeeded();
+        if (server.HasValue)
+            foreach (var component in server.Value.Components)
+                ComponentInfoPostfix(component.Type, RuntimeComponentInfo.For(component.Type));
+        await app.Scene.TransitionToGame(server, null);
     }
 
     private static void AddSteam(EngineBuilder engine, GameApp app)
@@ -207,7 +326,8 @@ internal static class HeadlessEngine
     internal static bool IsGraphical(Type type)
     {
         string name = type.FullName ?? string.Empty;
-        if (type == typeof(Keen.VRage.Audio.EngineComponents.MinimalAudioEngineComponent)) return false;
+        if (type == typeof(Keen.VRage.Audio.EngineComponents.MinimalAudioEngineComponent)
+            || name == "Keen.VRage.Animation.Client.Resources.AnimationStreamingManagerComponent") return false;
         return name.StartsWith("Keen.VRage.Render", StringComparison.Ordinal)
             || name.StartsWith("Keen.VRage.UI", StringComparison.Ordinal)
             || name.StartsWith("Keen.VRage.Input", StringComparison.Ordinal)

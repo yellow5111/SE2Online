@@ -27,6 +27,10 @@ public sealed class ClientStateTable
 
 	private readonly Dictionary<uint, long> _tombstones = new Dictionary<uint, long>();
 
+	private readonly Dictionary<uint, List<ushort>> _keysOf = new Dictionary<uint, List<ushort>>();
+
+	private long _nextExpireMs;
+
 	public long Received;
 
 	public long Stale;
@@ -84,6 +88,8 @@ public sealed class ClientStateTable
 				}
 				value = new Entry();
 				_entries[tuple] = value;
+				if (!_keysOf.TryGetValue(e.NetId, out var keys)) _keysOf[e.NetId] = keys = new List<ushort>(4);
+				keys.Add(e.Key);
 			}
 			value.Bytes = e.Bytes;
 			value.Version = e.Version;
@@ -117,18 +123,11 @@ public sealed class ClientStateTable
 		lock (_sync)
 		{
 			_tombstones[netId] = nowMs;
-			List<(uint, ushort)> list = new List<(uint, ushort)>();
-			foreach (var key in _entries.Keys)
+			if (!_keysOf.Remove(netId, out var keys)) return;
+			foreach (ushort key in keys)
 			{
-				if (key.Item1 == netId)
-				{
-					list.Add(key);
-				}
-			}
-			foreach (var item in list)
-			{
-				_entries.Remove(item);
-				_dirty.Remove(item);
+				_entries.Remove((netId, key));
+				_dirty.Remove((netId, key));
 			}
 		}
 	}
@@ -176,10 +175,11 @@ public sealed class ClientStateTable
 
 	private void ExpireTombstones(long nowMs)
 	{
-		if (_tombstones.Count == 0)
+		if (_tombstones.Count == 0 || nowMs < _nextExpireMs)
 		{
 			return;
 		}
+		_nextExpireMs = nowMs + 1000;
 		List<uint> list = null;
 		foreach (KeyValuePair<uint, long> tombstone in _tombstones)
 		{
@@ -202,13 +202,11 @@ public sealed class ClientStateTable
 	{
 		lock (_sync)
 		{
-			foreach (KeyValuePair<(uint, ushort), Entry> entry in _entries)
+			if (!_keysOf.TryGetValue(netId, out var keys)) return;
+			foreach (ushort key in keys)
 			{
-				if (entry.Key.Item1 == netId)
-				{
-					entry.Value.Dirty = true;
-					_dirty.Add(entry.Key);
-				}
+				_entries[(netId, key)].Dirty = true;
+				_dirty.Add((netId, key));
 			}
 		}
 	}

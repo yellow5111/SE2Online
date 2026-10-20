@@ -53,7 +53,7 @@ internal static class PassengerSeats
 
     // Where the seated character's origin goes: height above the model's floor, offset towards the seat's back in metres
     // (negative: the cockpit pose puts the hips well behind the origin), and facing. Tuned from rig screenshots in
-    // E:\SE2MP\artifacts\seat-poses (rig: "seat tune" on the client plus "seathost tune" on the server, then re-sit).
+    // E:\SE2Online\artifacts\seat-poses (rig: "seat tune" on the client plus "seathost tune" on the server, then re-sit).
     private static readonly Block[] Blocks =
     {
         new("Seat", new("45fedc87-d06c-4499-bc06-05a7864a8343"), new("4a1a3ea8-1da8-4232-813e-755548575108"), new("96b0ffdc-3e90-4398-9bc0-443ddb7d94cb"), 0.80f, -0.40f, 0f),
@@ -235,6 +235,33 @@ internal static class PassengerSeats
     {
         harmony.Patch(AccessTools.PropertyGetter(typeof(UsePilotableAction), nameof(UsePilotableAction.CanActivate)), prefix: new HarmonyMethod(typeof(PassengerSeats), nameof(CanActivatePrefix)));
         harmony.Patch(AccessTools.Method(typeof(UsePilotableAction), nameof(UsePilotableAction.InteractPrimaryStart)), prefix: new HarmonyMethod(typeof(PassengerSeats), nameof(InteractPrefix)));
+        harmony.Patch(AccessTools.Method(typeof(UsePilotableAction), "PopulateHint"), prefix: new HarmonyMethod(typeof(PassengerSeats), nameof(PopulateHintPrefix)));
+        harmony.Patch(AccessTools.Method(typeof(UsePilotableAction), "OnSuppliedChanged"), prefix: new HarmonyMethod(typeof(PassengerSeats), nameof(SuppliedChangedPrefix)));
+    }
+
+    private static readonly Func<UsePilotableAction, bool, string, string> HintText =
+        AccessTools.MethodDelegate<Func<UsePilotableAction, bool, string, string>>(AccessTools.Method(typeof(UsePilotableAction), "GetHintText"));
+
+    private static readonly Action<UsePilotableAction, bool> RefreshHint =
+        AccessTools.MethodDelegate<Action<UsePilotableAction, bool>>(AccessTools.Method(typeof(UsePilotableAction), "RefreshHint"));
+
+    // SE2 4.0's seat hint asks the block's cockpit whether someone sits in it; a passenger seat has no cockpit, and
+    // looking at a bed or toilet (every POI has them) closed the game. The seat itself knows.
+    private static bool PopulateHintPrefix(UsePilotableAction __instance, Keen.Game2.Client.UI.HUD.Interaction.InteractionHintScreenViewModel hint)
+    {
+        var seat = PassengerSeat(__instance);
+        if (seat == null) return true;
+        hint.Title = __instance.Entity.Get<FunctionalBlockComponent>().DisplayName.EvaluateText();
+        hint.Text = HintText(__instance, seat.Pilot != null, hint.Title);
+        return false;
+    }
+
+    private static bool SuppliedChangedPrefix(UsePilotableAction __instance)
+    {
+        var seat = PassengerSeat(__instance);
+        if (seat == null) return true;
+        RefreshHint(__instance, seat.Pilot != null);
+        return false;
     }
 
     private static SeatComponent? PassengerSeat(UseAction action) =>
@@ -329,8 +356,11 @@ internal static class PassengerSeats
         long now = MpClock.NowMs();
         if (session == null || now < _nextSeatedCheckMs) return;
         _nextSeatedCheckMs = now + 250;
-        foreach (var e in session.GetEntitiesOfType<SeatComponent>())
+        // The seats HoldSeated knows to be occupied four times a second, every seat of the world once a second.
+        IEnumerable<Entity> seats = _keepSeatedScans++ % 4 == 0 || _holdFailed ? session.GetEntitiesOfType<SeatComponent>() : SeatsClient.ToArray();
+        foreach (var e in seats)
         {
+            if (EngineCodec.IsDead(e)) continue;
             if (e.Get<SeatComponent>().Pilot?.TryGet<CharacterMovementComponent>() is not { } movement) continue;
             if (movement.CurrentMovementState == CharacterMovementState.Sitting) continue;
             // Clients may not set the property; write it the way a replicated change lands: the field, then every
@@ -345,6 +375,8 @@ internal static class PassengerSeats
     }
 
     private static readonly HashSet<Entity> WeightlessServer = new(), WeightlessClient = new(), SeatedServer = new(), SeatedClient = new();
+    private static readonly List<Entity> SeatsServer = new(), SeatsClient = new();
+    private static int _seatScanServer, _seatScanClient, _keepSeatedScans;
 
     /// <summary>
     /// Every frame, on the server (its thread) and on clients. A seated character stays a free Havok character that
@@ -359,11 +391,38 @@ internal static class PassengerSeats
     {
         var weightless = server ? WeightlessServer : WeightlessClient;
         var seated = server ? SeatedServer : SeatedClient;
-        seated.Clear();
-        foreach (var e in session.GetEntitiesOfType<SeatComponent>())
+        var seats = server ? SeatsServer : SeatsClient;
+        // Every seat of the world is only walked when a character pinned to something is not a known pilot (at most every
+        // 5 frames) or every 2 s; otherwise the seats already holding a pilot are enough. A big world has tens of
+        // thousands of empty seats.
+        int since = server ? ++_seatScanServer : ++_seatScanClient;
+        bool rescan = since >= 120;
+        if (!rescan && since >= 5)
         {
-            var seat = e.Get<SeatComponent>();
-            if (seat.Pilot is not { } pilot || EngineCodec.IsDead(pilot)) continue;
+            foreach (var c in session.GetEntitiesOfType<CharacterComponent>())
+            {
+                if (c.Data.Has<EntityParentData>() && !seated.Contains(c)) { rescan = true; break; }
+            }
+        }
+        if (rescan)
+        {
+            if (server) _seatScanServer = 0;
+            else _seatScanClient = 0;
+            seats.Clear();
+            foreach (var e in session.GetEntitiesOfType<SeatComponent>())
+            {
+                if (e.Get<SeatComponent>().Pilot is { } held && !EngineCodec.IsDead(held)) seats.Add(e);
+            }
+        }
+        seated.Clear();
+        for (int i = seats.Count - 1; i >= 0; i--)
+        {
+            var e = seats[i];
+            if (EngineCodec.IsDead(e) || e.TryGet<SeatComponent>() is not { } seat || seat.Pilot is not { } pilot || EngineCodec.IsDead(pilot))
+            {
+                seats.RemoveAt(i);
+                continue;
+            }
             seated.Add(pilot);
             var data = pilot.Data;
             var gridVelocity = seat.Parent != null && seat.Parent.Data.TryGet<RigidBodyData>(out var grid) ? grid.LinearVelocity : Vector3.Zero;
@@ -487,7 +546,7 @@ internal static class PassengerSeats
     internal static string Rig(string args)
     {
         var session = MpPlugin.App?.ClientSession;
-        var me = ClientWorld.Current?.OwnCharacter ?? session?.GetEntitiesOfType<InteractorEntityComponent>().Select(e => e.Get<InteractorEntityComponent>()).FirstOrDefault(i => i.IsControlledByLocalPlayer)?.Entity;
+        var me = session?.GetEntitiesOfType<InteractorEntityComponent>().Select(e => e.Get<InteractorEntityComponent>()).FirstOrDefault(i => i.IsControlledByLocalPlayer)?.Entity;
         if (session == null || me == null) return "no local character";
         var at = me.Data.GetWorldTransform().Position;
         var current = me.AsInterface<ISeatable>()?.CurrentSeat as SeatComponent;

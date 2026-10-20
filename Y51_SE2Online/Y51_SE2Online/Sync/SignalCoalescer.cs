@@ -55,6 +55,7 @@ public sealed class SignalCoalescer
 
 	private readonly Dictionary<ushort, Policy?> _policies = new();
 	private readonly Dictionary<(ushort Key, uint Target), Entry> _entries = new();
+	private readonly Dictionary<uint, List<ushort>> _keysOf = new();
 	private readonly List<Entry> _queued = new();
 	private readonly Dictionary<string, (long In, long Out)> _byName = new();
 
@@ -79,6 +80,8 @@ public sealed class SignalCoalescer
 		if (!_entries.TryGetValue((c.Key, target), out var e))
 		{
 			_entries[(c.Key, target)] = e = new Entry { Policy = policy, Key = c.Key, Target = target };
+			if (!_keysOf.TryGetValue(target, out var keys)) _keysOf[target] = keys = new List<ushort>(2);
+			keys.Add(c.Key);
 		}
 		Offered++;
 		_byName[policy.Name] = (_byName.GetValueOrDefault(policy.Name).In + 1, _byName.GetValueOrDefault(policy.Name).Out);
@@ -150,21 +153,14 @@ public sealed class SignalCoalescer
 	/// <summary>The entity is gone for every client: drop what waits for it and what was last sent.</summary>
 	public void Forget(uint target)
 	{
-		if (_entries.Count == 0) return;
-		List<(ushort, uint)>? gone = null;
-		foreach (var kv in _entries)
+		if (!_keysOf.Remove(target, out var keys)) return;
+		// A queued entry with nothing pending leaves the queue at the next Flush.
+		foreach (ushort key in keys)
 		{
-			if (kv.Key.Target == target) (gone ??= new()).Add(kv.Key);
-		}
-		if (gone == null) return;
-		foreach (var key in gone)
-		{
-			var e = _entries[key];
+			if (!_entries.Remove((key, target), out var e)) continue;
 			e.Pending = null;
 			e.PendingValues = null;
-			_entries.Remove(key);
 		}
-		_queued.RemoveAll(e => e.Target == target);
 	}
 
 	public string Describe() => $"coalesced {Coalesced} of {Offered} ({Forwarded} forwarded, {_entries.Count} tracked): "

@@ -40,6 +40,8 @@ public sealed class AdminScreen : ScreenView
     private readonly TextBlock _status = OnlineUi.Text("", "SubTitle");
     private readonly TextBlock _message = OnlineUi.Text("", "SubtleNotice", 21);
     private readonly TextBlock _pvp, _raid, _pcu, _sun;
+    private readonly OnlineToggle _bypass = new OnlineToggle("Access bypass for me");
+    private bool _syncingBypass;
     private readonly TextBox _dayInput = OnlineUi.Input("Day length (minutes)", 6);
     private readonly TextBox _pcuInput = OnlineUi.Input("PCU per player", 9);
     private readonly TextBox _motdInput = new() { Watermark = "Message of the day ({player}, {server}, {online}, {max})", MaxLength = Core.Motd.MaxText, FontSize = 22, MinHeight = 120, AcceptsReturn = true, TextWrapping = Avalonia.Media.TextWrapping.Wrap };
@@ -82,6 +84,10 @@ public sealed class AdminScreen : ScreenView
             OnlineUi.Row(creativeOn, creativeOff),
             OnlineUi.Text("Paste blueprints with the game's normal blueprint screen while creative tools are on. Welding speed is world-wide and stays survival.", "SubtleNotice", 22),
             OnlineUi.Text("The game's F12 debug menu is limited to admins on this server.", "SubtleNotice", 22));
+        _bypass.IsCheckedChanged += (_, _) => { if (!_syncingBypass) Send(new AdminRequest(AdminAction.AccessBypass, Value: _bypass.IsChecked)); };
+        var bypass = OnlineUi.Section("ACCESS BYPASS",
+            OnlineUi.Text("Nobody, the host and admins included, can use, open, sit in or build on grids and blocks they do not own or have faction or everyone access to. Turn this on to bypass that for yourself only, for this session.", null, 24),
+            _bypass);
         _pvp = OnlineUi.Text("", "SubTitle");
         _raid = OnlineUi.Text("", "SubTitle");
         _pcu = OnlineUi.Text("", "SubTitle");
@@ -146,7 +152,7 @@ public sealed class AdminScreen : ScreenView
         _bring = OnlineUi.Button("Bring player to me", () => { if (_playerList.SelectedItem is AccessPlayer p) Send(new AdminRequest(AdminAction.Bring, p.SteamId)); }, "AdminBring", true);
         var players = Page(OnlineUi.Text("Kick, ban and promote players from the Players screen (" + MpMenu.Settings.PlayersKey + ").", "SubtleNotice", 22), _playerList, OnlineUi.Row(_teleport, _bring));
 
-        _pages = new Control[] { OnlineUi.Scroll(OnlineUi.Stack(tools, pvp, motd, sun)), spawn, items, zones, players };
+        _pages = new Control[] { OnlineUi.Scroll(OnlineUi.Stack(tools, bypass, pvp, motd, sun)), spawn, items, zones, players };
         string[] names = { "Creative", "Spawn", "Items", "Safe zones", "Players" };
         _tabs = new Button[names.Length];
         for (int i = 0; i < names.Length; i++) { int index = i; _tabs[i] = OnlineUi.Button(names[i], () => Select(index), "Admin" + names[i].Replace(" ", "")); _tabs[i].Classes.Add("OnlineNavigation"); }
@@ -235,6 +241,7 @@ public sealed class AdminScreen : ScreenView
         _message.Text = state.Message; _message.IsVisible = !string.IsNullOrWhiteSpace(state.Message);
         _pvp.Text = state.Pvp ? "PvP is ON" : "PvP is OFF (listed as PvE)";
         _raid.Text = "Offline raid protection is " + (state.OfflineRaidProtection ? "ON" : "OFF");
+        if (_bypass.IsChecked != state.AccessBypass) { _syncingBypass = true; _bypass.IsChecked = state.AccessBypass; _syncingBypass = false; }
         _pcu.Text = "PCU limit per player: " + (state.PcuLimit <= 0 || state.PcuLimit == int.MaxValue ? "unlimited" : state.PcuLimit.ToString("N0"));
         _motd.Text = string.IsNullOrWhiteSpace(state.Motd) ? "No message of the day." : "Current: " + state.Motd;
         _sun.Text = "Sun rotation is " + (state.SunRotation ? "ON" : "OFF") + (state.SunPeriodMinutes > 0 ? ", one full day every " + AccessList.DayLength(state.SunPeriodMinutes) : "");

@@ -30,6 +30,7 @@ public static class HostSettingsChange
         if (Countries.Normalize(before.Country) != Countries.Normalize(after.Country)) live.Add(Countries.Normalize(after.Country) is { Length: 2 } code ? "country " + Countries.Name(code) : "country located by IP");
         if (before.Pvp != after.Pvp) live.Add("PvP " + OnOff(after.Pvp));
         if (before.OfflineRaidProtection != after.OfflineRaidProtection) live.Add("offline raid protection " + OnOff(after.OfflineRaidProtection));
+        if (before.PauseOfflineStats != after.PauseOfflineStats) live.Add("offline players' survival stats " + (after.PauseOfflineStats ? "paused" : "drain"));
         if (before.PcuLimit != after.PcuLimit) live.Add(after.PcuLimit is int pcu ? (pcu == 0 ? "no PCU limit" : "PCU limit " + pcu.ToString("N0", CultureInfo.InvariantCulture)) : "the world's own PCU limit");
         if (before.SunRotation != after.SunRotation && after.SunRotation is bool sun) live.Add(sun ? "the sun moves" : "the sun is stopped");
         if (before.SunPeriodMinutes != after.SunPeriodMinutes && after.SunPeriodMinutes is double day) live.Add("a full day lasts " + Sync.AccessList.DayLength(day));

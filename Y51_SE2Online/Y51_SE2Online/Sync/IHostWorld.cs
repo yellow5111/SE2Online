@@ -11,6 +11,7 @@ public interface IHostWorld
 	void OnPunch(ushort fromClientId, ushort targetClientId) { }
 	void OnTrade(ushort clientId, byte[] data) { }
 	void OnNotSeated(ushort clientId) { }
+	void OnPossessed(ushort clientId) { }
 	/// <summary>Where a player's character is for proximity voice, from a server-thread snapshot; false if unknown.</summary>
 	bool TryVoicePosition(ushort clientId, out Vec3D position) { position = default; return false; }
 	ServerInfoRow[] ServerInfo() => System.Array.Empty<ServerInfoRow>();
@@ -23,6 +24,9 @@ public interface IHostWorld
 	void RequestCapture(PeerId client);
 
 	void CancelCapture(PeerId client);
+
+	/// <summary>The join was refused; SE2 4.0 also refuses the player at the game's own handshake.</summary>
+	void Rejected(PeerId peer, string why) { }
 
 	void RequestCharacter(PeerId client, ushort clientId, string name, int choice, bool respawn)
 	{

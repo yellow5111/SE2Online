@@ -227,7 +227,7 @@ internal static class OnlineUi
         return hint;
     }
 
-    public static Control Field(string label, Control input, string help = null, Control warning = null)
+    public static Control Field(string label, Control input, string help = null, Control warning = null, double inputWidth = 480)
     {
         input.MinHeight = 48;
         // The hint is a small line right under the setting's name, not a separate block below it.
@@ -236,7 +236,7 @@ internal static class OnlineUi
         // SE2's SubtleNotice style centres the text; a hint sits left-aligned under its setting's name.
         if (help != null) { var hint = Text(help, "SubtleNotice", 17); hint.HorizontalAlignment = HorizontalAlignment.Left; hint.TextAlignment = TextAlignment.Left; caption.Children.Add(hint); }
         if (warning != null) caption.Children.Add(warning);
-        var field = new Grid { ColumnDefinitions = new ColumnDefinitions("*,24,480"), Margin = new Thickness(0, 6) };
+        var field = new Grid { ColumnDefinitions = new ColumnDefinitions("*,24," + inputWidth.ToString(System.Globalization.CultureInfo.InvariantCulture)), Margin = new Thickness(0, 6) };
         input.VerticalAlignment = VerticalAlignment.Center;
         field.Children.Add(caption); Grid.SetColumn(input, 2); field.Children.Add(input);
         return field;

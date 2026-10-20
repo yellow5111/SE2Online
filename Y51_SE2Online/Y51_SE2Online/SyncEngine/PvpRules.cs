@@ -41,8 +41,8 @@ internal static class PvpRules
     [ThreadStatic] private static long t_attacker;
     [ThreadStatic] private static bool t_pvpDamage;
 
-    private static FieldInfo _spawnSource, _simulatedSource;
-    private static PropertyInfo _handleEmpty, _handleValue;
+    private static FieldInfo _spawnSource;
+    private static PropertyInfo _simulatedSource;
     private static FieldInfo _statGameMode;
     private static MethodInfo _updateStat;
 
@@ -50,12 +50,12 @@ internal static class PvpRules
     {
         var projectiles = typeof(ProjectileSystemSessionComponent);
         _spawnSource = AccessTools.Field(AccessTools.Inner(projectiles, "ProjectileSpawnInfo"), "SourceEntity");
-        _simulatedSource = AccessTools.Field(AccessTools.Inner(projectiles, "SimulatedProjectileData"), "SourceEntity");
-        _handleEmpty = _simulatedSource.FieldType.GetProperty("IsEmpty");
-        _handleValue = _simulatedSource.FieldType.GetProperty("Value");
+        // SE2 4.0: the spawn info holds a weak reference, the simulated projectile a property.
+        _simulatedSource = AccessTools.Property(AccessTools.Inner(projectiles, "SimulatedProjectileData"), "SourceEntity");
         HarmonyMethod Own(string name) => new(typeof(PvpRules), name);
         harmony.Patch(AccessTools.Method(projectiles, "SpawnHitscanProjectile"), prefix: Own(nameof(HitscanPrefix)), finalizer: Own(nameof(ClearFinalizer)));
         harmony.Patch(AccessTools.Method(projectiles, "ProcessHit"), prefix: Own(nameof(SimulatedPrefix)), finalizer: Own(nameof(ProcessHitFinalizer)));
+        harmony.Patch(AccessTools.Method(projectiles, "ProcessHit"), prefix: Own(nameof(HitBodyAlivePrefix)));
         harmony.Patch(AccessTools.Method(projectiles, "ExplodeProjectile"), prefix: Own(nameof(ExplodePrefix)));
         foreach (var receiver in new[] { typeof(CharacterHitReceiverComponent), typeof(GridHitReceiverComponent) })
         {
@@ -102,15 +102,14 @@ internal static class PvpRules
 
     private static void HitscanPrefix(object[] __args)
     {
-        t_attacker = Active && __args[0] != null ? TeamPermissions.OwnerOf(_spawnSource.GetValue(__args[0]) as Entity) : 0;
+        t_attacker = Active && __args[0] != null ? TeamPermissions.OwnerOf((_spawnSource.GetValue(__args[0]) as Keen.VRage.Core.Game.Utils.WeakEntityReference)?.Entity) : 0;
     }
 
     private static void SimulatedPrefix(object[] __args)
     {
         t_attacker = 0;
         if (!Active || __args[2] == null) return;
-        object handle = _simulatedSource.GetValue(__args[2]);
-        if (handle != null && !(bool)_handleEmpty.GetValue(handle)) t_attacker = TeamPermissions.OwnerOf(_handleValue.GetValue(handle) as Entity);
+        if (_simulatedSource.GetValue(__args[2]) is Entity source) t_attacker = TeamPermissions.OwnerOf(source);
     }
 
     private static void ExplodePrefix(Vector3D explosionCenter)
@@ -160,12 +159,13 @@ internal static class PvpRules
         return false;
     }
 
-    private static bool ToolPrefix(Component __instance, Span<Entity> entities, Entity sourceTopEntity, ref bool __result)
+    private static bool ToolPrefix(Component __instance, ReadOnlySpan<Keen.Game2.Simulation.WorldObjects.Tools.ToolDamage.ToolDamageTarget> targets, Entity sourceTopEntity, ref bool __result)
     {
         t_attacker = Active ? TeamPermissions.OwnerOf(sourceTopEntity) : 0;
         if (!Active) return true;
-        foreach (Entity target in entities)
+        foreach (var hit in targets)
         {
+            Entity target = hit.Entity;
             long victim = target == null ? 0 : TeamPermissions.OwnerOf(target);
             if (target != null && (!Allowed(t_attacker, victim, Pvp, IsPlayer) || Raid(__instance, victim)))
             {
@@ -199,6 +199,16 @@ internal static class PvpRules
     }
 
     private static bool _staleHitLogged;
+
+    // The usual stray hit: the body the sweep found was removed before the hit was processed (a grid despawned, a block
+    // destroyed in the same tick). Dropped before ProcessHit touches it; the finalizer stays for anything else.
+    private static bool HitBodyAlivePrefix(ProjectileSystemSessionComponent __instance, Keen.VRage.Physics.Queries.SweepQueryHit entryHit, ref bool isProjectileAlive, ref Vector3D? __result)
+    {
+        if (__instance.Entity.Scene.IsEntityAlive(entryHit.Body)) return true;
+        __result = null;
+        isProjectileAlive = false;
+        return false;
+    }
 
     // ProcessHit dereferences the projectile's source entity and the hit body's entity. In multiplayer either can
     // be gone mid-flight (a joiner's gun swapped or despawned, a grid despawned), and the NullReferenceException

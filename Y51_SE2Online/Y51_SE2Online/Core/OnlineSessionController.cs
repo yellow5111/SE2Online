@@ -43,6 +43,25 @@ public sealed class OnlineSessionController
         _runtime.StopNetworking();
     }
 
+    /// <summary>SE2 4.0: the game already joined a server by itself; start the join session without leaving that world.</summary>
+    public void Attach(MpOptions target)
+    {
+        if (Busy || Current != null) return;
+        try
+        {
+            Error = null;
+            _runtime.ResetMode();
+            _runtime.StartMode(target);
+            Current = target;
+            State = OnlineSessionState.Joining;
+        }
+        catch (Exception ex)
+        {
+            Error = ex.Message;
+            State = OnlineSessionState.Failed;
+        }
+    }
+
     public void WorldExiting(long now)
     {
         if (_worldExiting || (Current == null && !Busy)) return;

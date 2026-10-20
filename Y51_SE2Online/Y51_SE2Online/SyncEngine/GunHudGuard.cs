@@ -17,12 +17,10 @@ internal static class GunHudGuard
 	internal static void Install(Harmony harmony)
 	{
 		harmony.Patch(AccessTools.Method(typeof(ProjectileWeaponScreenViewModel), "UpdateFromModel"), prefix: new HarmonyMethod(typeof(GunHudGuard), nameof(Prefix)));
-		harmony.Patch(AccessTools.Method(typeof(WeaponGroupScreenViewModel), "UpdateData"), prefix: new HarmonyMethod(typeof(GunHudGuard), nameof(GroupPrefix)));
 	}
 
 	private static bool Prefix(ProjectileWeaponScreenViewModel __instance) => Ready(__instance.Model?.WeaponDefinition != null);
 
-	private static bool GroupPrefix(WeaponGroupScreenViewModel __instance) => Ready(__instance._models.IsDefault || __instance._models.All(m => m.Projectile != null));
 
 	private static bool Ready(bool ready)
 	{

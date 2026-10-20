@@ -4,7 +4,7 @@ namespace Y51_SE2Online.Core;
 
 public static class HookTargets
 {
-	public const string GameBuild = "2.4.0.95";
+	public const string GameBuild = "4.0.0.3151";
 
 	private const string Mp = "VRage.Multiplayer";
 

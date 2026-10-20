@@ -67,7 +67,7 @@ internal sealed partial class HostWorld
 
     private string Admin(Session session, ushort clientId, AdminRequest r)
     {
-        long actor = clientId == SyncProtocol.HostClientId ? PlayerIdentities.HotfixIdentity : IdentityOf(clientId);
+        long actor = clientId == SyncProtocol.HostClientId ? _hostIdentity : IdentityOf(clientId);
         Entity body = CharacterOf(clientId);
         WorldTransform? here = body != null && !EngineCodec.IsDead(body) ? body.Data.GetWorldTransform() : null;
         switch (r.Action)
@@ -140,7 +140,11 @@ internal sealed partial class HostWorld
             if (body == null || other == null || EngineCodec.IsDead(other)) return "Both players need a character in the world.";
             var (from, to) = r.Action == AdminAction.TeleportTo ? (body, other) : (other, body);
             var target = to.Data.GetWorldTransform();
-            from.Data.Set(new WorldTransform(target.Position + WorldTransform.TransformDirection(new Vector3D(0, 0, 2), target), target.Orientation));
+            // Teleport, not a plain transform write: SE2 4.0's physics and replication treat it as a jump to snap to, and the
+            // moved player's own game takes the new place instead of freezing against its old one (Keen's admin teleport).
+            var data = from.Data;
+            data.Teleport(new WorldTransform(target.Position + WorldTransform.TransformDirection(new Vector3D(0, 0, 2), target), target.Orientation));
+            if (data.Has<Keen.VRage.Physics.Data.RigidBodyData>()) data.Set<Keen.VRage.Physics.Data.RigidBodyData>(default);
             return r.Action == AdminAction.TeleportTo ? "Teleported to the player." : "Brought the player to you.";
         }
         default:

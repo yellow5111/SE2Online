@@ -1,0 +1,294 @@
+using System;
+using HarmonyLib;
+using Keen.Game2.Client.WorldObjects.CubeBlocks.MechanicalBlocks.Wheels;
+using Keen.Game2.Simulation.GameSystems.Discoveries;
+using Keen.Game2.Simulation.GameSystems.Ownership;
+using Keen.VRage.DCS.Accessors;
+using Keen.VRage.Core;
+using Keen.VRage.Core.Game.Data;
+using Keen.VRage.Library.Mathematics;
+using Keen.VRage.Library.Memory;
+using Keen.VRage.Physics.Data;
+using Keen.VRage.Physics.Havok;
+using Keen.VRage.Physics.Havok.WorldManager;
+using Keen.VRage.Voxels.Components.Flora;
+using Y51_SE2Online.Core;
+
+namespace Y51_SE2Online.KeenNetcode;
+
+/// <summary>Crashes in SE2 4.0's own code that only multiplayer worlds reach; each guard turns one into a skipped frame.</summary>
+internal static class KeenGuards
+{
+	public static void Install(Harmony harmony)
+	{
+		var wheelAudio = AccessTools.Method(AccessTools.Inner(typeof(DrivingWheelAudioComponent), "AudioAdapter"), "TryGetEffectDefinition");
+		harmony.Patch(wheelAudio, finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(WheelAudioFinalizer)));
+		harmony.Patch(AccessTools.Method(typeof(DiscoveriesServerSessionComponent), nameof(DiscoveriesServerSessionComponent.TryIncreaseDiscoveryState)),
+			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(DiscoveryFinalizer)));
+		harmony.Patch(AccessTools.Method(typeof(HavokSessionComponent), "OnUpdateBodyFlags"), prefix: new HarmonyMethod(typeof(KeenGuards), nameof(BodyFlagsPrefix)));
+		harmony.Patch(AccessTools.Method(typeof(PlanetFloraSectorPhysicsComponent), "Init", new[] { typeof(PlanetFloraSectorPhysicsComponentObjectBuilder) }),
+			transpiler: new HarmonyMethod(typeof(KeenGuards), nameof(ServerOnlyDataTranspiler)));
+		harmony.Patch(AccessTools.Method(typeof(FloraEntityPhysicsComponent), "Init", new[] { typeof(Keen.VRage.Game.Components.Physics.ScalablePhysicsObjectBuilder) }),
+			transpiler: new HarmonyMethod(typeof(KeenGuards), nameof(ServerOnlyDataTranspiler)));
+		var reorder = AccessTools.Method(typeof(HavokLargeWorldManager), "GetEntityReorderEntryIndex",
+			new[] { typeof(DEntity), typeof(BufferReference<HavokLargeWorldManager.EntityReorderEntry>), typeof(System.Collections.Generic.Dictionary<DEntity, int>) });
+		harmony.Patch(reorder, prefix: new HarmonyMethod(typeof(KeenGuards), nameof(ReorderEntryPrefix)));
+		harmony.Patch(AccessTools.Method(typeof(HavokLargeWorldManager), nameof(HavokLargeWorldManager.SetBodyMotionType)),
+			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(MotionTypePrefix)), finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(MotionTypeFinalizer)));
+		harmony.Patch(AccessTools.Method(typeof(HavokLargeWorldManager), "DestroyBody", new[] { typeof(DEntity), typeof(bool) }),
+			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(DestroyBodyPrefix)));
+		harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Steam.EngineComponents.SteamSocialInteractionServiceComponent), "GetDisplayName"),
+			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(DisplayNameFinalizer)));
+		harmony.Patch(AccessTools.Method(AccessTools.TypeByName("Keen.VRage.Library.Threading.SkipWaitMonitor"), "ProcessException"),
+			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(UnawaitedExceptionPrefix)));
+		harmony.Patch(AccessTools.Method(AccessTools.TypeByName("Keen.Game2.Client.UI.TerminalScreen.ControlPanel.ControlPanelTreeViewModel"), "SortGrids"),
+			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(SortGridsPrefix)));
+		if (AccessTools.TypeByName("Keen.VRage.Render12.SceneSystem.SceneManager") is { } sceneManager)
+			foreach (var method in AccessTools.GetDeclaredMethods(sceneManager))
+				if (method.Name.StartsWith("IRootEntity_", StringComparison.Ordinal) && !method.IsAbstract && !method.ContainsGenericParameters)
+					harmony.Patch(method, finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(RenderEntityFinalizer)));
+		harmony.Patch(AccessTools.Method(AccessTools.TypeByName("Keen.Game2.Client.GameSystems.CameraSystems.CameraSystemComponent"), "TrySyncCameraData"),
+			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(CameraSyncFinalizer)));
+		harmony.Patch(AccessTools.Method(AccessTools.TypeByName("Keen.Game2.Client.WorldObjects.Shared.Movement.Effects.GridThrustEffectsComponent"), "UnsubscribeBlock"),
+			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(ThrustUnsubscribePrefix)));
+		harmony.Patch(AccessTools.Method(typeof(Keen.Game2.ReconnectComponent), "UnsubscribeFromNetworking"),
+			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(UnsubscribeNetworkingPrefix)));
+		harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Core.Platform.CrashReporting.CrashHandler), "HandleUnobservedException"),
+			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(RefusedRequestPrefix)));
+		harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Multiplayer.Replications.OutOfProcess.ReplicationEntitySerializationContext), "GetEntityId"),
+			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(EntityIdFinalizer)));
+	}
+
+	// A client's static-object tree can keep a body whose static data never landed (Keen's command-buffer replay drops a
+	// write whose slot is gone: "There should have been someone who already wrote the data"); cluster reordering then read a
+	// garbage collider (EntryPointNotFoundException) or missing data ("Data not found") and the client died. The first
+	// orphan seen clears every orphan out of the tree, and this one is entered as a point so the current reorder goes on.
+	private static bool ReorderEntryPrefix(HavokLargeWorldManager __instance, DEntity entity, BufferReference<HavokLargeWorldManager.EntityReorderEntry> entries,
+		System.Collections.Generic.Dictionary<DEntity, int> keys, ref int __result)
+	{
+		if (keys.ContainsKey(entity)) return true;
+		var context = __instance.GetContext(entity);
+		if (context.TryGet<ClusterIndex>(out _) || context.TryGet<HavokLargeWorldManager.StaticData>(out _)) return true;
+		var position = context.GetWorldTransform().Position;
+		// ponytail: a full tree scan per orphan seen (about one every few seconds on a planet world); a point query missed
+		// orphans whose box does not hold their origin, and the reorder then crashed on them.
+		int purged = PurgeStaticOrphans(__instance);
+		int index = entries.Count;
+		entries.Add(new HavokLargeWorldManager.EntityReorderEntry(entity, -1, new BoundingBoxD(position, position)));
+		keys.Add(entity, index);
+		__result = index;
+		GameLog.Instance.WarnOnce("reorder-orphan", $"keen guards: physics body of entity {entity} is listed without its physics data; kept as a point (further ones not logged)");
+		if (purged > 0) GameLog.Instance.Warn($"keen guards: removed {purged} static-tree entries whose physics data was gone");
+		return false;
+	}
+
+	// Unloading a world (leaving a server) destroys every body; a cluster's static list can still name an entity that is
+	// already gone, and DestroyBody on it threw in the scene lookup and the crash handler closed the game on the way out.
+	// The same teardown also reaches entities still alive but already half-removed (no archetype): DestroyBody's first read,
+	// Has<BodyProxy>, threw. That read is done here first, before DestroyBody changes anything.
+	private static bool DestroyBodyPrefix(HavokLargeWorldManager __instance, DEntity body)
+	{
+		if (__instance._session.Scene.IsEntityAlive(body))
+		{
+			try
+			{
+				__instance.GetContext(body).Has<BodyProxy>();
+				return true;
+			}
+			catch (NullReferenceException) { }
+		}
+		GameLog.Instance.WarnOnce("destroy-dead-body", $"keen guards: skipped destroying the physics body of entity {body}, which no longer exists");
+		return false;
+	}
+
+	private static int PurgeStaticOrphans(HavokLargeWorldManager manager)
+	{
+		var tree = manager._staticObjectTree;
+		var scene = manager._session.Scene;
+		int purged = 0;
+		using Buffer<int> leaves = default;
+		tree.CollectLeafIdentifiers(leaves);
+		foreach (int leaf in leaves)
+		{
+			DEntity owner = tree.GetValue(leaf);
+			if (scene.IsEntityAlive(owner) && manager.GetContext(owner).Has<HavokLargeWorldManager.StaticData>()) continue;
+			tree.Remove(leaf);
+			purged++;
+		}
+		return purged;
+	}
+
+	// A planet's flora sector, and each breakable tree, replicates to clients with the server's destruction data (asymmetric
+	// destruction, safe-speed override); the client scene has no storage for those types, Data.Set threw, and the joining client crashed (about half
+	// of joins on planet worlds). Only the server breaks flora, so the client goes on without them.
+	// The finalizer alone was not enough: adding a data type moves the entity to another archetype, the client scene threw
+	// in the middle of that move, and the half-moved entity corrupted the scene's storage ("Source entity out of active
+	// range"), which crashed the client seconds later (often as a respawn ship arrived). The two writes (the only
+	// Data.Set calls in these Init bodies) are now skipped on a client before they start.
+	private static System.Collections.Generic.IEnumerable<CodeInstruction> ServerOnlyDataTranspiler(System.Collections.Generic.IEnumerable<CodeInstruction> instructions)
+	{
+		var helper = AccessTools.Method(typeof(KeenGuards), nameof(ServerOnlySet));
+		foreach (var instruction in instructions)
+		{
+			if (instruction.operand is System.Reflection.MethodInfo { Name: "Set", IsGenericMethod: true } method && method.DeclaringType == typeof(DEntityContext))
+				yield return new CodeInstruction(System.Reflection.Emit.OpCodes.Call, helper.MakeGenericMethod(method.GetGenericArguments())).WithLabels(instruction.labels).WithBlocks(instruction.blocks);
+			else
+				yield return instruction;
+		}
+	}
+
+	private static void ServerOnlySet<T>(in DEntityContext context, T data) where T : unmanaged
+	{
+		if (MpPlugin.App?.ClientSession is { } client && ReferenceEquals(context.Scene, client.Scene)) return;
+		context.Set(data);
+	}
+
+	// On a client, a replicated body can get its contact flags updated before (or after) Havok holds it; the native call
+	// then wrote through an invalid body and the process died with an access violation (0xC0000005), no crash report.
+	private static unsafe bool BodyFlagsPrefix(DEntity body, BodyProxy proxy)
+	{
+		if (proxy.World != null && proxy.World->isBodyValid(body) && proxy.World->isBodyAdded(body)) return true;
+		GameLog.Instance.WarnOnce("body-flags-invalid", $"keen guards: skipped a contact-flag update for a physics body Havok does not hold (entity {body})");
+		return false;
+	}
+
+	// Same gap for a motion change: a grid that just arrived (a respawn lander placed and held on its site) can be switched
+	// static or dynamic before this client's Havok holds its body; reading that body crashed the client. The change is
+	// skipped; the body is built with the grid's current motion when it is added.
+	private static unsafe bool MotionTypePrefix(HavokLargeWorldManager __instance, DEntity body)
+	{
+		var context = new DEntityContext(__instance._session.Scene, body);
+		if (context.Has<HavokLargeWorldManager.StaticData>() || !context.TryGet<BodyProxy>(out var proxy)) return true;
+		if (proxy.World != null && proxy.World->isBodyValid(body) && proxy.World->isBodyAdded(body)) return true;
+		GameLog.Instance.WarnOnce("motion-type-invalid", $"keen guards: skipped a motion change for a physics body Havok does not hold yet (entity {body})");
+		return false;
+	}
+
+	// Reading the body is the first thing the static switch does (nothing has changed yet when it throws), so a body the
+	// client's Havok lost track of skips the switch instead of crashing.
+	private static Exception? MotionTypeFinalizer(Exception? __exception, DEntity body)
+	{
+		if (__exception is not NullReferenceException || __exception.TargetSite?.Name != "getBody") return __exception;
+		GameLog.Instance.WarnOnce("motion-type-nre", $"keen guards: skipped a motion change for a physics body Havok could not read (entity {body})");
+		return null;
+	}
+
+	// SE2 4.0 only sets up discovery data for identities with a connected client; an offline player's character standing
+	// in a discoverable's bounds threw here every tick and stopped the server (vanilla -localDedicatedServer too).
+	private static Exception? DiscoveryFinalizer(Exception? __exception, IdentityId owner, ref bool __result)
+	{
+		if (__exception is not NullReferenceException) return __exception;
+		GameLog.Instance.WarnOnce("discovery-offline-" + (long)owner, $"keen guards: identity {(long)owner} has no discovery data yet (offline player); discovery skipped");
+		__result = false;
+		return null;
+	}
+
+	// Players SE2 Online adds without a Steam session of their own (other game instances of one account on a PC) have no
+	// Steam id; asking Steam for their name threw inside a network story, and the fault took the server down with it.
+	private static Exception? DisplayNameFinalizer(Exception? __exception, ref string? __result)
+	{
+		if (__exception is not ArgumentException) return __exception;
+		__result = "Player";
+		return null;
+	}
+
+	// One client's failed network story is that client's problem: SE2 4.0 rethrew it on the server's continuation queue
+	// and the crash handler closed the server for everyone.
+	// The server turning down a request (no access, the block is gone) faults the story the client awaited; a terminal
+	// screen awaiting it handed that to the crash handler and the game closed. In multiplayer it is a refusal, not a crash.
+	// The server sends no grids for a control panel the player may not use; Keen's panel then moved "the grid you opened
+	// it from" to the top without checking it was there, and the game closed.
+	private static bool SortGridsPrefix(object __instance, Keen.VRage.Multiplayer.SecureIds.EntityId mainEntity)
+	{
+		var grids = (System.Collections.IList)AccessTools.Field(__instance.GetType(), "_grids").GetValue(__instance)!;
+		foreach (object grid in grids)
+			if (Equals(AccessTools.Property(grid.GetType(), "EntityId").GetValue(grid), mainEntity)) return true;
+		if (Y51_SE2Online.SyncEngine.AdminAccess.InSession)
+			Y51_SE2Online.Sync.ChatLog.Add(new Y51_SE2Online.Sync.ChatLine("Server", 0, "Access denied.", Y51_SE2Online.Sync.ChatKind.System, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), MpClock.NowMs());
+		return false;
+	}
+
+	// Leaving a world unloads its scenes on the main thread while the render thread still replays commands queued for
+	// their entities ("deactivate this root entity"); looking the entity up then hit the freed scene and the game closed
+	// on the way to the main menu. A command for an entity that no longer exists has nothing left to do.
+	private static Exception? RenderEntityFinalizer(Exception? __exception, System.Reflection.MethodBase __originalMethod)
+	{
+		if (__exception is not (NullReferenceException or EntryPointNotFoundException)) return __exception;
+		GameLog.Instance.WarnOnce("render-entity-gone", $"keen guards: render command {__originalMethod.Name} for an entity whose world was already unloaded; skipped");
+		return null;
+	}
+
+	private static readonly AccessTools.FieldRef<Keen.Game2.ReconnectComponent, Keen.Game2.OutOfProcess.GameClientNetworkingComponent?> SubscribedNetworking =
+		AccessTools.FieldRefAccess<Keen.Game2.ReconnectComponent, Keen.Game2.OutOfProcess.GameClientNetworkingComponent?>("_subscribedNetworkingComponent");
+
+	// Keen's reconnect helper keeps the last session's network component until the next join, then unsubscribes from it;
+	// by then that session is destroyed, the unsubscribe threw, and every second join in one game run failed (and the
+	// failed load then crashed). A component whose entity is gone has nothing left to unsubscribe from.
+	private static void UnsubscribeNetworkingPrefix(Keen.Game2.ReconnectComponent __instance)
+	{
+		var old = SubscribedNetworking(__instance);
+		if (old != null && !Keen.VRage.DCS.Signals.EntityInternalSignalsApi.Constructed(old.Entity)) SubscribedNetworking(__instance) = null;
+	}
+
+	// A body handed over by the host and then seated by it switches the camera from the character to the cockpit within a
+	// frame or two; saving the third-person camera's state in between read the camera's not yet set observed entity and
+	// the game closed the moment a respawn ship's pilot arrived. The save is only for restoring the camera next session.
+	private static Exception? CameraSyncFinalizer(Exception? __exception)
+	{
+		if (__exception is not NullReferenceException) return __exception;
+		GameLog.Instance.WarnOnce("camera-sync", "keen guards: skipped saving the camera state while the camera changed bodies");
+		return null;
+	}
+
+	// A grid's block-removal commit can run after the removed thruster's own entity was already torn down (replicated
+	// removals arrive in one batch); unhooking from a torn-down entity read its freed signal table and the client died.
+	// Nothing listens on a torn-down entity, so only the grid's own list needs the thruster out of it.
+	private static bool ThrustUnsubscribePrefix(object __instance, Keen.Game2.Simulation.WorldObjects.CubeBlocks.CubeBlockComponent block)
+	{
+		if (block.Entity != null && Keen.VRage.DCS.Signals.EntityInternalSignalsApi.Constructed(block.Entity)) return true;
+		if (block is Keen.Game2.Simulation.WorldObjects.CubeBlocks.FunctionalBlockComponent thruster)
+			(Traverse.Create(__instance).Field("_thrusterBlocks").GetValue() as System.Collections.Generic.HashSet<Keen.Game2.Simulation.WorldObjects.CubeBlocks.FunctionalBlockComponent>)?.Remove(thruster);
+		return false;
+	}
+
+	private static bool RefusedRequestPrefix(Exception ex)
+	{
+		if (!Y51_SE2Online.SyncEngine.AdminAccess.InSession) return true;
+		for (Exception? e = ex; e != null; e = e is AggregateException a && a.InnerExceptions.Count > 0 ? a.InnerExceptions[0] : e.InnerException)
+		{
+			if (e is not Keen.VRage.Multiplayer.NetworkStories.NetworkStoryRemoteFaultException) continue;
+			GameLog.Instance.Warn($"keen guards: the server refused a request ({e.Message.Split('\n')[0]}); the game goes on");
+			Y51_SE2Online.Sync.ChatLog.Add(new Y51_SE2Online.Sync.ChatLine("Server", 0, "Access denied.", Y51_SE2Online.Sync.ChatKind.System, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), MpClock.NowMs());
+			return false;
+		}
+		return true;
+	}
+
+	private static bool UnawaitedExceptionPrefix(System.Runtime.ExceptionServices.ExceptionDispatchInfo? ____exception)
+	{
+		if (____exception?.SourceException is not { } exception || exception.GetType().Name != "NetworkStoryRemoteFaultException") return true;
+		GameLog.Instance.Warn("keen guards: a player's network story failed on their side; the server goes on (" + exception.Message + ")");
+		return false;
+	}
+
+	// A signal for a player can name an entity that player was never sent (out of range, or created and removed between two
+	// sends); serializing it threw "Replication entity has no network id" and the server died. It goes out as -1, the id
+	// Keen already uses for stubs, and that player's client skips the reference.
+	private static Exception? EntityIdFinalizer(Exception? __exception, ref int __result)
+	{
+		if (__exception is not Keen.VRage.Multiplayer.Replications.InProcess.NoMatchingLocalPairingException) return __exception;
+		GameLog.Instance.WarnOnce("entity-no-network-id", "keen guards: a signal named an entity this player was never sent; the reference was dropped (" + __exception.Message + ")");
+		__result = -1;
+		return null;
+	}
+
+	// A client's wheel can touch ground whose material has no effect group yet; the lookup then threw ArgumentNullException
+	// and the crash handler closed the game (seen joining a Classic Survival world).
+	private static Exception? WheelAudioFinalizer(Exception? __exception, ref bool __result)
+	{
+		if (__exception is not ArgumentNullException) return __exception;
+		GameLog.Instance.WarnOnce("wheel-audio-null", "keen guards: a wheel touched a surface without a sound group; rolling sound skipped");
+		__result = false;
+		return null;
+	}
+}

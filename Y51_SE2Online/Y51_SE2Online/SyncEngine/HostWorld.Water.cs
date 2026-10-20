@@ -11,7 +11,7 @@ using Y51_SE2Online.Sync;
 namespace Y51_SE2Online.SyncEngine;
 
 /// <summary>
-/// Experimental water sync. SE2 2.4 never replicates water grid entities (their server composites have no prefab
+/// Experimental water sync. SE2 (2.4 and 4.0 alike) never replicates water grid entities (their server composites have no prefab
 /// binding in the replication strategy) and joiners have no water renderer, so debug-menu water only ever existed on
 /// the host. With WaterSync on, every water grid in a replicated domain is packed with the game's own cell packer and
 /// streamed to joiners (changed grids only, about twice a second, capped); WaterMirror rebuilds them on the client.
@@ -32,10 +32,6 @@ internal sealed partial class HostWorld
 	public long WaterGridsSent, WaterBytesSent, WaterDeferred;
 
 	internal static bool IsWaterSignal(string signal) => signal.StartsWith("Keen.VRage.Water.", StringComparison.Ordinal) || signal.Contains(".GameSystems.Water.", StringComparison.Ordinal);
-
-	/// <summary>Water edits from a joiner (debug menu water hand, mass fill, clear) need admin or creative.</summary>
-	private bool MayEditWater(ushort clientId, long actor, Session session) =>
-		IsAdminClient(clientId) || (actor != 0 && session.SessionComponents.TryGet<GameModeSessionComponent>()?.IsCreative(new IdentityId(actor)) == true);
 
 	private void UpdateWater(Session session)
 	{

@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using Y51_SE2Online.Core;
+using Y51_SE2Online.KeenNetcode;
 using Y51_SE2Online.Net;
 using Y51_SE2Online.Steam;
 using Y51_SE2Online.Sync;
@@ -15,7 +16,7 @@ using Steamworks;
 
 namespace Y51_SE2Online.NetHost;
 
-internal sealed class NetSession
+internal sealed partial class NetSession
 {
 	private static NetSession? _current;
 
@@ -97,6 +98,8 @@ internal sealed class NetSession
 
 	public static NetSession? Current => _current;
 
+	public MpOptions Options => _o;
+
 	public bool HasStopped => !_thread.IsAlive;
 
 	public static bool ClearStopped()
@@ -134,6 +137,10 @@ internal sealed class NetSession
 		_o.MaxPlayers = after.MaxPlayers;
 		_o.FriendsOnly = after.FriendsOnly;
 		_o.Advertise = after.Advertise;
+		// The Steam lobby type follows too: public sessions must be findable and joinable by anyone, not only friends.
+		KeenNet.LobbyWanted = (after.FriendsOnly ? Keen.VRage.Core.Services.GameSessions.JoinableSessionType.FriendsOnly
+			: after.Advertise ? Keen.VRage.Core.Services.GameSessions.JoinableSessionType.Public
+			: Keen.VRage.Core.Services.GameSessions.JoinableSessionType.Hidden, after.MaxPlayers + 1);
 		_o.SessionName = after.SessionName.Trim();
 		_o.Description = after.Description.Trim();
 		_o.PublicAddress = after.PublishedAddress;
@@ -389,6 +396,8 @@ internal sealed class NetSession
 
 	private void RunCore()
 	{
+		RunKeen();
+		return;
 		// Before Steam: a dedicated server whose network fails still runs its world with the configured rules.
 		if (_o.Host) { ResourceMultipliers.Current = _o.UsageMultipliers; InventoryMultipliers.Current = _o.InventorySizes; }
 		SteamLink? steamLink = null;
@@ -479,75 +488,7 @@ internal sealed class NetSession
 				PluginVersion = _pluginVersion,
 				GameVersion = _gameVersion
 			}, _log);
-			HostSession? host = null;
-			ClientSession? client = null;
-			if (_o.Sync)
-			{
-				if (_o.Host && HostWorld.Current != null)
-				{
-					host = new HostSession(transport, _log, HostWorld.Current, HostWorld.Current.Keys, new HostSyncOptions
-					{
-						PluginVersion = _pluginVersion,
-						GameVersion = _gameVersion,
-						StateBudgetBytesPerSec = _o.StateBudgetBytesPerSec,
-						Caps = new RateCapPolicy(_o.RateCaps),
-						ResolveType = EngineCodec.ResolveType,
-						IsClientInput = EngineCodec.IsClientInput,
-						CheckSignal = CommandLayouts.Check,
-						Settings = new HostSettings(_o.Identities, _o.Grids, _o.Research, _o.WaterSync),
-						HostName = name,
-						LookTotals = _o.Predict,
-						MaxPlayers = _o.MaxPlayers,
-						HostCountsAsPlayer = !_o.Dedicated,
-						Access = LoadAccess(AccessPath(_o.Dedicated)),
-						Password = _o.Password ?? "",
-						SessionName = _o.SessionName,
-						Motd = _o.Motd,
-						MotdTitle = _o.MotdTitle,
-						Dedicated = _o.Dedicated,
-						HostSteamId = _o.Dedicated ? 0 : localId,
-						HostIdentity = PlayerIdentities.HotfixIdentity,
-						FactionTagOf = HostWorld.Current.FactionTagOf,
-						SafeZones = () => HostWorld.Current?.SafeZones,
-						Pvp = _o.Pvp,
-						PvpChanged = TurretRelations.SetPvp,
-						OfflineRaidProtection = _o.OfflineRaidProtection,
-						PcuLimit = _o.PcuLimit,
-						StreamingRadiusMeters = _o.StreamingRadiusMeters,
-						VoiceRadiusMeters = _o.VoiceRadiusMeters,
-						SunRotation = _o.SunRotation,
-						SunPeriodMinutes = _o.SunPeriodMinutes,
-						OfflineRaidChanged = on => PvpRules.OfflineRaid = on
-					});
-					TurretRelations.SetPvp(host.Pvp);
-					PvpRules.OfflineRaid = host.OfflineRaidProtection;
-					_log.Info("net: joiners' turning " + (_o.Predict ? "applied from their running look totals (exact, matches their look prediction)" : "applied from the newest ControlData per tick (-y51online:predict:off)"));
-					HostWorld.Current.Bind(host);
-				}
-				else if (_o.Join && ClientWorld.Current != null)
-				{
-					_playerName = name;
-					client = NewClientSession(transport);
-					_log.Info("net: remote motion smoothing " + (_o.InterpMs > 0 ? $"on, {_o.InterpMs} ms playout delay" : "off (-y51online:interp:0)"));
-					_log.Info("net: look prediction " + (_o.Predict ? "on: the own character turns locally the same frame, the host's orientation only corrects it" : "off (-y51online:predict:off): the own character turns when the host's state comes back"));
-					_log.Info(_o.Rejoin ? "net: rejoin without restarting: on (lost connection: back to the main menu and join again by itself; after leaving: F3 at the main menu or 'Join Game' in Steam)" : "net: rejoin without restarting: off (-y51online:rejoin:off): restart the game to join again");
-					ClientWorld.Current.Bind(client);
-					_rejoinHandler = why => _rejoinWhy = why;
-					ClientWorld.RejoinRequested += _rejoinHandler;
-				}
-			}
-			if (!_o.Sync)
-			{
-				_log.Info("net: -y51online:nosync: transport only, no world sync");
-			}
-			if (host != null && _o.Nametags)
-			{
-				_names = new PlayerNamesPublisher(transport, _log, HostNametags.Roster, p => host.StatusOf(p) == HostSession.ClientStatus.Synced, host.TakesPatches);
-			}
-			if (_o.Host)
-			{
-				HostNametags.HostName = name;
-			}
+			var (host, client) = CreateSessions(transport, name, localId);
 			_client = client;
 			_host = host;
 			_transport = transport;
@@ -583,6 +524,80 @@ internal sealed class NetSession
 			if (_o.Host) { ResourceMultipliers.Current = ResourceMultipliers.Default; InventoryMultipliers.Current = InventoryMultipliers.Default; }
 			_log.Info("net: stopped (" + _stopReason + ")");
 		}
+	}
+
+	private (HostSession? Host, ClientSession? Client) CreateSessions(MpTransport transport, string name, ulong localId)
+	{
+		HostSession? host = null;
+		ClientSession? client = null;
+		if (_o.Sync)
+		{
+			if (_o.Host && HostWorld.Current != null)
+			{
+				host = new HostSession(transport, _log, HostWorld.Current, HostWorld.Current.Keys, new HostSyncOptions
+				{
+					PluginVersion = _pluginVersion,
+					GameVersion = _gameVersion,
+					StateBudgetBytesPerSec = _o.StateBudgetBytesPerSec,
+					Caps = new RateCapPolicy(_o.RateCaps),
+					ResolveType = EngineCodec.ResolveType,
+					IsClientInput = EngineCodec.IsClientInput,
+					CheckSignal = CommandLayouts.Check,
+					Settings = new HostSettings(_o.Identities, _o.Grids, _o.Research, _o.WaterSync),
+					HostName = name,
+					LookTotals = _o.Predict,
+					MaxPlayers = _o.MaxPlayers,
+					HostCountsAsPlayer = !_o.Dedicated,
+					Access = LoadAccess(AccessPath(_o.Dedicated)),
+					Password = _o.Password ?? "",
+					SessionName = _o.SessionName,
+					Motd = _o.Motd,
+					MotdTitle = _o.MotdTitle,
+					Dedicated = _o.Dedicated,
+					HostSteamId = _o.Dedicated ? 0 : localId,
+					HostIdentity = PlayerIdentities.HotfixIdentity,
+					FactionTagOf = HostWorld.Current.FactionTagOf,
+					SafeZones = () => HostWorld.Current?.SafeZones,
+					Pvp = _o.Pvp,
+					PvpChanged = TurretRelations.SetPvp,
+					OfflineRaidProtection = _o.OfflineRaidProtection,
+					PcuLimit = _o.PcuLimit,
+					StreamingRadiusMeters = _o.StreamingRadiusMeters,
+					VoiceRadiusMeters = _o.VoiceRadiusMeters,
+					SunRotation = _o.SunRotation,
+					SunPeriodMinutes = _o.SunPeriodMinutes,
+					OfflineRaidChanged = on => PvpRules.OfflineRaid = on
+				});
+				TurretRelations.SetPvp(host.Pvp);
+				PvpRules.OfflineRaid = host.OfflineRaidProtection;
+				_log.Info("net: joiners' turning " + (_o.Predict ? "applied from their running look totals (exact, matches their look prediction)" : "applied from the newest ControlData per tick (-y51online:predict:off)"));
+				HostWorld.Current.Bind(host);
+			}
+			else if (_o.Join && ClientWorld.Current != null)
+			{
+				_playerName = name;
+				client = NewClientSession(transport);
+				_log.Info("net: remote motion smoothing " + (_o.InterpMs > 0 ? $"on, {_o.InterpMs} ms playout delay" : "off (-y51online:interp:0)"));
+				_log.Info("net: look prediction " + (_o.Predict ? "on: the own character turns locally the same frame, the host's orientation only corrects it" : "off (-y51online:predict:off): the own character turns when the host's state comes back"));
+				_log.Info(_o.Rejoin ? "net: rejoin without restarting: on (lost connection: back to the main menu and join again by itself; after leaving: F3 at the main menu or 'Join Game' in Steam)" : "net: rejoin without restarting: off (-y51online:rejoin:off): restart the game to join again");
+				ClientWorld.Current.Bind(client);
+				_rejoinHandler = why => _rejoinWhy = why;
+				ClientWorld.RejoinRequested += _rejoinHandler;
+			}
+		}
+		if (!_o.Sync)
+		{
+			_log.Info("net: -y51online:nosync: transport only, no world sync");
+		}
+		if (host != null && _o.Nametags)
+		{
+			_names = new PlayerNamesPublisher(transport, _log, HostNametags.Roster, p => host.StatusOf(p) == HostSession.ClientStatus.Synced, host.TakesPatches);
+		}
+		if (_o.Host)
+		{
+			HostNametags.HostName = name;
+		}
+		return (host, client);
 	}
 
 	private void UpdateDirectory(long now)

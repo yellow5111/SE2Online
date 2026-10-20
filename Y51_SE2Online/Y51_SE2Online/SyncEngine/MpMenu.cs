@@ -145,6 +145,12 @@ internal static class MpMenu
     });
     public static void JoinAddress(string address) => Activate(Settings.JoinAddressOptions(address));
 
+    public static void JoinCode(string code)
+    {
+        try { Activate(Settings.JoinCodeOptions(code)); }
+        catch (ArgumentException ex) { Report(ex.Message); }
+    }
+
     private static bool SameEndpoint(System.Net.IPEndPoint current, string address)
     {
         try { return ServerEndpoint.Parse(address).Equals(current); }
@@ -234,7 +240,7 @@ internal static class MpMenu
         MotdUi.Tick();
         PlayerInteraction.Tick();
         PassengerSeats.Tick();
-        SeatRestore.Tick();
+        AudioWatchdog.Tick();
         FactionPopups.Tick();
         JoinPresence.Tick(Joined && ClientWorld.Progress.Stage == Sync.JoinStage.Playing);
         if (MpPlugin.SteamAvailable && _finder == null) { _finder = new FriendFinder(GameLog.Instance); _finder.Start(); }
@@ -459,8 +465,20 @@ internal static class MpMenu
         });
     }
 
+    /// <summary>Steam's invite window for the game's session lobby.</summary>
+    public static void InviteFriends() => Queue(() =>
+    {
+        if (KeenNetcode.KeenNet.LobbyId is not { } lobby) { Message = "Open your world first; invites go to its Steam session."; return; }
+        SteamFriends.ActivateGameOverlayInviteDialog(lobby);
+    });
+
     public static void Invite(ulong id) => Queue(() =>
     {
+        if (KeenNetcode.KeenNet.LobbyId is { } lobby)
+        {
+            Message = SteamMatchmaking.InviteUserToLobby(lobby, new CSteamID(id)) ? "Invitation sent." : "Steam could not send the invitation.";
+            return;
+        }
         if (NetSession.Current?.IsHost != true || MpPlugin.Controller.Current?.HostIp != null) return;
         var hostId = NetSession.Current.LocalIdentity;
         bool sent = SteamFriends.InviteUserToGame(new CSteamID(id), ConnectString.Build(hostId, MpPlugin.Controller.Current.VirtualPort));

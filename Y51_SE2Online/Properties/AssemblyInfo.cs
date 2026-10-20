@@ -11,6 +11,8 @@ using Keen.VRage.Library.Threading;
 using Y51_SE2Online.SyncEngine;
 
 [assembly: IgnoresAccessChecksTo("Game2.Client")]
+[assembly: IgnoresAccessChecksTo("Game2.Game")]
+[assembly: IgnoresAccessChecksTo("VRage.Steam")]
 [assembly: IgnoresAccessChecksTo("Game2.Simulation")]
 [assembly: IgnoresAccessChecksTo("SpaceEngineers2")]
 [assembly: IgnoresAccessChecksTo("VRage.Multiplayer")]
@@ -18,20 +20,20 @@ using Y51_SE2Online.SyncEngine;
 [assembly: IgnoresAccessChecksTo("VRage.Physics")]
 [assembly: AssemblyCompany("Y51_SE2Online")]
 [assembly: AssemblyConfiguration("Release")]
-[assembly: AssemblyFileVersion("0.15.6.0")]
-[assembly: AssemblyInformationalVersion("0.15.6")]
+[assembly: AssemblyFileVersion("0.16.0.0")]
+[assembly: AssemblyInformationalVersion("0.16.0")]
 [assembly: AssemblyProduct("Y51_SE2Online")]
 [assembly: AssemblyTitle("Y51_SE2Online")]
 [assembly: IndexMetadata]
 [assembly: MetadataDependencies(new string[]
 {
-	"Game2.ContentBuilder, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "Game2.Game, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "System.Collections.Immutable, Version=9.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a", "VRage.AI, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Analytics, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Animation.Client, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Animation, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Audio, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Client.ContentBuilder, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Client, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null",
-	"VRage.ContentPipeline.Builder.Plugin, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Core, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Core.Game, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.DCS, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Game.Client, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Game, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Input, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Library, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Physics.Client, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Physics, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null",
-	"VRage.Platform.Windows, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Render, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Render12, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Scripting, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Steam, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.UI, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.UI.Shared, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Voxels.Client, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Voxels, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Water.Client, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null",
-	"VRage.Water, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "Game2.Client, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "Game2.Simulation, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "SpaceEngineers2, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null", "VRage.Multiplayer, Version=2.4.0.95, Culture=neutral, PublicKeyToken=null"
+	"Game2.ContentBuilder", "Game2.Game", "System.Collections.Immutable, Version=9.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a", "VRage.AI", "VRage.Analytics", "VRage.Animation.Client", "VRage.Audio", "VRage.Client.ContentBuilder", "VRage.Client",
+	"VRage.ContentPipeline.Builder.Plugin", "VRage.Core", "VRage.Core.Game", "VRage.DCS", "VRage.Game.Client", "VRage.Game", "VRage.Input", "VRage.Library", "VRage.Physics.Client", "VRage.Physics",
+	"VRage.Platform.Windows", "VRage.Render", "VRage.Render12", "VRage.Scripting", "VRage.Steam", "VRage.UI", "VRage.UI.Shared", "VRage.Voxels.Client", "VRage.Voxels", "VRage.Water.Client",
+	"VRage.Water", "Game2.Client", "Game2.Simulation", "SpaceEngineers2", "VRage.Multiplayer"
 })]
-[assembly: Bundle("Y51_SE2Online", "0.15.6.0")]
-[assembly: AssemblyVersion("0.15.6.0")]
+[assembly: Bundle("Y51_SE2Online", "0.16.0.0")]
+[assembly: AssemblyVersion("0.16.0.0")]
 [module: ModuleIndexedAttributes(typeof(WithLifetimeAdapterAttribute), new Type[] { typeof(NametagMarkerProvider) }, new string[] { })]
 [module: ModuleIndexedAttributes(typeof(IndexedComponentAttribute), new Type[] { typeof(NametagMarkerProvider), typeof(Y51_SE2Online.Dedicated.HeadlessEngine.HeadlessParallelInitComponent), typeof(Y51_SE2Online.Dedicated.HeadlessEngine.ServerParallelInitComponent), typeof(WorldSocial.WorldSocialSaveComponent) }, new string[] { })]
 

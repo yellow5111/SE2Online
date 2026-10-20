@@ -40,6 +40,8 @@ public sealed class DedicatedConfig
     public OnlineSettings Network { get; set; } = new OnlineSettings
     {
         FriendsOnly = false, Advertise = false, SessionName = "Y51 Dedicated Server", AllowDirectIp = true,
+        // Not co-op's 7742: a dedicated server and a co-op host on one PC no longer fight over the port.
+        ListenPort = 27016,
         StreamingRadiusMeters = Y51_SE2Online.Sync.StreamingRules.DedicatedDefaultRadius
     };
     public Dictionary<string, Dictionary<string, JsonElement>> SessionSettings { get; set; } = new();

@@ -26,8 +26,7 @@ internal sealed partial class HostWorld
     private SocialRequest WithSecureTarget(Session session, long actor, SocialRequest request)
     {
         if (request.Secure == Guid.Empty) return request;
-        EntityId id = default;
-        Unsafe.AsRef(in id._entityGuid) = request.Secure;
+        var id = new EntityId(request.Secure);
         var entity = session.SessionComponents.Components.OfType<ISecureEntityIds>().FirstOrDefault()?.TryGetEntity(id, null);
         if (entity != null && EngineCodec.IsDead(entity)) entity = null;
         var block = entity == null ? null : WorldSocial.BlockOf(entity);

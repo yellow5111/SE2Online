@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using HarmonyLib;
+using Y51_SE2Online.Core;
 using Keen.Game2.Simulation.GameSystems.Discoveries;
 using Keen.Game2.Simulation.GameSystems.Ownership;
 using Keen.Game2.Simulation.GameSystems.Player;
@@ -25,7 +26,7 @@ internal static class SharedDiscoveries
 
     public static long Mirrored, CaughtUp;
 
-    private static bool Active => HostIdentities.Current?.Settings is { Identities: true, Research: ResearchMode.Shared };
+    private static bool Active => HostWorld.ResearchShared;
 
     public static void Install(Harmony harmony)
         => harmony.Patch(AccessTools.Method(typeof(DiscoveriesServerSessionComponent), nameof(DiscoveriesServerSessionComponent.TryIncreaseDiscoveryState)),
@@ -39,7 +40,7 @@ internal static class SharedDiscoveries
         {
             // Offline identities are not registered for the discoverable (vanilla only registers players with a client); they catch up at join.
             foreach (IdentityId other in __instance._perPlayerData.GetIdentityIds().ToList())
-                if ((long)other != (long)owner && __instance._players.TryGetClientFromIdentity(other).HasValue && __instance.TryIncreaseDiscoveryState(other, provider, state))
+                if ((long)other != (long)owner && __instance._identities.TryGetClientFromIdentity(other).HasValue && __instance.TryIncreaseDiscoveryState(other, provider, state))
                     Mirrored++;
         }
         finally
@@ -54,8 +55,8 @@ internal static class SharedDiscoveries
         if (server.SessionComponents.TryGet<DiscoveriesServerSessionComponent>() == null) return 0;
         var target = ppd.GetPerPlayerData<DiscoveriesPlayerDataServer>(identity);
         var others = new List<DiscoveriesPlayerDataServer>();
-        foreach (KeyValuePair<IdentityId, List<object>> entry in (CollectionDictionary<IdentityId, List<object>, object>)(object)ppd._perPlayerData)
-            others.AddRange(entry.Value.OfType<DiscoveriesPlayerDataServer>().Where(d => d != target));
+        foreach (var (_, records) in ppd._perPlayerData)
+            others.AddRange(records.OfType<DiscoveriesPlayerDataServer>().Where(d => d != target));
         int raised = 0;
         foreach (Entity entity in target._discoveries.Keys.ToList())
         {

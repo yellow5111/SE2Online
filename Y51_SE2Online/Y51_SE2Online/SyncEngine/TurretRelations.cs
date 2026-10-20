@@ -35,7 +35,7 @@ internal static class TurretRelations
     private static void RelationPostfix(RelationsSessionComponent __instance, IdentityId ownerA, IdentityId ownerB, ref RelationState __result)
     {
         long a = (long)ownerA, b = (long)ownerB;
-        if (!PvpRules.Active || a == 0 || b == 0 || __instance._npcIdentity.IsNpc(ownerA) || __instance._npcIdentity.IsNpc(ownerB)) return;
+        if (!PvpRules.Active || a == 0 || b == 0 || __instance._npcIdentity.IsNPC(ownerA) || __instance._npcIdentity.IsNPC(ownerB)) return;
         __result = RelationTable.MayFight(_table.Of(a, b), PlayersHostile) ? RelationState.Hostile : RelationState.NonHostile;
     }
 

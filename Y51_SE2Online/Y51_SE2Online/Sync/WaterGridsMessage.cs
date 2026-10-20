@@ -20,7 +20,9 @@ public static class WaterGridsMessage
 
 	public static void Receive(ReadOnlySpan<byte> data)
 	{
-		if (Enabled && Inbox.Count < 512) Inbox.Enqueue(data.ToArray());
+		// Not gated on Enabled: the host only sends with water sync on, and a large first batch on the bulk lane can land
+		// before the accept that turns it on (it would be lost for good: the host sends the full set once).
+		if (Inbox.Count < 512) Inbox.Enqueue(data.ToArray());
 	}
 
 	public const int MaxCellBytes = 1 << 20;

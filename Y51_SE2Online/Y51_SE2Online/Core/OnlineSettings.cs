@@ -65,6 +65,8 @@ public sealed class OnlineSettings
     /// <summary>Players can damage each other and turrets/sensors treat players outside your faction as enemies.</summary>
     public bool Pvp { get; set; } = true;
     public bool OfflineRaidProtection { get; set; } = true;
+    /// <summary>Hosting: offline players' parked characters use no suit energy, oxygen or hydrogen and cannot suffocate until they are back.</summary>
+    public bool PauseOfflineStats { get; set; } = true;
     /// <summary>Per-player PCU limit; leave out to keep the world's value, 0 for unlimited.</summary>
     public int? PcuLimit { get; set; }
     /// <summary>Whether the sun moves across the sky; leave out to keep the world's setting.</summary>
@@ -167,6 +169,14 @@ public sealed class OnlineSettings
     public MpOptions HostOptions(bool local) => Options(local ? "host-ip" : "host");
     public string BindEndpoint => (BindAddress?.Contains(':') == true ? "[" + BindAddress + "]" : BindAddress) + ":" + ListenPort;
     public MpOptions JoinAddressOptions(string address) => Options("join-address:" + ServerEndpoint.Parse(address));
+
+    public MpOptions JoinCodeOptions(string code)
+    {
+        if (!Keen.VRage.Core.Services.GameSessions.SessionJoinCode.TryParse(code?.Trim(), out var parsed)) throw new ArgumentException("A join code is 8 letters and digits, like ABCD-1234.");
+        var options = Options("join:wait");
+        options.JoinCode = parsed;
+        return options;
+    }
 
     public MpOptions JoinOptions(ulong steamId, bool local, int virtualPort = MpOptions.DefaultVirtualPort)
     {

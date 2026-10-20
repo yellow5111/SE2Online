@@ -58,6 +58,7 @@ internal sealed partial class HostWorld
         public required RespawnShip Ship;
         public required Vector3D Ground;
         public required Vector3D Up;
+        public long SpawnedMs;
     }
 
     private readonly System.Runtime.CompilerServices.ConditionalWeakTable<Joiner, PlanetSite> _planetSites = new();
@@ -87,7 +88,7 @@ internal sealed partial class HostWorld
     /// finds no route inside a gravity well ("Could not find valid cargo ship path"), so a world spawn on a planet
     /// (Verdure in the scenarios) failed every space respawn ship.
     /// </summary>
-    private static Vector3D OpenSpace(Session session, Vector3D at)
+    internal static Vector3D OpenSpace(Session session, Vector3D at)
     {
         foreach (Entity planet in session.GetEntitiesOfType<VoxelPlanetComponent>())
         {
@@ -111,7 +112,7 @@ internal sealed partial class HostWorld
         var site = FindSite(session, planet, respawn.WorldSpawn.Position);
         if (site == null)
         {
-            _log.Warn($"host world sync: no free landing site on {planet.Get<VoxelPlanetComponent>().Name} for ClientId {j.ClientId}");
+            _log.Warn($"host spawn: no free landing site on {planet.Get<VoxelPlanetComponent>().Name} for ClientId {j.ClientId}");
             return false;
         }
         site.Ship = target.Ship;
@@ -123,25 +124,16 @@ internal sealed partial class HostWorld
         // A cargo encounter needs open space for its route (it fails inside a gravity well); the lander is moved to the site anyway.
         var anchor = new WorldTransform(OpenSpace(session, site.Ground), respawn.WorldSpawn.Orientation);
         SpawnLander(session, encounters, prefab, anchor, j);
-        _log.Info($"host world sync: landing site for ClientId {j.ClientId} on {planet.Get<VoxelPlanetComponent>().Name} at ({site.Ground.X:0},{site.Ground.Y:0},{site.Ground.Z:0})");
+        _log.Info($"host spawn: landing site for ClientId {j.ClientId} on {planet.Get<VoxelPlanetComponent>().Name} at ({site.Ground.X:0},{site.Ground.Y:0},{site.Ground.Z:0})");
         return true;
     }
 
     private async void SpawnLander(Session session, EncounterSessionComponent encounters, PrefabDefinition prefab, WorldTransform at, Joiner j)
     {
-        try
-        {
-            await Keen.VRage.Library.Threading.Task.SetLifetime(encounters);
-            // MissionEnabled off: a contract prefab spawns its grids only, never a contract or mission triggers.
-            var context = new EncounterBuildContext(prefab) { Random = new Random(), PostProcessor = encounters._encounters, Anchor = at, MissionEnabled = false };
-            await encounters.GenerateEncounter(context);
-            var generated = context.Build();
-            await session.Scene.MoveToDCS<EncounterUpdate.SpawnEncounters>();
-            j.ShipRoots = await encounters.SpawnEncounter(generated);
-        }
+        try { j.ShipRoots = await SpawnEncounter(session, encounters, prefab, at, missions: false); }
         catch (Exception ex)
         {
-            _log.Warn("host world sync: spawning the planet lander failed: " + ex.Message);
+            _log.Warn("host spawn: spawning the planet lander failed: " + ex.Message);
             j.ShipRoots = Array.Empty<Entity>();
         }
     }
@@ -219,11 +211,12 @@ internal sealed partial class HostWorld
         beside = null;
         if (!_planetSites.TryGetValue(j, out var site)) return released;
         _planetSites.Remove(j);
-        var spawner = session.Get<IEntitySpawner>();
         var grids = released.Where(e => !EngineCodec.IsDead(e) && e.TryGet<CubeGridComponent>() != null).ToList();
         var keep = site.Ship.Grid == null ? grids : grids.Where(g => g.Get<CubeGridComponent>().DisplayName.ToString() == site.Ship.Grid).ToList();
+        // The rest of the contract shares a physics motion group with the lander (it stands on the contract's pad): it goes
+        // before the lander moves, and HoldPins moves it a tick later, once Havok has dropped the constraint.
         foreach (var e in released)
-            if (!keep.Contains(e) && !EngineCodec.IsDead(e)) spawner.DeleteEntity(e);
+            if (!keep.Contains(e) && !EngineCodec.IsDead(e)) session.Get<IEntitySpawner>().DeleteEntity(e);
         if (keep.Count == 0 || EngineCodec.IsDead(site.Planet)) return new List<Entity>();
         int Blocks(Entity g) { int n = 0; g.Get<CubeGridComponent>().VisitAllBlocksWithComponent((Keen.Game2.Simulation.WorldObjects.CubeBlocks.CubeBlockComponent _) => n++, includeSubgrids: false); return n; }
         var main = keep.OrderByDescending(Blocks).First();
@@ -251,7 +244,7 @@ internal sealed partial class HostWorld
             highest = Math.Max(highest, SurfaceRadius(p, Vector3.Normalize(dir + (a * (float)Math.Cos(s) + b * (float)Math.Sin(s)) * (float)(reach / groundRadius))));
         }
         // The box centre (not the grid origin, which can sit far off the hull) goes over the site.
-        bool piloted = PilotSeat(keep) != null;
+        bool piloted = RespawnCockpit(keep) != null;
         var position = site.Ground - (Vector3D)Vector3.Transform(new Vector3(box.Center.X, 0, box.Center.Z), orientation) + site.Up * RespawnShips.LanderOriginHeight(highest - groundRadius, box.Min.Y, piloted);
         var rotation = orientation * Quaternion.Conjugate(old.Orientation);
         var pins = new List<(Entity Grid, WorldTransform At)>();
@@ -260,7 +253,6 @@ internal sealed partial class HostWorld
             var t = grid.Data.GetWorldTransform();
             var offset = t.Position - old.Position;
             var at = new WorldTransform(position + Vector3D.Transform(in offset, rotation), rotation * t.Orientation);
-            Pin(grid, at);
             pins.Add((grid, at));
         }
         // The contract prefab spawns static. Moving it and switching it to dynamic in the same frame went wrong about one
@@ -278,13 +270,15 @@ internal sealed partial class HostWorld
         double standRadius = SurfaceRadius(p, standDir);
         var stand = WorldTransform.Transform((Vector3D)(standDir * (float)(standRadius > 0 ? standRadius + 1.2 : groundRadius + 1.2)), frame);
         beside = new WorldTransform(stand, Quaternion.CreateFromForwardUp(-side, up));
-        _log.Info($"host world sync: lander {site.Ship.Name} for ClientId {j.ClientId} placed on {p.Name}: {keep.Count} grids, footprint {footprint:0} m, ground rise {highest - groundRadius:0.0} m, {(piloted ? $"hovering {RespawnShips.LanderHoverMeters:0} m up for its pilot" : "no cockpit, resting on its gear")}, box {box.Min} to {box.Max}");
+        _log.Info($"host spawn: lander {site.Ship.Name} for ClientId {j.ClientId} placed on {p.Name}: {keep.Count} grids, footprint {footprint:0} m, ground rise {highest - groundRadius:0.0} m, {(piloted ? $"hovering {RespawnShips.LanderHoverMeters:0} m up for its pilot" : "no cockpit, resting on its gear")}, box {box.Min} to {box.Max}");
         return keep;
     }
 
+    // Keen's own teleport (EntityAdmin.TeleportEntity): setting the transform moved the lander across physics clusters in a
+    // way Havok's shared-motion groups could not follow and the dedicated server crashed on a migrated constraint.
     private static void Pin(Entity grid, WorldTransform at)
     {
-        grid.Data.Set(at);
+        grid.Data.Teleport(in at);
         if (grid.Data.TryGet<RigidBodyData>(out _)) grid.Data.Set(new RigidBodyData(Vector3.Zero, Vector3.Zero));
     }
 
@@ -317,14 +311,14 @@ internal sealed partial class HostWorld
         if (!j.ShipPinsDynamic || (j.ShipPinHeld < PinHeldTicks && !last)) return;
         j.ShipPins = null;
         if (j.ShipPinFixes > 0 || !held)
-            _log.Info($"host world sync: lander for ClientId {j.ClientId} {(held ? "stays on its site" : "did NOT stay on its site")} after {j.ShipPinFixes} correction(s)");
+            _log.Info($"host spawn: lander for ClientId {j.ClientId} {(held ? "stays on its site" : "did NOT stay on its site")} after {j.ShipPinFixes} correction(s)");
     }
 
     private const int PinStaticTicks = 5, PinHeldTicks = 30;
 
     // Once dynamic, a lander sags a little before its dampeners hold it (or settles onto its gear when it has no pilot);
     // that is left to the physics: pulling it back every tick shook it into the ground and broke blocks off. A lost
-    // move is km. Stays well above RespawnShips.LanderHoverMeters.
+    // move is km.
     private const double PinSlackMeters = 50;
 
 #if !PULSAR

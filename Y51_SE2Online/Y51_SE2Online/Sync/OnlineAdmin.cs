@@ -12,7 +12,30 @@ public enum AdminAction
 {
     Refresh, Kick, Ban, Unban, Promote, Demote, WhitelistAdd, WhitelistRemove, WhitelistOnly,
     Creative, SpawnPrefab, SpawnItem, CreateSafeZone, DeleteSafeZone, TeleportTo, Bring, Pvp, OfflineRaidProtection, PcuLimit,
-    SunRotation, SunPeriod, SunNudge, Motd, SunSet
+    SunRotation, SunPeriod, SunNudge, Motd, SunSet,
+    /// <summary>An admin's own access bypass (Value on/off): use, open, sit in and build on anything regardless of ownership.</summary>
+    AccessBypass
+}
+
+/// <summary>
+/// Identities whose admin turned the access bypass on for themselves. Nobody (host, admins included) may use what they
+/// do not own or have faction or everyone access to unless their identity is listed here. Held for the session only.
+/// On a client it holds just this game's own player, mirrored from the host's admin state.
+/// </summary>
+public static class AccessBypass
+{
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, byte> On = new();
+
+    public static bool IsOn(long identity) => identity != 0 && On.ContainsKey(identity);
+
+    public static void Set(long identity, bool on)
+    {
+        if (identity == 0) return;
+        if (on) On[identity] = 0;
+        else On.TryRemove(identity, out _);
+    }
+
+    public static void Clear() => On.Clear();
 }
 
 public sealed record ChatSend(string Text);
@@ -67,6 +90,8 @@ public sealed class AdminState
     /// <summary>Sun angle in degrees (0-360) when this state was built; it keeps turning while rotation is on.</summary>
     public double SunDegrees { get; set; }
     public string Motd { get; set; } = "";
+    /// <summary>Whether the player this state was sent to has its access bypass on.</summary>
+    public bool AccessBypass { get; set; }
     /// <summary>Proximity voice range on this server; 0 when voice is off.</summary>
     public double VoiceRadius { get; set; } = 50;
     public int MaxPlayers { get; set; }

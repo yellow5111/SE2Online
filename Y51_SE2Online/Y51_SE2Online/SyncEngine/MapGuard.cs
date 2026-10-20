@@ -21,7 +21,7 @@ internal static class MapGuard
     private static bool Prefix(PlanetDiscoverable __instance, ref HashSet<VoxelMaterialDefinition> __result)
     {
         if (__instance._biomeDefinition != null) return true;
-        var session = ClientWorld.Current?.GameSession;
+        var session = MpPlugin.App?.ClientSession;
         if (session != null)
             foreach (Entity planet in session.GetEntitiesOfType<VoxelPlanetComponent>())
                 if (planet.Get<VoxelPlanetComponent>().Name == __instance.Details.Name && planet.TryGet<PlanetBiomeMapComponent>() is { } biomes)

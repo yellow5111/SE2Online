@@ -11,10 +11,10 @@ using Keen.VRage.Core.Plugins;
 using Keen.VRage.Core.Project;
 using Y51_SE2Online.Core;
 using Y51_SE2Online.NetHost;
-using Y51_SE2Online.Probe;
 using Y51_SE2Online.Sync;
 using Y51_SE2Online.SyncEngine;
 using Y51_SE2Online.Dedicated;
+using Y51_SE2Online.KeenNetcode;
 
 namespace Y51_SE2Online;
 
@@ -106,10 +106,10 @@ public sealed class MpPlugin : IPlugin, IDisposable
 	private void Init(PluginHost host)
 	{
 		string gameVersion = GameVersion();
-		_log.Info($"Y51_SE2Online {Version} loaded from {(PluginPaths.InMemory ? "memory" : typeof(MpPlugin).Assembly.Location)} as {typeof(MpPlugin).Assembly.GetName().Name}, data in {PluginPaths.DataDir}; game {gameVersion} (built against {"2.4.0.95"}); {RuntimeInformation.FrameworkDescription} {RuntimeInformation.ProcessArchitecture}");
-		if (gameVersion != "2.4.0.95")
+		_log.Info($"Y51_SE2Online {Version} loaded from {(PluginPaths.InMemory ? "memory" : typeof(MpPlugin).Assembly.Location)} as {typeof(MpPlugin).Assembly.GetName().Name}, data in {PluginPaths.DataDir}; game {gameVersion} (built against {HookTargets.GameBuild}); {RuntimeInformation.FrameworkDescription} {RuntimeInformation.ProcessArchitecture}");
+		if (gameVersion != HookTargets.GameBuild)
 		{
-			_log.Warn($"game version {gameVersion} differs from the build this plugin was compiled and verified against ({"2.4.0.95"})");
+			_log.Warn($"game version {gameVersion} differs from the build this plugin was compiled and verified against ({HookTargets.GameBuild})");
 		}
 		RegisterMetadata();
 		Instance = this;
@@ -119,6 +119,12 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		host.OnBeforeEngineInstantiated += OnBeforeEngineInstantiated;
 		Optional("plugin texts", () => OnlineUi.InstallRawTexts(_harmony));
 		Controller = new OnlineSessionController(new OnlineRuntime(this));
+		// SE2 4.0 ships Keen's own multiplayer behind -enableMultiplayer; SE2 Online runs on it.
+		Keen.Game2.Simulation.GameFeatureConfig.MultiplayerEnabled = true;
+		KeenNet.Install(_harmony, _log);
+		IdentityCarryOver.Install(_harmony, _log);
+		_harmony.Patch(AccessTools.Method(typeof(Keen.Game2.GameAppComponent), nameof(Keen.Game2.GameAppComponent.LoadNetworkClientAsync)), prefix: M(nameof(KeenJoinPrefix)));
+		_harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Core.Game.Systems.Session), "Update"), postfix: new HarmonyMethod(typeof(HostWorld), nameof(HostWorld.SessionUpdatePostfix)));
 		var bootstrap = new[]
 		{
 			Patch("world observer", HookTargets.WorldInit, M("WorldInitPrefix")),
@@ -136,13 +142,33 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		AutoUpdateClient.CleanUp();
 		PassengerSeats.Hook();
 		// Ownership, PvP and turret relations enforce the server's rules: without them the plugin stays off.
-		WorldSocial.Install(_harmony);
-		TurretRelations.Install(_harmony);
-		PvpRules.Install(_harmony);
-		Optional("control panel names", () => NameSync.Install(_harmony));
-		Optional("map guard", () => MapGuard.Install(_harmony));
-		Optional("suit sync", () => SuitSync.Install(_harmony));
+		var ruleFailures = new List<string>();
+		void Rule(string name, Action install)
+		{
+			try { install(); }
+			catch (Exception ex) { ruleFailures.Add($"{name}: {ex.GetType().Name}: {ex.Message}"); _log.Error($"{name}: not installed: {ex}"); }
+		}
+		Rule("ownership", () => WorldSocial.Install(_harmony));
+		Rule("turret relations", () => TurretRelations.Install(_harmony));
+		Rule("PvP rules", () => PvpRules.Install(_harmony));
+		if (ruleFailures.Count > 0) throw new InvalidOperationException("server rules could not be installed for this game build: " + string.Join("; ", ruleFailures));
+		Optional("offline survival stats", () => OfflineStatsGuard.Install(_harmony));
 		Optional("shared discoveries", () => SharedDiscoveries.Install(_harmony));
+#if !PULSAR
+		Optional("motion playback", MotionSmoothing.Install);
+#endif
+		Optional("4.0 crash guards", () => KeenGuards.Install(_harmony));
+		Optional("resilient replication", () => ResilientReplication.Install(_harmony));
+		Optional("spawned ships for players who join later", () => StagedReplication.Install(_harmony));
+		Optional("suit colour and skin sync", () => SuitSync.Install(_harmony));
+		Optional("join and leave toasts", () => JoinLeaveToasts.Install(_harmony));
+		Optional("leaving a joined world", () => LeaveDetect.Install(_harmony));
+		Optional("server-side access checks", () => ServerAccess.Install(_harmony));
+		Optional("tool reach for remote players", () => ToolReach.Install(_harmony));
+		Optional("one pilot per ship", () => OnePilot.Install(_harmony));
+		Optional("streaming radius", () => Streaming.Install(_harmony));
+		Optional("seat guard (sitting while seated)", () => SeatGuard.Install(_harmony));
+		Optional("control panel group names", () => NameSync.Install(_harmony));
 		Optional("join status", () => JoinStatusUi.Install(_harmony));
 		Optional("block size names", () => BlockSizeFilter.Install(_harmony));
 		Optional("autosave blob fix", () => BackupBlobFix.Install(_harmony));
@@ -151,31 +177,26 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		InstallExitGuards();
 		Optional("build previews", () => BuildGhosts.Install(_harmony));
 		Optional("paste once", () => PasteOnce.Install(_harmony));
-		if (DedicatedRuntime.Headless)
-		{
-			HeadlessEngine.Install(_harmony);
-			HeadlessWorldLoading.Install(_harmony);
-			HeadlessReplication.Install(_harmony, _log);
-		}
-		else
+		if (!DedicatedRuntime.Headless)
 		{
 			MpMenu.Install(_harmony);
 			Optional("GPS sharing", GpsShareUi.Install);
-			Optional("gun HUD guard", () => GunHudGuard.Install(_harmony));
-			Optional("animator guard", () => AnimatorGuard.Install(_harmony));
-			Optional("ragdoll smoothing", () => RagdollGuard.Install(_harmony));
 			Optional("sound range", () => SoundRange.Install(_harmony));
-			Optional("other players' cockpit and landing gear sounds", () => AudioGate.Install(_harmony));
-			Optional("procedural voxel handoff", () => ProceduralVoxelHandoff.Install(_harmony));
 			Optional("flora sector fix", () => FloraSectorSpawnFix.Install(_harmony));
 			Optional("host-only saves", () => HostOnlySaves.Install(_harmony));
-			Optional("water sync", () => WaterMirror.Install(_harmony));
-			Optional("passenger seats", () => PassengerSeats.Install(_harmony));
-			Optional("cockpit passengers", () => CockpitPassenger.Install(_harmony));
-			Optional("seat restore", () => SeatRestore.Install(_harmony));
 			Optional("trade UI", TradeUi.Install);
-			Optional("replication race guards", () => ReplicationRaceGuards.Install(_harmony));
+			Optional("third-person camera memory", () => CameraMemory.Install(_harmony));
+			Optional("passenger seats", () => PassengerSeats.Install(_harmony));
+			Optional("water sync", () => WaterMirror.Install(_harmony));
+			Optional("cockpit passengers", () => CockpitPassenger.Install(_harmony));
 			Optional("permission feedback", () => PermissionFeedback.Install(_harmony));
+			Optional("spawn menu", () => KeenRespawn.Install(_harmony));
+			Optional("procedural asteroid hand-over", () => ProceduralVoxelHandoff.Install(_harmony));
+			Optional("weapon HUD guard", () => GunHudGuard.Install(_harmony));
+			Optional("map guard", () => MapGuard.Install(_harmony));
+			Optional("turret direct control", () => TurretControl.Install(_harmony));
+			Optional("build sounds at the block", () => BuildAudio.Install(_harmony));
+			Optional("other players' cockpit and landing gear sounds", () => PlayerAudio.Install(_harmony));
 		}
 		_log.Info(DedicatedRuntime.Headless ? "Y51_SE2Online dedicated bootstrap installed" : "Y51_SE2Online ready: use Multiplayer in the main or pause menu");
 	}
@@ -183,6 +204,15 @@ public sealed class MpPlugin : IPlugin, IDisposable
 	// A game update that renames a member a feature patches turns off only that feature; patches it made before the throw stay until Dispose.
 	private void Optional(string feature, Action install)
 	{
+#if !PULSAR
+		// Test rig: -y51online:skip:<feature> leaves an optional feature out (bisecting a crash); "all" skips every one.
+		if (feature != "4.0 crash guards" && feature != "resilient replication" && LaunchArgs.Any(a => a.StartsWith(MpOptions.Prefix + "skip:", StringComparison.OrdinalIgnoreCase)
+			&& a[(MpOptions.Prefix.Length + 5)..] is var skip && (skip == "all" || feature.Contains(skip, StringComparison.OrdinalIgnoreCase))))
+		{
+			_log.Info(feature + ": skipped (launch option)");
+			return;
+		}
+#endif
 		try { install(); }
 		catch (Exception ex) { _log.Warn($"{feature}: not installed for this game build, feature off ({ex.GetType().Name}: {ex.Message})"); }
 	}
@@ -222,143 +252,27 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		var hooks = new List<(string, bool, string)>();
 		bool hosting = _options.Networking && _options.Host && _options.Sync;
 		bool joining = _options.Networking && _options.Join && _options.Sync;
-		if (hosting | joining)
-		{
-			AssertHandler.Install();
-			hooks.AddRange(ReplicationProbe.Install(_modeHarmony, _log));
-		}
 		if (hosting)
 		{
-			if (!ReplicationProbe.MeterArmed)
-			{
-				_log.Error("host world sync: the S2C command tap is OFF (see the probe:CommitFrame line); joining players get the world but no movement");
-			}
 			HostWorld hostWorld = HostWorld.Install(_log);
 			hostWorld.SpawnNearHost = _options.SpawnNearHost;
 			hostWorld.OnePilot = _options.OnePilot;
-			hooks.Add(Patch("host:CommitFrame", HookTargets.CommitFrame, new HarmonyMethod(typeof(HostWorld), "CommitPrefix"), new HarmonyMethod(typeof(HostWorld), "CommitPostfix")));
-			hooks.Add(Patch("host:BuildAndReset", HookTargets.BuildAndReset, null, new HarmonyMethod(typeof(HostWorld), "BundlePostfix")));
-			HostWorld.InstallOreMarkers(_installingMode ? _modeHarmony : _harmony);
-			HostWorld.InstallUserMessages(_installingMode ? _modeHarmony : _harmony);
-			HostWorld.InstallTurretControl(_installingMode ? _modeHarmony : _harmony);
-			if (!DedicatedRuntime.Headless)
-			{
-				// Encounters spawn through ReplicateStagedEntitiesAsync, which never passes BuildAndReset; its bundle reaches the local client here.
-				(_installingMode ? _modeHarmony : _harmony).Patch(AccessTools.Method(AccessTools.Inner(typeof(Keen.VRage.Multiplayer.Replications.InProcess.ServerSceneContext), "ClientSide"), "BuildClientEntitiesStaged"), new HarmonyMethod(typeof(HostWorld), "StagedBundlePrefix"));
-			}
 			HostSettings settings = new HostSettings(_options.Identities, _options.Grids, _options.Research);
-			HostWorld.Current.ConfigureIdentities(settings);
-			if (settings.Identities)
-			{
-				if (!DedicatedRuntime.Headless)
-					hooks.Add(Patch("host:PerPlayerData.Init", HookTargets.PerPlayerInit, new HarmonyMethod(typeof(HostIdentities), "InitPrefix"), new HarmonyMethod(typeof(HostIdentities), "InitPostfix")));
-				hooks.Add(Patch("host:ServerNarrator.MoveToClient", HookTargets.NarratorMoveToClient, new HarmonyMethod(typeof(HostIdentities), "MoveToClientPrefix")));
-				hooks.AddRange(PatchPermissions("host"));
-			}
+			hostWorld.ConfigureIdentities(settings);
+			if (settings.Identities) hooks.AddRange(PatchPermissions("host"));
+			KeenNet.LobbyWanted = (_options.Dedicated ? Keen.VRage.Core.Services.GameSessions.JoinableSessionType.Private
+				: _options.FriendsOnly ? Keen.VRage.Core.Services.GameSessions.JoinableSessionType.FriendsOnly
+				: _options.Advertise ? Keen.VRage.Core.Services.GameSessions.JoinableSessionType.Public
+				: Keen.VRage.Core.Services.GameSessions.JoinableSessionType.Hidden, _options.MaxPlayers + 1);
 		}
 		if (joining)
 		{
 			ClientWorld.Install(_log, _options);
-			hooks.Add(Patch("client:GameAppComponent.GameUpdate", HookTargets.GameUpdate, new HarmonyMethod(typeof(ClientWorld), "GameUpdatePrefix")));
-			hooks.Add(Patch("client:NetworkGameClientCoreComponent.ConfigureSession", HookTargets.NetClientConfigure, new HarmonyMethod(typeof(ClientWorld), "ConfigurePrefix")));
-			hooks.Add(Patch("client:NetworkGameClientComponent.PullDataFromServerAsync", HookTargets.NetClientPull, new HarmonyMethod(typeof(ClientWorld), "PullPrefix")));
-			hooks.Add(Patch("client:CommitFrame", HookTargets.CommitFrame, new HarmonyMethod(typeof(ClientWorld), "CommitPrefix")));
-			hooks.Add(Patch("client:Session.Update", HookTargets.SessionUpdate, new HarmonyMethod(typeof(ClientWorld), "SessionUpdatePrefix"), new HarmonyMethod(typeof(ClientWorld), "SessionUpdatePostfix")));
-			SlowTicks.Log = _log;
-			SlowTicks.Enabled = true;
-			hooks.Add(Patch("client:IEntityReplication.AwaitReplication", HookTargets.AwaitReplication, new HarmonyMethod(typeof(ClientWorld), "AwaitReplicationPrefix")));
-			hooks.Add(Patch("client:Spectating.GetNextCharacter", HookTargets.NextCharacter, null, new HarmonyMethod(typeof(ClientWorld), "GetNextCharacterPostfix")));
-			hooks.Add(Patch("client:Spectating.SetEntityTypeToPossess", HookTargets.EntityTypeToPossess, new HarmonyMethod(typeof(ClientWorld), "SetEntityTypeToPossessPrefix")));
-			foreach (EngineMember key in HookTargets.SpectatorKeys)
-			{
-				hooks.Add(Patch("client:Spectating." + key.Name, key, new HarmonyMethod(typeof(ClientWorld), "SpectatorKeyPrefix")));
-			}
 			hooks.AddRange(PatchPermissions("client"));
-		}
-		if (joining || (hosting && !DedicatedRuntime.Headless))
-		{
-			hooks.Add(Patch("game:ToolsRenderAdapter.TrySpawnFirstPersonToolShadowCaster", HookTargets.ToolShadowSpawn, null, G(typeof(ToolShadowGuard), "SpawnPostfix")));
-			hooks.Add(Patch("game:ToolsRenderAdapter.TryDespawnFirstPersonToolShadowCaster", HookTargets.ToolShadowDespawn, G(typeof(ToolShadowGuard), "DespawnPrefix")));
-			hooks.Add(Patch("game:ToolsComponent.UnregisterTool", HookTargets.ToolsUnregister, G(typeof(ToolShadowGuard), "UnregisterPrefix"), G(typeof(ToolShadowGuard), "UnregisterPostfix")));
-			hooks.Add(Patch("game:PCUClientSessionComponent.HasPCU", HookTargets.PcuHas, G(typeof(PcuOwnerGuard), "Prefix")));
-			hooks.Add(Patch("game:PCUClientSessionComponent.GetPCU", HookTargets.PcuGet, G(typeof(PcuOwnerGuard), "Prefix")));
-			if (_options.AudioFix)
-			{
-				var audioHook = Patch("audio:AudioEngineComponent.Play", HookTargets.AudioPlay2D, G(typeof(AudioGate), "Play2DPrefix"));
-				hooks.Add(audioHook);
-				AudioGate.Enabled = audioHook.Item2;
-				hooks.Add(Patch("audio:CharacterMovementEffects.OnCrouchingUpdate", HookTargets.CrouchAudio, G(typeof(AudioGate), "CrouchPrefix"), null, G(typeof(AudioGate), "CrouchFinalizer")));
-			}
-		}
-		if (hosting)
-		{
-			hooks.Add(Patch("host:InteractedEntityProviderServerComponent.TrySetEntity", HookTargets.ServerTrySetEntity, null, new HarmonyMethod(typeof(ToolTargetDiagnostics), "Postfix")));
-			hooks.Add(Patch("host:InteractedEntityProviderServerComponent.Validate", HookTargets.ServerValidateHit, null, new HarmonyMethod(typeof(StandingToolReach), "ValidatePostfix")));
-			hooks.Add(Patch("host:ControlPanel.DetachControlPanelList", HookTargets.PanelDetachList, G(typeof(ControlGuard), "PanelDetachPrefix"), null, G(typeof(ControlGuard), "PanelDetachFinalizer")));
-			hooks.Add(Patch("host:ControlPanel.DetachAllBlockDetailsFromEntity", HookTargets.PanelDetachDetails, G(typeof(ControlGuard), "PanelDetailsPrefix")));
-		}
-		if (joining)
-		{
-			hooks.Add(Patch("client:Spectating.SetNextCharacterAsFocused", HookTargets.NextCharacterFocus, new HarmonyMethod(typeof(ClientWorld), "NextCharacterFocusPrefix")));
-		}
-		if ((hosting | joining) && _options.ControlFix)
-		{
-			ControlGuard.Start(_log);
-			if (hosting)
-			{
-				hooks.Add(Patch("host:Spectating.GetNextCharacter", HookTargets.NextCharacter, null, new HarmonyMethod(typeof(ControlGuard), "HostNextCharacterPostfix")));
-			}
 		}
 		if ((hosting | joining) && _options.Nametags && !DedicatedRuntime.Headless)
 		{
 			hooks.Add(Patch("game:GPSMarkerRender.DrawHUDMarkers", HookTargets.GpsDrawHud, new HarmonyMethod(typeof(NametagOverlay), "DrawPrefix")));
-		}
-		if (hosting && _options.OnePilot)
-		{
-			if (ControlGuard.Log == null)
-			{
-				ControlGuard.Log = _log;
-			}
-			ControlGuard.HostFlightGate = true;
-			hooks.Add(Patch("host:Cockpit.TogglePower", HookTargets.CockpitTogglePower, CP()));
-			hooks.Add(Patch("host:Cockpit.ToggleDampeners", HookTargets.CockpitToggleDampeners, CP()));
-			hooks.Add(Patch("host:Cockpit.ToggleLights", HookTargets.CockpitToggleLights, CP()));
-			hooks.Add(Patch("host:Cockpit.ToggleParkingBrakes", HookTargets.CockpitToggleBrakes, CP()));
-			hooks.Add(Patch("host:Cockpit.HandleBoost", HookTargets.CockpitBoost, CP()));
-		}
-		if ((hosting | joining) && _options.BuildFix && !DedicatedRuntime.Headless)
-		{
-			BuildGuards.Log = _log;
-			if (joining)
-			{
-				hooks.Add(Patch("client:ToppedMechanicalBlock.RequestSpawnTop", HookTargets.SpawnTop, new HarmonyMethod(typeof(BuildGuards), "SpawnTopPrefix")));
-				hooks.Add(Patch("client:PaintToolControllable.OnAddedToScene", HookTargets.PaintToolAdded, new HarmonyMethod(typeof(BuildGuards), "PaintToolAddedPrefix")));
-				try { _modeHarmony.Patch(AccessTools.PropertyGetter(typeof(Keen.Game2.Simulation.WorldObjects.Tools.PaintToolPerPlayerData), "Color"), prefix: new HarmonyMethod(typeof(BuildGuards), nameof(BuildGuards.PaintColorPrefix))); }
-				catch (Exception ex) { _log.Warn("client: paint colour guard not installed: " + ex.Message); }
-				try
-				{
-					var control = typeof(Keen.Game2.Client.WorldObjects.Character.CharacterMovementControlComponent);
-					_modeHarmony.Patch(AccessTools.Method(control, "RequestSprint"), postfix: new HarmonyMethod(typeof(MpPlugin), nameof(SprintPostfix)));
-					_modeHarmony.Patch(AccessTools.Method(control, "RequestCrouchToggle"), postfix: new HarmonyMethod(typeof(MpPlugin), nameof(CrouchPostfix)));
-				}
-				catch (Exception ex) { _log.Warn("client: sprint/crouch prediction hooks not installed: " + ex.Message); }
-				try
-				{
-					var magnetic = typeof(Keen.Game2.Simulation.WorldObjects.CubeBlocks.MechanicalBlocks.MagneticBlockComponent);
-					_modeHarmony.Patch(AccessTools.Method(magnetic, "OnUpdateReadyToLock"), prefix: new HarmonyMethod(typeof(MagneticBlockGuard), nameof(MagneticBlockGuard.ReadyToLockPrefix)));
-					_modeHarmony.Patch(AccessTools.Method(magnetic, "Destroy"), finalizer: new HarmonyMethod(typeof(MagneticBlockGuard), nameof(MagneticBlockGuard.DestroyFinalizer)));
-				}
-				catch (Exception ex) { _log.Warn("client: landing gear guard not installed: " + ex.Message); }
-				try
-				{
-					var weather = typeof(Keen.Game2.Client.WorldObjects.Weather.WeatherModifierRenderComponent);
-					_modeHarmony.Patch(AccessTools.Method(weather, "OnAddedToScene"), prefix: new HarmonyMethod(typeof(WeatherRenderGuard), nameof(WeatherRenderGuard.AddedPrefix)));
-					_modeHarmony.Patch(AccessTools.Method(weather, "OnBeforeRemovedFromScene"), prefix: new HarmonyMethod(typeof(WeatherRenderGuard), nameof(WeatherRenderGuard.RemovedPrefix)));
-					_modeHarmony.Patch(AccessTools.GetDeclaredMethods(typeof(Keen.Game2.Client.WorldObjects.PlanetEnvironmentRenderComponent)).Single(m => m.Name.EndsWith(".OnAddedToScene", StringComparison.Ordinal)), postfix: new HarmonyMethod(typeof(WeatherRenderGuard), nameof(WeatherRenderGuard.PlanetAddedPostfix)));
-				}
-				catch (Exception ex) { _log.Warn("client: weather render guard not installed: " + ex.Message); }
-			}
-			hooks.Add(Patch("render:SceneManager.DestroyEntity", HookTargets.RenderDestroyEntity, null, null, new HarmonyMethod(typeof(BuildGuards), "RenderDestroyFinalizer")));
 		}
 		foreach (var (name, ok, detail) in hooks)
 		{
@@ -366,48 +280,45 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			else _log.Error($"Harmony patch {name}: FAILED ({detail})");
 		}
 		if (hooks.Any(hook => !hook.Item2)) throw new InvalidOperationException("Multiplayer could not initialize for this game build. Check the game log for the failed hook.");
-		List<string> patched = _modeHarmony.GetPatchedMethods().Select(m => m.DeclaringType?.Name + "." + m.Name).ToList();
-		_log.Info($"Harmony patched {patched.Count} method(s): {string.Join(", ", patched)}");
 		if (_options.Networking)
 		{
 			NetSession.Start(_options, _log, Version, GameVersion());
 		}
-		static HarmonyMethod CP() => new HarmonyMethod(typeof(ControlGuard), "HostCockpitPrefix");
-		static HarmonyMethod G(Type t, string name) => new HarmonyMethod(t, name);
 	}
 
 	public static void Tick(Keen.Game2.GameAppComponent app)
 	{
 		App = app;
+		KytheraVeh.Tick();
 		if (app.Server == null) _observedWorld = null;
 		Controller?.Tick(MpClock.NowMs());
 		DedicatedRuntime.Tick(app);
-		HostWorld.Current?.SyncMenuPause();
+		ClientWorld.Current?.MainTick(app);
+		HostWorld.Current?.MainTick(app);
+		KeenNet.ApplyLobby();
+		Instance?.AttachToKeenJoin(app);
+		Instance?.AutoJoin(app);
+#if !PULSAR
+		if (_steamReady) UiShots.Tick(app);
+		MotionProbe.Tick(app);
+#endif
 	}
 
 	private void ResetMode()
 	{
 		if (!NetSession.ClearStopped()) throw new InvalidOperationException("The previous network thread is still running.");
 		_modeHarmony.UnpatchAll(_modeHarmony.Id);
-		ReplicationProbe.Stop();
 		// Leaving a session must not fail on a cleanup step; each logs its own failure instead.
 		try { RestoreHostRules(); } catch (Exception ex) { _log.Warn("host rules: restoring the game's definitions after hosting failed: " + ex); }
 		try { if (!DedicatedRuntime.Requested) AssertHandler.Uninstall(); } catch (Exception ex) { _log.Warn("asserts: restoring the game's handler failed: " + ex); }
 		PlayerInteraction.Reset();
 		HostWorld.Reset();
 		ClientWorld.Reset();
-		HostIdentities.Reset();
 		TeamPermissions.Enabled = false;
 		TurretRelations.Reset();
 		PvpRules.Reset();
-		ControlGuard.Enabled = false;
-		ControlGuard.HostFlightGate = false;
-		ControlGuard.IsForeignCharacterHere = null;
-		ControlGuard.SetJoinerCharacters(Array.Empty<Keen.VRage.DCS.Components.Entity>());
-		ControlGuard.SetJoinerDriven(Array.Empty<Keen.VRage.DCS.Components.Entity>());
-		SlowTicks.Enabled = false;
-		AudioGate.Enabled = false;
-		AudioRouting.Instance.Reset();
+		Sync.OfflineStats.Reset();
+		KeenNet.LobbyWanted = (Keen.VRage.Core.Services.GameSessions.JoinableSessionType.Private, 1);
 		NametagOverlay.Enabled = false;
 		NametagOverlay.ResetAll();
 		_installingMode = false;
@@ -419,11 +330,9 @@ public sealed class MpPlugin : IPlugin, IDisposable
 	{
 		bool resources = ResourceMultiplierRules.Restore();
 		bool inventories = InventoryMultiplierRules.Restore();
-		var server = App?.ServerSession;
-		var hostClient = HostWorld.Current?.HostClientSession?.SessionComponents.TryGet<Keen.VRage.Multiplayer.Replications.InProcess.InProcessReplicationSessionComponent>();
-		if (!(resources | inventories) || server == null || hostClient == null || hostClient.IsUnloading) return;
+		if (!(resources | inventories) || App?.Server == null) return;
 		// The world stays loaded after "stop hosting": its blocks and inventories are refreshed on its own server thread.
-		hostClient.PostInvoke(_ =>
+		HostWorld.PostToServer(server =>
 		{
 			try
 			{
@@ -432,6 +341,58 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			}
 			catch (Exception ex) { _log.Warn("host rules: could not refresh the loaded world after hosting: " + ex.Message); }
 		});
+	}
+
+	private bool _autoJoined;
+
+	// -y51online:autojoin:<address[:port]> joins that server once the main menu is up (desktop shortcuts, tests).
+	private void AutoJoin(Keen.Game2.GameAppComponent app)
+	{
+#if !PULSAR
+		// Rig: -y51online:selftest-rejoin joins again after the self-test left, in the same game run.
+		if (_autoJoined && KeenNetcode.SelfTest.TakeRejoin()) _autoJoined = false;
+#endif
+		if (_autoJoined || Controller == null || Controller.Busy || !_steamReady || app.Client != null || app.Server != null || app._isTransitioning.IsSet) return;
+		string arg = LaunchArgs.FirstOrDefault(a => a.StartsWith(MpOptions.Prefix + "autojoin:", StringComparison.OrdinalIgnoreCase));
+		_autoJoined = true;
+		if (arg == null) return;
+		string address = arg.Substring((MpOptions.Prefix + "autojoin:").Length);
+		_log.Info("session: joining " + address + " (launch option)");
+		if (address.StartsWith("local", StringComparison.OrdinalIgnoreCase))
+		{
+			// -y51online:autojoin:local[:port]: a game this Steam account hosts on this PC (test play).
+			int port = address.Length > 6 && int.TryParse(address.Substring(6), out int p) ? p : MpMenu.Settings?.ListenPort ?? MpOptions.DefaultIpPort;
+			var options = MpOptions.Parse(new[] { MpOptions.Prefix + "join:wait" });
+			options.KeenSession = new LocalSessionID(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, port));
+			Controller.Request(options, MpClock.NowMs());
+			return;
+		}
+		Controller.Request(MpOptions.Parse(new[] { MpOptions.Prefix + "join-address:" + address }), MpClock.NowMs());
+	}
+
+	// Every SE2 4.0 join (join code screen, Steam invite, -localDedicatedClient) goes through SE2 Online first: it reads and
+	// downloads the host's mods, which the game's own join never does, and its join session must exist for the host to admit us.
+	private static bool KeenJoinPrefix(Keen.VRage.Core.Services.GameSessions.GameSessionID sessionID, ref Keen.VRage.Library.Threading.Task __result)
+	{
+		if (ClientWorld.Joining || Instance == null || Controller == null || Controller.Busy) return true;
+		var options = MpOptions.Parse(new[] { MpOptions.Prefix + "join:wait" });
+		options.KeenSession = sessionID;
+		GameLog.Instance.Info($"session: the game asked to join {sessionID}; SE2 Online takes the join over");
+		Controller.Request(options, MpClock.NowMs());
+		__result = Keen.VRage.Library.Threading.TaskExtensions.StripResult(Keen.VRage.Library.Threading.Task.FromResult(true));
+		return false;
+	}
+
+	// The game's own join (Steam invite, "Join Game", join code) started a network client without SE2 Online: ride along
+	// so the host's join check gets our request.
+	private void AttachToKeenJoin(Keen.Game2.GameAppComponent app)
+	{
+		if (KeenNet.ClientComms == null || Controller == null || Controller.Busy || Controller.Current?.Join == true) return;
+		if (KeenNet.ClientServer is not { } server || KeenNet.SteamIdOf(server) is not ulong host) return;
+		var options = MpOptions.Parse(new[] { "-y51online:join:" + host });
+		options.KeenAttached = true;
+		_log.Info($"session: the game joined server {host} by itself; SE2 Online joins along");
+		Controller.Attach(options);
 	}
 
 	private sealed class OnlineRuntime : IOnlineRuntime
@@ -472,6 +433,8 @@ public sealed class MpPlugin : IPlugin, IDisposable
 	{
 		TeamPermissions.Log = _log;
 		(_installingMode ? _modeHarmony : _harmony).Patch(AccessTools.Method(typeof(Keen.Game2.Simulation.GameSystems.Permissions.PermissionsSessionComponent), "IsFriendly"), postfix: P("IsFriendlyPostfix"));
+		(_installingMode ? _modeHarmony : _harmony).Patch(AccessTools.Method(typeof(Keen.Game2.Simulation.GameSystems.Factions.FactionsSessionComponent), "InSameFaction"), prefix: P("InSameFactionPrefix"));
+		(_installingMode ? _modeHarmony : _harmony).Patch(AccessTools.Method(typeof(Keen.Game2.Simulation.GameSystems.PCU.PCUSessionComponent), "GetPCUPool"), prefix: P("PcuPoolPrefix"));
 		yield return Patch(side + ":Permissions.IsOwner", HookTargets.PermIsOwner, null, P("IsOwnerPostfix"));
 		yield return Patch(side + ":Permissions.CanPlaceBlock", HookTargets.PermCanPlace, null, P("CanPlaceBlockPostfix"));
 		yield return Patch(side + ":Permissions.CanUseBlockAction", HookTargets.PermCanUse, null, P("CanUseBlockActionPostfix"));
@@ -479,10 +442,6 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		yield return Patch(side + ":Permissions.CanMergeGrids", HookTargets.PermCanMerge, null, P("CanMergeGridsPostfix"));
 		static HarmonyMethod P(string name) => new HarmonyMethod(typeof(TeamPermissions), name);
 	}
-
-	private static void SprintPostfix(bool sprint) => ClientWorld.SprintRequested(sprint);
-
-	private static void CrouchPostfix() => ClientWorld.CrouchToggleRequested();
 
 	private (string, bool, string) Patch(string name, EngineMember target, HarmonyMethod? prefix = null, HarmonyMethod? postfix = null, HarmonyMethod? finalizer = null)
 	{
@@ -589,7 +548,6 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		{
 			NetSession.Current?.Stop("plugin disposed");
 			MpMenu.Dispose();
-			ReplicationProbe.Stop();
 			_modeHarmony.UnpatchAll(_modeHarmony.Id);
 			_harmony.UnpatchAll(_harmony.Id);
 			AssertHandler.Uninstall();

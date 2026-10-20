@@ -38,7 +38,7 @@ internal static class WaterMirror
 	}
 
 	/// <summary>
-	/// SE2 2.4 refuses water grids outside the "Server" scene ("Water Syncing to Clients was disabled"). The throw becomes
+	/// SE2 (2.4 and 4.0) refuses water grids outside the "Server" scene ("Water Syncing to Clients was disabled"). The throw becomes
 	/// a call that still throws unless the host streams water to this joiner.
 	/// </summary>
 	private static IEnumerable<CodeInstruction> InitTranspiler(IEnumerable<CodeInstruction> instructions)
@@ -86,7 +86,7 @@ internal static class WaterMirror
 				catch (Exception ex)
 				{
 					Skipped++;
-					if (Skipped % 500 == 1) GameLog.Instance.Info("water sync: a water grid could not be applied: " + RemoteClientGame.Describe(ex) + (Skipped == 1 ? " " + ex : ""));
+					if (Skipped % 500 == 1) GameLog.Instance.Info("water sync: a water grid could not be applied: " + ex.Message + (Skipped == 1 ? " " + ex : ""));
 				}
 			}
 		}
