@@ -75,6 +75,7 @@ internal static class KeenNet
 		harmony.Patch(AccessTools.Method(lobby, "Init"), prefix: new HarmonyMethod(typeof(KeenNet), nameof(LobbyInitPrefix)), postfix: new HarmonyMethod(typeof(KeenNet), nameof(LobbyInitPostfix)));
 		harmony.Patch(AccessTools.Method(lobby, "Destroy"), prefix: new HarmonyMethod(typeof(KeenNet), nameof(LobbyDestroyPrefix)));
 		harmony.Patch(AccessTools.Method(typeof(GameSessionDedicatedServerComponent), "Init"), prefix: new HarmonyMethod(typeof(KeenNet), nameof(DedicatedInitPrefix)));
+		harmony.Patch(AccessTools.Method(typeof(GameServer), nameof(GameServer.Init)), prefix: new HarmonyMethod(typeof(KeenNet), nameof(QueryPortPrefix)));
 		var join = typeof(GameSessionClientComponent);
 		harmony.Patch(AccessTools.Method(join, "Init"), prefix: new HarmonyMethod(typeof(KeenNet), nameof(JoinInitPrefix)));
 		harmony.Patch(AccessTools.Method(join, "Destroy"), prefix: new HarmonyMethod(typeof(KeenNet), nameof(JoinDestroyPrefix)));
@@ -143,6 +144,16 @@ internal static class KeenNet
 		ob.ListenEndpoint = listen.Endpoint;
 		ob.ServerName = listen.Name;
 		_log.Info($"keen dedicated: Steam game server on {listen.Endpoint} as '{listen.Name}'");
+	}
+
+	// Keen starts the Steam game server with the query port shared with the game socket (0xFFFF), and on a remote server
+	// nothing answered server queries there, so clients took it for a co-op host and never joined. Steam answers on its own
+	// port: game port + 1, the port 0.15 servers used (existing firewall rules already open it).
+	private static void QueryPortPrefix(ushort __1, ref ushort __2)
+	{
+		if (DedicatedListen == null || __2 != ushort.MaxValue || __1 == ushort.MaxValue) return;
+		__2 = (ushort)(__1 + 1);
+		_log.Info($"keen dedicated: server queries on port {__2}");
 	}
 
 	private static GameSessionHostComponent? _lobby;

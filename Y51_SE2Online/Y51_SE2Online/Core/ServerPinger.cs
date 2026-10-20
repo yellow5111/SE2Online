@@ -72,10 +72,17 @@ public sealed class ServerPinger : IDisposable
     }
 
     /// <summary>
-    /// Whether a Steam server query answers on this game port: an SE2 4.0 dedicated server does, a co-op host's direct
-    /// IP listener does not. Blocks up to about 2 s.
+    /// Where a Steam server query answers for this game address: port + 1 on SE2 Online dedicated servers (0.16.1 and
+    /// 0.15), the game port itself on servers that share it; null for a co-op host's direct IP listener. Blocks up to about 4 s.
     /// </summary>
-    public static bool AnswersQuery(IPEndPoint endpoint)
+    public static IPEndPoint? QueryEndpoint(IPEndPoint endpoint)
+    {
+        var next = endpoint.Port < 65535 ? new IPEndPoint(endpoint.Address, endpoint.Port + 1) : null;
+        if (next != null && Answers(next)) return next;
+        return Answers(endpoint) ? endpoint : null;
+    }
+
+    private static bool Answers(IPEndPoint endpoint)
     {
         using var udp = new UdpClient(endpoint.AddressFamily);
         udp.Client.ReceiveTimeout = 700;

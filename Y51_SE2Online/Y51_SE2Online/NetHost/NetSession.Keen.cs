@@ -153,9 +153,10 @@ internal sealed partial class NetSession
 		{
 			if (System.Net.IPAddress.IsLoopback(ip.Address)) return new LocalSessionID(ip);
 			// Dedicated servers take IP joins on the game's own socket; a co-op host listens through SE2 Online's.
-			bool dedicated = ServerPinger.AnswersQuery(ip);
-			_log.Info($"net: {ip} is {(dedicated ? "a dedicated server" : "a co-op host (no server query answer)")}");
-			return dedicated ? new GameSessionIPEndpoint(ip) : new SteamIpSessionID(ip);
+			// The game finds the server's Steam id through a server query to the address it joins, then connects by that id.
+			var query = ServerPinger.QueryEndpoint(ip);
+			_log.Info($"net: {ip} is {(query != null ? $"a dedicated server (queries on port {query.Port})" : "a co-op host (no server query answer)")}");
+			return query != null ? new GameSessionIPEndpoint(query) : new SteamIpSessionID(ip);
 		}
 		if (_joinTarget == 0) return null;
 		// Steam will not connect this account to itself: another instance of it hosts on this PC.

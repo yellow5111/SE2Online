@@ -149,6 +149,10 @@ internal sealed class ClientWorld
 
 	private long _joinBytesAtStart;
 
+	private long _connectingSinceMs;
+
+	private const long ConnectTimeoutMs = 60000;
+
 	public void MainTick(Keen.Game2.GameAppComponent app)
 	{
 		long now = MpClock.NowMs();
@@ -169,6 +173,8 @@ internal sealed class ClientWorld
 				// Without this the client keeps whatever mods the last single-player world loaded.
 				app.GameData.SetRequiredProjects(WorkshopMods.ToModList(mods ?? new List<WorldMod>()));
 				Joining = true;
+				// Timed from here: a Workshop mod download before it can take minutes.
+				_connectingSinceMs = now;
 				try { _loading = app.LoadNetworkClientAsync(target); }
 				finally { Joining = false; }
 			}
@@ -197,6 +203,14 @@ internal sealed class ClientWorld
 			_backToMenu = false;
 			_log.Info("client: join failed; back to the main menu");
 			app.Disconnect();
+		}
+		// Nothing answered (a server still starting, offline or firewalled): the join used to wait on the loading screen forever.
+		if (Progress.Stage == JoinStage.Connecting && _session?.Accept == null && _connectingSinceMs > 0 && now - _connectingSinceMs > ConnectTimeoutMs)
+		{
+			_connectingSinceMs = 0;
+			FailJoin($"No answer from the server within {ConnectTimeoutMs / 1000} s. It may still be starting, be offline, or be blocked by a firewall.");
+			if (!app._isTransitioning.IsSet && (app.Client != null || app.Server != null)) app.Disconnect();
+			else _backToMenu = true;
 		}
 		// Keen loads the host's world itself: the bar follows the bytes it receives, then Keen building the world (its
 		// session counts as loaded after the first full tick), then the player's character arriving.
