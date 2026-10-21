@@ -121,6 +121,8 @@ public sealed class OnlineSettings
     public double HackTimeMultiplier { get; set; } = 1;
     /// <summary>Hosting: other players' grids can be hacked too (still only with PvP on and never inside safe zones). Off unless the host opts in.</summary>
     public bool AllowHackingPlayerGrids { get; set; }
+    /// <summary>Set once the host has saved the Host screen, so Hacking and AllowHackingPlayerGrids reflect a real choice.</summary>
+    public bool HackingChosen { get; set; }
     /// <summary>Hosting: how long an owner's remote lockdown freezes a hack; 0 turns lockdown off.</summary>
     public int HackLockdownSeconds { get; set; } = 60;
     /// <summary>Hosting: wait before the same grid can be locked down again.</summary>

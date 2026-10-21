@@ -11,27 +11,44 @@ namespace Y51_SE2Online.SyncEngine;
 /// A low-level keyboard hook beside the game's DirectInput keyboard. Overlays (NVIDIA takes Alt+F1/F9/F10, Alt+Z, ...)
 /// swallow their hotkeys before DirectInput sees them, but low-level hooks run newest first, so ours sees every key.
 /// Our own Ctrl/Alt bindings are eaten while the game is in front, so the overlay does not act on them too.
+/// Hooked only while online or while a binding is being captured: it sees every key typed system-wide.
 /// </summary>
 internal static class KeyHook
 {
-	private const int WhKeyboardLl = 13, WmKeyDown = 0x100, WmKeyUp = 0x101, WmSysKeyDown = 0x104, WmSysKeyUp = 0x105;
+	private const int WhKeyboardLl = 13, WmQuit = 0x12, WmKeyDown = 0x100, WmKeyUp = 0x101, WmSysKeyDown = 0x104, WmSysKeyUp = 0x105;
 	private const int VkShift = 0x10, VkCtrl = 0x11, VkAlt = 0x12;
 
 	private static readonly bool[] Down = new bool[256];
 	private static readonly bool[] Eaten = new bool[256];
 	private static volatile KeyBinding[] _claimed = Array.Empty<KeyBinding>();
 	private static OnlineSettings _claimedFrom;
-	private static LowLevelProc _proc;
-	private static int _started;
+	private static readonly LowLevelProc Proc = Hook;
+	private static Run? _run;
 	private static readonly int OwnPid = Environment.ProcessId;
 
 	public static bool IsDown(int vk) => vk is >= 0 and < 256 && Down[vk];
 
-	public static void Start()
+	private sealed class Run { public uint ThreadId; public bool Stopped; }
+
+	/// <summary>Main thread, every frame: hooks or unhooks when <paramref name="wanted"/> changes.</summary>
+	public static void Want(bool wanted)
 	{
-		if (!OperatingSystem.IsWindows() || Interlocked.Exchange(ref _started, 1) != 0) return;
-		var thread = new Thread(Run) { IsBackground = true, Name = "Y51_SE2Online-Keys" };
-		thread.Start();
+		if (wanted == (_run != null) || !OperatingSystem.IsWindows()) return;
+		if (wanted)
+		{
+			var run = _run = new Run();
+			new Thread(() => Loop(run)) { IsBackground = true, Name = "Y51_SE2Online-Keys" }.Start();
+			return;
+		}
+		var old = _run;
+		_run = null;
+		lock (old)
+		{
+			old.Stopped = true;
+			if (old.ThreadId != 0) PostThreadMessage(old.ThreadId, WmQuit, IntPtr.Zero, IntPtr.Zero);
+		}
+		Array.Clear(Down);
+		Array.Clear(Eaten);
 	}
 
 	/// <summary>Called every frame; only re-reads the bindings when the settings object changes.</summary>
@@ -45,16 +62,21 @@ internal static class KeyHook
 		_claimed = list.ToArray();
 	}
 
-	private static void Run()
+	private static void Loop(Run run)
 	{
 		try
 		{
-			_proc = Hook;
-			IntPtr hook = SetWindowsHookEx(WhKeyboardLl, _proc, GetModuleHandle(null), 0);
+			IntPtr hook = SetWindowsHookEx(WhKeyboardLl, Proc, GetModuleHandle(null), 0);
 			if (hook == IntPtr.Zero) { GameLog.Instance.Warn("[keys] low-level keyboard hook not installed (error " + Marshal.GetLastWin32Error() + "); hotkeys an overlay owns will not work"); return; }
+			lock (run)
+			{
+				if (run.Stopped) { UnhookWindowsHookEx(hook); return; }
+				run.ThreadId = GetCurrentThreadId();
+			}
 			GameLog.Instance.Info("[keys] low-level keyboard hook installed");
 			while (GetMessage(out _, IntPtr.Zero, 0, 0) > 0) { }
 			UnhookWindowsHookEx(hook);
+			GameLog.Instance.Info("[keys] low-level keyboard hook removed");
 		}
 		catch (Exception ex) { GameLog.Instance.Warn("[keys] keyboard hook failed: " + ex.Message); }
 	}
@@ -112,7 +134,9 @@ internal static class KeyHook
 	[DllImport("user32.dll")] private static extern int GetMessage(out Msg msg, IntPtr window, uint min, uint max);
 	[DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
 	[DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
+	[DllImport("user32.dll")] private static extern bool PostThreadMessage(uint thread, int msg, IntPtr wParam, IntPtr lParam);
 	[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandle(string name);
+	[DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
 
 	[StructLayout(LayoutKind.Sequential)]
 	private struct Msg { public IntPtr Window; public uint Message; public IntPtr WParam, LParam; public uint Time; public int X, Y; }

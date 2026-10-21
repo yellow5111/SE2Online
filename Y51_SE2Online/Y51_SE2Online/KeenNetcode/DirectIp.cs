@@ -49,7 +49,7 @@ internal sealed class DirectIpPeers : IDisposable
 		_link = new SteamLink(log, MpOptions.DefaultVirtualPort, 1024 * 1024, 8 * 1024 * 1024, _ => true, listen);
 		_link.Start(listen != null);
 		_server = server;
-		_fragments = new FragmentLink<GameServiceUser>(SendFrame, log, Close);
+		_fragments = new FragmentLink<GameServiceUser>(SendFrame, log, Close, connect == null ? KeenNet.MayFragment : null);
 		if (connect != null)
 		{
 			uint conn = _link.Connect(connect);
@@ -95,8 +95,10 @@ internal sealed class DirectIpPeers : IDisposable
 			foreach (var m in _messages)
 			{
 				if (m.Data.Length < 2 || !_users.TryGetValue(m.Conn, out var user)) continue;
+				bool mods = m.Data[0] == ModsChannel && _server != null;
+				if (!mods && !GameChannels.Read(m.Data[0])) continue;
 				if (_fragments.Receive(user, m.Data[0], m.Data.AsSpan(2)) is not { } whole) continue;
-				if (m.Data[0] == ModsChannel) HostMods = System.Text.Encoding.UTF8.GetString(whole);
+				if (mods) HostMods = System.Text.Encoding.UTF8.GetString(whole);
 				else received(user, m.Data[0], (MessageReliability)m.Data[1], whole);
 			}
 			_fragments.Flush();

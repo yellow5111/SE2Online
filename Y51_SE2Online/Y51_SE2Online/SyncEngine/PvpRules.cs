@@ -204,7 +204,7 @@ internal static class PvpRules
     // destroyed in the same tick). Dropped before ProcessHit touches it; the finalizer stays for anything else.
     private static bool HitBodyAlivePrefix(ProjectileSystemSessionComponent __instance, Keen.VRage.Physics.Queries.SweepQueryHit entryHit, ref bool isProjectileAlive, ref Vector3D? __result)
     {
-        if (__instance.Entity.Scene.IsEntityAlive(entryHit.Body)) return true;
+        if (!MpPlugin.Online || __instance.Entity.Scene.IsEntityAlive(entryHit.Body)) return true;
         __result = null;
         isProjectileAlive = false;
         return false;

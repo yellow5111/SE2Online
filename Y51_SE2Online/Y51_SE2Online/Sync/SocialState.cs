@@ -299,17 +299,15 @@ public sealed class SocialState
     /// <summary>
     /// Dedicated, at load: nobody plays as the host's identity there. Saves from before 0.15.4 kept it for whoever hosted;
     /// it goes to the one other saved player of the same name, or leaves its faction unless it is the faction's only member.
+    /// Its grids do not follow a name match (names are chosen at join): without a saved <see cref="HostIdentity"/> they are
+    /// left for anyone to claim.
     /// </summary>
     public void SettleHostSlot()
     {
         const long host = PlayerIdentities.HotfixIdentity;
         var saved = Players.Find(p => p.Identity == host);
         if (saved == null) return;
-        if (Namesake(saved) is long other)
-        {
-            Merge(host, other);
-            if (HostHeir == 0) HostIdentity = other;
-        }
+        if (Namesake(saved) is long other) Merge(host, other);
         else if (FactionOf(host) is not { Members.Count: 1 }) Forget(host);
     }
 

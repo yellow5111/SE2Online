@@ -32,6 +32,8 @@ public sealed class MpPlugin : IPlugin, IDisposable
 	public static OnlineSessionController Controller { get; private set; }
 	public static Keen.Game2.GameAppComponent App { get; private set; }
 	public static bool SteamAvailable => _steamReady;
+	/// <summary>Hosting, joined or joining, or a dedicated server: patches that change the game check this first.</summary>
+	public static bool Online => DedicatedRuntime.Requested || Controller?.Current is { } current && (current.Host || current.Join);
 	public static string CurrentGameVersion => GameVersion();
 
 
@@ -119,8 +121,6 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		host.OnBeforeEngineInstantiated += OnBeforeEngineInstantiated;
 		Optional("plugin texts", () => OnlineUi.InstallRawTexts(_harmony));
 		Controller = new OnlineSessionController(new OnlineRuntime(this));
-		// SE2 4.0 ships Keen's own multiplayer behind -enableMultiplayer; SE2 Online runs on it.
-		Keen.Game2.Simulation.GameFeatureConfig.MultiplayerEnabled = true;
 		KeenNet.Install(_harmony, _log);
 		IdentityCarryOver.Install(_harmony, _log);
 		_harmony.Patch(AccessTools.Method(typeof(Keen.Game2.GameAppComponent), nameof(Keen.Game2.GameAppComponent.LoadNetworkClientAsync)), prefix: M(nameof(KeenJoinPrefix)));
@@ -154,9 +154,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		if (ruleFailures.Count > 0) throw new InvalidOperationException("server rules could not be installed for this game build: " + string.Join("; ", ruleFailures));
 		Optional("offline survival stats", () => OfflineStatsGuard.Install(_harmony));
 		Optional("shared discoveries", () => SharedDiscoveries.Install(_harmony));
-#if !PULSAR
 		Optional("motion playback", MotionSmoothing.Install);
-#endif
 		Optional("4.0 crash guards", () => KeenGuards.Install(_harmony));
 		Optional("resilient replication", () => ResilientReplication.Install(_harmony));
 		Optional("spawned ships for players who join later", () => StagedReplication.Install(_harmony));
@@ -171,6 +169,9 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		Optional("control panel group names", () => NameSync.Install(_harmony));
 		Optional("join status", () => JoinStatusUi.Install(_harmony));
 		Optional("client clock", () => KeenNetcode.ClientClock.Install(_harmony));
+#if !PULSAR
+		Optional("own motion probe", () => KeenNetcode.OwnMotionProbe.Install(_harmony));
+#endif
 		Optional("block size names", () => BlockSizeFilter.Install(_harmony));
 		Optional("autosave blob fix", () => BackupBlobFix.Install(_harmony));
 		Optional("resource usage", () => ResourceMultiplierRules.Install(_harmony));
@@ -199,6 +200,9 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			Optional("build sounds at the block", () => BuildAudio.Install(_harmony));
 			Optional("other players' cockpit and landing gear sounds", () => PlayerAudio.Install(_harmony));
 		}
+		// SE2 4.0 ships Keen's own multiplayer behind -enableMultiplayer; SE2 Online runs on it. Set last: with it on, every
+		// single-player world opens a joinable session that only KeenNet's lobby and hello gates keep closed.
+		Keen.Game2.Simulation.GameFeatureConfig.MultiplayerEnabled = true;
 		_log.Info(DedicatedRuntime.Headless ? "Y51_SE2Online dedicated bootstrap installed" : "Y51_SE2Online ready: use Multiplayer in the main or pause menu");
 	}
 
@@ -302,6 +306,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 #if !PULSAR
 		if (_steamReady) UiShots.Tick(app);
 		MotionProbe.Tick(app);
+		OwnMotionProbe.Tick(app);
 #endif
 	}
 
@@ -548,6 +553,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		try
 		{
 			NetSession.Current?.Stop("plugin disposed");
+			Keen.Game2.Simulation.GameFeatureConfig.MultiplayerEnabled = LaunchArgs.Contains("-enableMultiplayer");
 			MpMenu.Dispose();
 			_modeHarmony.UnpatchAll(_modeHarmony.Id);
 			_harmony.UnpatchAll(_harmony.Id);

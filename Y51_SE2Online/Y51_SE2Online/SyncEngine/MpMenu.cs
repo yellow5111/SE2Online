@@ -312,7 +312,7 @@ internal static class MpMenu
     private static void Hotkeys(Keen.Game2.GameAppComponent app)
     {
         var shared = Shared(app);
-        KeyHook.Start();
+        KeyHook.Want(AdminAccess.InSession || KeyBindButton.Listening);
         KeyHook.Claim(Settings);
         bool chat = Pressed(Settings.ChatKey, ref _chatDown), players = Pressed(Settings.PlayersKey, ref _playersDown), admin = Pressed(Settings.AdminKey, ref _adminDown), broadcast = Pressed(Settings.BroadcastKey, ref _broadcastDown);
         bool inWorld = app.Client != null && !app._isTransitioning.IsSet && shared != null;
@@ -534,6 +534,8 @@ internal static class MpMenu
                 if (settings != null && settings.StateBudgetKiB == 256) settings.StateBudgetKiB = 1024;
                 // Before 0.14 listing was on by default; nobody chose it, so it starts off until the host turns it on.
                 if (settings != null && !settings.AdvertiseChosen) settings.Advertise = false;
+                // 0.15.1 saved hacking as on by default; nobody chose it, so it stays off until the host turns it on.
+                if (settings != null && !settings.HackingChosen) settings.Hacking = settings.AllowHackingPlayerGrids = false;
                 if (settings != null && settings.Validate() == null) return settings;
             }
         }
@@ -552,5 +554,6 @@ internal static class MpMenu
         _adminScreen?.Dispose();
         _adminScreen = null;
         ChatUi.Close();
+        KeyHook.Want(false);
     }
 }

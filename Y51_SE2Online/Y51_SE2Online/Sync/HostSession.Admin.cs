@@ -204,7 +204,7 @@ public sealed partial class HostSession
 			}
 			result = _o.Access.SetAdmin(account, name, r.Action == AdminAction.Promote);
 			if (r.Action == AdminAction.Demote)
-				foreach (var p in Players().Where(p => p.Peer is { } peer && PeerAlias.SteamOf(peer.Value) == account)) AccessBypass.Set(p.IdentityId, false);
+				foreach (var p in Players().Where(p => PeerAlias.SteamOf(p.Peer?.Value ?? SteamIdOfKey(p.Key)) == account)) AccessBypass.Set(p.IdentityId, false);
 			break;
 		case AdminAction.WhitelistAdd:
 			if (KnownName(r.Target) == null)

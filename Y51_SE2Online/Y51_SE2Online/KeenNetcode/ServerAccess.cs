@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using HarmonyLib;
 using Keen.Game2.Simulation.GameSystems.Identities;
 using Keen.Game2.Simulation.GameSystems.Ownership;
@@ -41,6 +42,8 @@ internal static class ServerAccess
 		Patch(harmony, "medbays", AccessTools.Method(typeof(RespawnSessionComponent), nameof(RespawnSessionComponent.ActivateRespawnPoint)), prefix: nameof(ActivateRespawnPrefix));
 		Patch(harmony, "story caller", AccessTools.Method(typeof(Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport), "ProcessStory"),
 			prefix: nameof(StoryPrefix), finalizer: nameof(StoryFinalizer));
+		Patch(harmony, "story arguments", AccessTools.Method(typeof(Keen.VRage.Multiplayer.Transport.OutOfProcess.Server.OutOfProcessServerPeerTransport), "RestoreStoryStateMachine"),
+			postfix: nameof(RestoredStoryPostfix));
 		var toolbar = typeof(Keen.Game2.Simulation.WorldObjects.CubeBlocks.Toolbar.BlockToolbarServerComponent);
 		Patch(harmony, "button panels", System.Linq.Enumerable.FirstOrDefault(AccessTools.GetDeclaredMethods(toolbar), m => m.Name == "ActivateTile" && m.GetParameters().Length == 3), prefix: nameof(ToolbarPrefix));
 		Patch(harmony, "button panel edits", AccessTools.Method(toolbar, "ClearTile"), prefix: nameof(ToolbarPrefix));
@@ -66,25 +69,116 @@ internal static class ServerAccess
 	// validator and cannot see their caller, so the caller is kept here while one runs.
 	[ThreadStatic] private static Keen.VRage.Multiplayer.ClientId? _storyClient;
 
-	private static void StoryPrefix(Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport __instance, out Keen.VRage.Multiplayer.ClientId? __state)
+	// The client started this story (it is not one of the server's own coming back from that client).
+	[ThreadStatic] private static bool _hostingStory;
+
+	private static void StoryPrefix(Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport __instance, Keen.VRage.Multiplayer.NetworkStories.IStoryData story,
+		out (Keen.VRage.Multiplayer.ClientId? Client, bool Hosting) __state)
 	{
-		__state = _storyClient;
+		__state = (_storyClient, _hostingStory);
 		_storyClient = __instance.PeerClientId;
+		_hostingStory = !__instance._storiesInFlight.ContainsKey(story.StoryId);
 	}
 
-	private static Exception? StoryFinalizer(Exception? __exception, Keen.VRage.Multiplayer.ClientId? __state)
+	private static Exception? StoryFinalizer(Exception? __exception, (Keen.VRage.Multiplayer.ClientId? Client, bool Hosting) __state)
 	{
-		_storyClient = __state;
+		(_storyClient, _hostingStory) = __state;
 		return __exception;
 	}
+
+	// A story arrives with whatever arguments the client wrote, and SE2 4.0 checks at most the story's own component: never
+	// whose character an argument is (seating, unseating or feeding someone else's character) nor which identity an
+	// ownership transfer names (taking any grid). 0.15.3 refused both on its own story path. A refused story is swapped
+	// for one that faults, so the client's request fails the way a failed validator fails it.
+	private static void RestoredStoryPostfix(Keen.VRage.Multiplayer.ClientId sender, ref System.Runtime.CompilerServices.IAsyncStateMachine __result)
+	{
+		if (!Enforcing || !_hostingStory || sender == Keen.VRage.Multiplayer.ClientId.Server || __result == null) return;
+		string? refused;
+		try { refused = StoryRefusal(sender, __result); }
+		catch (Exception ex)
+		{
+			GameLog.Instance.WarnOnce("story-check-failed", $"access: could not check a story ({ex.GetType().Name}: {ex.Message}); allowed");
+			return;
+		}
+		if (refused == null) return;
+		Refused++;
+		if (LogDue(sender, "story")) GameLog.Instance.Info($"access: refused ClientId {sender.Id}'s {__result.GetType().DeclaringType?.Name}.{StoryName(__result.GetType())} ({refused}; further ones within 5 s not logged)");
+		__result = new RefusedStory(refused);
+	}
+
+	private static string? StoryRefusal(Keen.VRage.Multiplayer.ClientId sender, System.Runtime.CompilerServices.IAsyncStateMachine story)
+	{
+		long caller = (long)IdentityOf(sender);
+		if (IsAdminIdentity(caller)) return null;
+		if (PasteOnce.HostGate((ushort)sender.Id, story) is { } paste) return paste;
+		var arguments = StoryArguments.GetValue(story.GetType(), Arguments);
+		if (arguments.Initiator?.GetValue(story) is IdentityId initiator && (long)initiator != caller) return "an ownership transfer in another player's name";
+		foreach (var field in arguments.Entities)
+		{
+			Entity? named = field.GetValue(story) switch
+			{
+				Entity e => e,
+				Component c => c.Entity,
+				Keen.VRage.Multiplayer.Replications.FailureStrategies.SkipOnReplicationFail<Entity> s => s.Value,
+				Keen.VRage.Multiplayer.Replications.FailureStrategies.NullOnReplicationFail<Entity> n => n.Value,
+				Keen.VRage.Multiplayer.Replications.FailureStrategies.NullOnAnyReplicationFail<Entity> n => n.Value,
+				Keen.VRage.Multiplayer.Replications.FailureStrategies.ThrowOnReplicationFail<Entity> t => t.Value,
+				_ => null,
+			};
+			if (named != null && IsForeignCharacter(named, caller)) return "another player's character";
+		}
+		return null;
+	}
+
+	private sealed record StoryFields(System.Reflection.FieldInfo? Initiator, System.Reflection.FieldInfo[] Entities);
+
+	private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Type, StoryFields> StoryArguments = new();
+
+	// The async method's parameters are the state machine's plainly named fields; <>4__this is the component it runs on.
+	private static StoryFields Arguments(Type type)
+	{
+		var fields = AccessTools.GetDeclaredFields(type).Where(f => !f.IsStatic && (f.Name == "<>4__this" || !f.Name.StartsWith('<'))).ToArray();
+		var initiator = type.DeclaringType == typeof(OwnershipSessionComponent) ? fields.FirstOrDefault(f => f.Name == "initiator" && f.FieldType == typeof(IdentityId)) : null;
+		return new StoryFields(initiator, fields.Where(f => typeof(Entity).IsAssignableFrom(f.FieldType) || typeof(Component).IsAssignableFrom(f.FieldType)
+			|| (f.FieldType.IsGenericType && f.FieldType.GetGenericArguments()[0] == typeof(Entity))).ToArray());
+	}
+
+	private static string StoryName(Type type) => type.Name.StartsWith('<') && type.Name.IndexOf('>') is > 1 and var end ? type.Name[1..end] : type.Name;
+
+	private sealed class RefusedStory(string reason) : System.Runtime.CompilerServices.IAsyncStateMachine
+	{
+		public void MoveNext() => throw new InvalidOperationException("Access denied: " + reason);
+
+		public void SetStateMachine(System.Runtime.CompilerServices.IAsyncStateMachine stateMachine) { }
+	}
+
+	private static readonly System.Collections.Concurrent.ConcurrentDictionary<(int Client, string Kind), long> _lastLogged = new();
+
+	/// <summary>True at most once per client and kind every 5 s, so a modified client cannot flood the log.</summary>
+	internal static bool LogDue(Keen.VRage.Multiplayer.ClientId client, string kind)
+	{
+		long now = MpClock.NowMs();
+		var key = (client.Id, kind);
+		if (_lastLogged.TryGetValue(key, out long last) && now - last < 5000) return false;
+		_lastLogged[key] = now;
+		return true;
+	}
+
+	/// <summary>The client's identity, or 0 for a client that has none yet (GetIdentityFromClient throws for those).</summary>
+	internal static IdentityId IdentityOf(Keen.VRage.Multiplayer.ClientId client)
+		=> MpPlugin.App?.ServerSession?.SessionComponents.TryGet<IdentitiesSessionComponent>() is { } identities && identities._clientIds.TryGetValue(client, out var identity) ? identity : default;
+
+	/// <summary>Another human player's living character. Bodies stay lootable and NPCs stay usable.</summary>
+	internal static bool IsForeignCharacter(Entity entity, long identity)
+		=> entity.TryGet<CharacterLifeComponent>() is { IsAlive: true } && TeamPermissions.OwnerOf(entity) is long owner && owner != 0 && owner != identity && PlayerIdentities.IsHuman(owner);
 
 	// Button panels and every other block toolbar: pressing or clearing a tile needs the block's use access (2.4 checked
 	// grid sharing on the host; 4.0's RequestActivateTile has no validator).
 	private static bool ToolbarPrefix(Component __instance)
 	{
 		if (!Enforcing || _storyClient is not { } client || client == Keen.VRage.Multiplayer.ClientId.Server) return true;
-		var identity = MpPlugin.App?.ServerSession?.SessionComponents.TryGet<IdentitiesSessionComponent>()?.GetIdentityFromClient(client);
-		if (identity is not { } who || MayUse(null, who, __instance.Entity)) return true;
+		var who = IdentityOf(client);
+		if ((long)who != 0 && MayUse(null, who, __instance.Entity)) return true;
 		Refused++;
 		GameLog.Instance.Info($"access: refused identity {(long)who} on {__instance.Entity.GetComposition()?.DebugNameShort} toolbar (no access)");
 		return false;
@@ -123,12 +217,13 @@ internal static class ServerAccess
 		return false;
 	}
 
-	private static bool IsAdmin(ReplicationEventContext context)
+	private static bool IsAdmin(ReplicationEventContext context) => IsAdminIdentity((long)IdentityOf(context));
+
+	private static bool IsAdminIdentity(long identity)
 	{
 		var host = AdminAccess.Host;
-		if (host == null) return false;
-		long identity = (long)IdentityOf(context);
-		var player = System.Linq.Enumerable.FirstOrDefault(host.Players(), p => p.IdentityId == identity);
+		if (host == null || identity == 0) return false;
+		var player = host.Players().FirstOrDefault(p => p.IdentityId == identity);
 		return player != null && host.IsAdminClient(player.ClientId);
 	}
 
@@ -155,9 +250,7 @@ internal static class ServerAccess
 			}
 			if (entity.TryGet<CubeGridComponent>() != null) return MayUseGrid(permissions, identity, entity);
 			// Another player's living character (their suit inventory); bodies and backpacks stay lootable.
-			if (entity.TryGet<CharacterLifeComponent>() is { IsAlive: true } && TeamPermissions.OwnerOf(entity) is long owner && owner != 0
-				&& owner != (long)identity && PlayerIdentities.IsHuman(owner)) return false;
-			return true;
+			return !IsForeignCharacter(entity, (long)identity);
 		}
 		catch (Exception ex)
 		{

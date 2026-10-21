@@ -37,9 +37,11 @@ internal sealed partial class HostWorld
 {
     private sealed record SpawnTarget(SpawnOption Option, Entity? Point, RespawnShip? Ship = null, Guid Planet = default);
 
-    private readonly record struct SpawnRequest(ushort ClientId, PeerId? Peer, int Choice, bool Respawn);
+    private readonly record struct SpawnRequest(ushort ClientId, PeerId? Peer, int Choice, bool Respawn, long AtMs);
 
-    private readonly ConcurrentQueue<SpawnRequest> _spawnRequests = new();
+    // One per client, the latest wins: a client can send requests faster than identities arrive.
+    private readonly ConcurrentDictionary<ushort, SpawnRequest> _spawnRequests = new();
+    private const long SpawnRequestTimeoutMs = 30_000;
     private readonly ConcurrentQueue<ushort> _possessed = new();
     private Joiner? _localJoiner;
 
@@ -57,10 +59,12 @@ internal sealed partial class HostWorld
     private static readonly Action<SeatComponent, Entity> SetPilotInternal = HarmonyLib.AccessTools.MethodDelegate<Action<SeatComponent, Entity>>(HarmonyLib.AccessTools.Method(typeof(SeatComponent), "SetPilotInternal"));
 
     /// <summary>Net thread: a player asks for its spawn menu (choice -1) or picks an entry of the last one.</summary>
-    public void RequestCharacter(PeerId client, ushort clientId, string name, int choice, bool respawn) => _spawnRequests.Enqueue(new(clientId, client, choice, respawn));
+    public void RequestCharacter(PeerId client, ushort clientId, string name, int choice, bool respawn) => _spawnRequests[clientId] = new(clientId, client, choice, respawn, MpClock.NowMs());
+
+    public void ReleaseCharacter(PeerId client, ushort clientId) => _spawnRequests.TryRemove(clientId, out _);
 
     /// <summary>The listen host's own client, the same request without the network.</summary>
-    internal void RequestLocalCharacter(int choice, bool respawn) => _spawnRequests.Enqueue(new(SyncProtocol.HostClientId, null, choice, respawn));
+    internal void RequestLocalCharacter(int choice, bool respawn) => _spawnRequests[SyncProtocol.HostClientId] = new(SyncProtocol.HostClientId, null, choice, respawn, MpClock.NowMs());
 
     /// <summary>The player's client possesses the character it was given; a respawn ship's pilot can sit down now.</summary>
     public void OnPossessed(ushort clientId) => _possessed.Enqueue(clientId);
@@ -77,14 +81,16 @@ internal sealed partial class HostWorld
 #if !PULSAR
         RigShipProbe(session);
 #endif
-        List<SpawnRequest>? later = null;
-        while (_spawnRequests.TryDequeue(out var r))
+        foreach (var (clientId, r) in _spawnRequests)
         {
             var j = r.Peer is PeerId peer ? _joiners.GetOrAdd(r.ClientId, id => new Joiner { ClientId = id, Name = "?" }) : LocalJoiner;
             if (r.Peer is PeerId p) j.Peer = p;
             long identity = SpawnIdentity(j, identities);
             // Keen names the player's identity when its client asks for the world; a request can overtake that by a tick.
-            if (identity == 0) { (later ??= new()).Add(r); continue; }
+            if (identity == 0 && MpClock.NowMs() - r.AtMs < SpawnRequestTimeoutMs) continue;
+            // A newer request replaced this one since the loop started: it is handled next tick.
+            if (!_spawnRequests.TryRemove(new KeyValuePair<ushort, SpawnRequest>(clientId, r))) continue;
+            if (identity == 0) { _log.Warn($"host spawn: ClientId {j.ClientId} has no identity after {SpawnRequestTimeoutMs / 1000} s; its spawn request is dropped"); continue; }
             j.Respawn = r.Respawn;
             try { ServerSpawn(session, host, j, identity, r.Choice); }
             catch (Exception ex)
@@ -93,7 +99,6 @@ internal sealed partial class HostWorld
                 SpawnFailed(host, j, ex.GetType().Name + ": " + ex.Message);
             }
         }
-        if (later != null) foreach (var r in later) _spawnRequests.Enqueue(r);
         DeleteLeftovers(session);
         while (_possessed.TryDequeue(out ushort clientId))
         {

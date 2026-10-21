@@ -69,6 +69,16 @@ internal sealed partial class HostWorld
 		_socialRequests.Enqueue((peer, clientId, request));
 	}
 
+	private long _accessRevision = -1;
+
+	// A ban, whitelist or admin change must also stop a player who was admitted moments before but has not finished joining.
+	private void ForgetAdmissionsOnAccessChange()
+	{
+		if (_host is not { } host || host.Access.Revision == _accessRevision) return;
+		_accessRevision = host.Access.Revision;
+		Y51_SE2Online.KeenNetcode.KeenNet.ForgetAdmissions();
+	}
+
 	private void ApplyPcuLimit(Session session)
 	{
 		var host = _host;
@@ -141,6 +151,7 @@ internal sealed partial class HostWorld
 	private void UpdateSocialCore(Session session)
 	{
 		ApplyPcuLimit(session);
+		ForgetAdmissionsOnAccessChange();
 		ApplySun(session);
 		ResourceMultiplierRules.Apply(session);
 		InventoryMultiplierRules.Apply(session);

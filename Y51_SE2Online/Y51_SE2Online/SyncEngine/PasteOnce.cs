@@ -97,7 +97,7 @@ internal static class PasteOnce
 		if (tool._selectedBlueprintToolbarTile != null) tool.CancelPlacement();
 	}
 
-	/// <summary>Host, for a player's PlaceStandalone story: null to run it, else why it is refused.</summary>
+	/// <summary>Host, for a player's PlaceStandalone story (from ServerAccess's story check): null to run it, else why it is refused.</summary>
 	internal static string? HostGate(ushort clientId, object box)
 	{
 		Type type = box.GetType();
@@ -105,7 +105,7 @@ internal static class PasteOnce
 		try
 		{
 			var fields = ObjectCodec.Fields(type);
-			if (fields.FirstOrDefault(f => f.Name == "bundle")?.GetValue(box) is not EntityBundle bundle || bundle.Roots == 0
+			if (fields.FirstOrDefault(f => f.Name == "detachedBundle")?.GetValue(box) is not Keen.VRage.Multiplayer.Utils.Detached<EntityBundle> { Value: { } bundle } || bundle.Roots == 0
 				|| fields.FirstOrDefault(f => f.Name == "newGrid")?.GetValue(box) is not BlockPlacerNetworkStories.NewGridArgs grid) return null;
 			EntityObjectBuilder root = bundle.RootBuilders[0];
 			// One block is ordinary placement (also line and plane modes); a paste carries more.

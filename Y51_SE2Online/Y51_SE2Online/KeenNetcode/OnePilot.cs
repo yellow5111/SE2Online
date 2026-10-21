@@ -3,7 +3,6 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using HarmonyLib;
-using Keen.Game2.Simulation.GameSystems.Identities;
 using Keen.Game2.Simulation.WorldObjects.CubeBlocks;
 using Keen.Game2.Simulation.WorldObjects.CubeBlocks.Pilotable;
 using Keen.Game2.Simulation.WorldObjects.CubeGrids;
@@ -37,6 +36,9 @@ internal static class OnePilot
 
 	public static void Install(Harmony harmony)
 	{
+		// Whether a client may send flight input at all is checked first; this only picks which seated player flies.
+		try { ClientDataGuard.Install(harmony); }
+		catch (Exception ex) { GameLog.Instance.Warn($"client data guard not installed ({ex.GetType().Name}: {ex.Message})"); }
 		harmony.Patch(AccessTools.Method(typeof(OutOfProcessPeerTransport), "ProcessIncomingData"), prefix: new HarmonyMethod(typeof(OnePilot), nameof(IncomingPrefix)));
 	}
 
@@ -55,12 +57,7 @@ internal static class OnePilot
 				if (entries[i]?.GetType().GetField("Target")?.GetValue(entries[i]) is not Entity target) continue;
 				var root = target.GetTopLevelParent();
 				if (root.TryGet<CubeGridComponent>() == null) continue;
-				if (sender == 0)
-				{
-					var identities = MpPlugin.App?.ServerSession?.SessionComponents.TryGet<IdentitiesSessionComponent>();
-					if (identities == null) return;
-					sender = (long)identities.GetIdentityFromClient(__instance.PeerClientId);
-				}
+				if (sender == 0 && (sender = (long)ServerAccess.IdentityOf(__instance.PeerClientId)) == 0) return;
 				pilots ??= new Dictionary<Entity, long>(ReferenceEqualityComparer.Instance);
 				if (!pilots.TryGetValue(root, out long pilot)) pilots[root] = pilot = PilotOf(root);
 				if (pilot == 0 || pilot == sender) continue;

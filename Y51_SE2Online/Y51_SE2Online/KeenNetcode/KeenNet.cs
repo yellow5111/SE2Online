@@ -33,12 +33,18 @@ internal static class KeenNet
 
 	private static SteamIdServiceEngineComponent? _ids;
 
-	private static readonly ConcurrentDictionary<ulong, bool> Admitted = new();
+	// Steam id -> when SE2 Online admitted it. One admission lets one hello through, within AdmissionMs.
+	private static readonly ConcurrentDictionary<ulong, long> Admitted = new();
+
+	private const long AdmissionMs = 120000;
+
+	// Players past Keen's hello on this server; read off the network job, so not the game's own HashSet.
+	private static readonly ConcurrentDictionary<GameServiceUser, bool> Validated = new();
 
 	private static readonly ConcurrentDictionary<ulong, string> Refused = new();
 
-	// Players whose hello waits for SE2 Online's join check, by the time it arrived.
-	private static readonly Dictionary<GameServiceUser, long> Held = new();
+	// Players whose hello waits for SE2 Online's join check: when it arrived, and the hello itself (its game build).
+	private static readonly Dictionary<GameServiceUser, (long Since, byte[] Hello)> Held = new();
 
 	private static readonly ConcurrentQueue<(GameServiceUser User, string Why)> Kicks = new();
 
@@ -289,8 +295,27 @@ internal static class KeenNet
 	public static void Admit(ulong steamId)
 	{
 		Refused.TryRemove(steamId, out _);
-		Admitted[steamId] = true;
+		Admitted[steamId] = Environment.TickCount64;
 	}
+
+	private static bool IsAdmitted(ulong steamId) => Admitted.TryGetValue(steamId, out long since) && Environment.TickCount64 - since < AdmissionMs;
+
+	private static bool TakeAdmission(ulong steamId) => Admitted.TryRemove(steamId, out long since) && Environment.TickCount64 - since < AdmissionMs;
+
+	/// <summary>Drops admissions not yet used: a ban, whitelist or password change applies to players still joining.</summary>
+	public static void ForgetAdmissions() => Admitted.Clear();
+
+	/// <summary>Whether this player may send the game's messages in pieces: admitted by SE2 Online or past Keen's hello.</summary>
+	public static bool MayFragment(GameServiceUser user) => Validated.ContainsKey(user) || SteamIdOf(user) is ulong id && IsAdmitted(id);
+
+	// A connection that failed or left takes its unused admission with it.
+	private static void ForgetUser(GameServiceUser user)
+	{
+		Validated.TryRemove(user, out _);
+		if (SteamIdOf(user) is ulong id) Admitted.TryRemove(id, out _);
+	}
+
+	private static void ForgetFailedPeer(GameServiceUser user, ConnectionFailureReason reason) => ForgetUser(user);
 
 	/// <summary>SE2 Online refused the player: Keen rejects its hello (after our reason has been sent).</summary>
 	public static void Refuse(ulong steamId, string why)
@@ -316,17 +341,18 @@ internal static class KeenNet
 	{
 		Admitted.Clear();
 		Refused.Clear();
+		Validated.Clear();
 		lock (Held) Held.Clear();
 	}
 
-	private static bool HelloPrefix(GameServerNetworkingComponent __instance, GameServiceUser peer)
+	private static bool HelloPrefix(GameServerNetworkingComponent __instance, GameServiceUser peer, ReadOnlySpan<byte> content)
 	{
 		if (_inReplay || __instance._validatedPeers.Contains(peer)) return true;
 #if !PULSAR
 		if (VanillaClientsForTests) return true;
 #endif
 		ulong? steamId = SteamIdOf(peer);
-		if (steamId is ulong id && Admitted.ContainsKey(id)) return true;
+		if (steamId is ulong id && TakeAdmission(id)) return true;
 		if (!HostingActive || steamId == null)
 		{
 			_log.Warn($"keen gate: refusing {peer} ({(steamId == null ? "no Steam id" : "this world is not hosted with SE2 Online")})");
@@ -336,7 +362,8 @@ internal static class KeenNet
 		lock (Held)
 		{
 			if (!Held.ContainsKey(peer)) _log.Info($"keen gate: holding {steamId} until SE2 Online admits it");
-			Held[peer] = Environment.TickCount64;
+			// Keen reads only the first HELLO_PAYLOAD_LENGTH bytes; the rest need not be kept.
+			Held[peer] = (Environment.TickCount64, content[..Math.Min(content.Length, GameNetworkingUtils.HELLO_PAYLOAD_LENGTH)].ToArray());
 		}
 		return false;
 	}
@@ -347,7 +374,12 @@ internal static class KeenNet
 		{
 			_server = __instance;
 			// The publicizer exposes the event's backing field under the same name.
-			typeof(GameServerNetworkingComponent).GetEvent("OnDisconnected")!.AddEventHandler(__instance, new Action<GameServiceUser>(user => HostGone.Enqueue((user, "left the game"))));
+			typeof(GameServerNetworkingComponent).GetEvent("OnDisconnected")!.AddEventHandler(__instance, new Action<GameServiceUser>(user =>
+			{
+				ForgetUser(user);
+				HostGone.Enqueue((user, "left the game"));
+			}));
+			typeof(GameServerNetworkingComponent).GetEvent("OnConnected")!.AddEventHandler(__instance, new Action<IPeerToPeerSession, GameServiceUser>((_, user) => Validated[user] = true));
 		}
 		(__instance._comms as LocalServerSession)?.Pump();
 		_serverFramed?.Flush();
@@ -361,16 +393,16 @@ internal static class KeenNet
 			Reject(__instance, kick.User);
 			HostGone.Enqueue(kick);
 		}
-		List<GameServiceUser>? release = null;
+		List<(GameServiceUser User, byte[] Hello)>? release = null;
 		lock (Held)
 		{
 			long now = Environment.TickCount64;
-			foreach (var (user, since) in Held)
+			foreach (var (user, (since, hello)) in Held)
 			{
 				ulong? id = SteamIdOf(user);
-				if (id is ulong admitted && Admitted.ContainsKey(admitted) || id is ulong refused && Refused.ContainsKey(refused) || now - since > 120000)
+				if (id is ulong admitted && IsAdmitted(admitted) || id is ulong refused && Refused.ContainsKey(refused) || now - since > 120000)
 				{
-					(release ??= new()).Add(user);
+					(release ??= new()).Add((user, hello));
 				}
 				else if (__instance._pendingPeers.ContainsKey(user))
 				{
@@ -378,17 +410,16 @@ internal static class KeenNet
 					__instance._pendingPeers[user] = now + 30000;
 				}
 			}
-			if (release != null) foreach (GameServiceUser user in release) Held.Remove(user);
+			if (release != null) foreach (var (user, _) in release) Held.Remove(user);
 		}
 		if (release == null) return;
-		foreach (GameServiceUser user in release)
+		foreach (var (user, hello) in release)
 		{
 			ulong? id = SteamIdOf(user);
-			if (id is ulong ok && Admitted.ContainsKey(ok))
+			if (id is ulong ok && TakeAdmission(ok))
 			{
 				_log.Info($"keen gate: {ok} admitted, continuing the game's handshake");
-				Span<byte> hello = stackalloc byte[9];
-				GameNetworkingUtils.WriteHello(hello, 4, __instance._gameVersion);
+				// The player's own hello, so Keen still refuses a client on another game build.
 				_inReplay = true;
 				try { __instance.HandleClientHello(user, hello); }
 				finally { _inReplay = false; }
@@ -442,7 +473,7 @@ internal static class KeenNet
 			}
 		}
 		FramedSession.RaiseSendBuffer(_log);
-		_serverFramed = new FramedSession(comms, _log);
+		_serverFramed = new FramedSession(comms, _log, MayFragment);
 		IPeerToPeerSession steam = _serverFramed;
 #if !PULSAR
 		if (VanillaClientsForTests) { _serverFramed = null; steam = comms; _log.Warn("test: vanilla clients admitted unframed, no join check"); }
@@ -450,6 +481,7 @@ internal static class KeenNet
 		var local = new LocalServerSession(steam, port, direct, _log);
 		comms.ConnectionRequested -= server.OnConnectionRequested;
 		comms.PeerConnectionFailed -= server.OnPeerConnectionFailed;
+		local.PeerConnectionFailed += ForgetFailedPeer;
 		local.ConnectionRequested += server.OnConnectionRequested;
 		local.PeerConnectionFailed += server.OnPeerConnectionFailed;
 		server._comms = local;
@@ -461,9 +493,11 @@ internal static class KeenNet
 		if (__instance._comms is LocalServerSession local)
 		{
 			__instance._comms = local.Inner is FramedSession framed ? framed.Inner : local.Inner;
+			local.PeerConnectionFailed -= ForgetFailedPeer;
 			local.Dispose();
 		}
 		_serverFramed = null;
+		Validated.Clear();
 		if (!ReferenceEquals(_server, __instance)) return;
 		_server = null;
 		ServerComms = null;

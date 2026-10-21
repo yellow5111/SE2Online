@@ -33,7 +33,7 @@ internal static class SeatGuard
 
 	private static void CanSeatPostfix(SeatComponent __instance, Entity pilot, ref bool __result)
 	{
-		if (!__result) return;
+		if (!__result || !MpPlugin.Online) return;
 		// The host's sit request asks CanSeat too: a seat on a grid the player may not use refuses them there, and the
 		// client stands back up (SeatingFailed). Same rule as the grid's terminal: sharing, factions, block lists.
 		if (AdminAccess.Hosting && ReferenceEquals(SessionOf(__instance), MpPlugin.App?.ServerSession) && pilot.TryGet<Keen.Game2.Simulation.WorldObjects.Characters.CharacterLifeComponent>() != null

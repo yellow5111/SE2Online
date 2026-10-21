@@ -20,6 +20,7 @@ namespace Y51_SE2Online.SyncEngine;
 /// measured 161 of its 163 playing loops beyond their max, up to 11 km away), and online other players' tools and
 /// explosions start anywhere. Out-of-range sounds now start the way they would have ended up: loops paused (the game
 /// resumes them when they come in range), one-shots not played. The distance is measured fresh, as SetTransform does; a reused instance's IsInRange can be stale.
+/// Only in SE2 Online sessions: single player keeps the game's own audio.
 /// </summary>
 internal static class SoundRange
 {
@@ -55,7 +56,7 @@ internal static class SoundRange
 	// switched at range on the rig). Out of range is silent anyway, so stop it at once.
 	private static void StopPrefix(AudioEventLoopingInstance3D __instance, ref bool fadeOut)
 	{
-		if (fadeOut && !__instance.IsInvalid && Fmod(__instance).getPaused(out bool paused) == FMOD.RESULT.OK && paused) fadeOut = false;
+		if (fadeOut && MpPlugin.Online && !__instance.IsInvalid && Fmod(__instance).getPaused(out bool paused) == FMOD.RESULT.OK && paused) fadeOut = false;
 	}
 
 	private static bool OutOfRange(AudioEventInstance3D sound)
@@ -99,7 +100,7 @@ internal static class SoundRange
 
 	private static void LoopPostfix(AudioEventLoopingInstance3D __instance)
 	{
-		if (!OutOfRange(__instance)) return;
+		if (!MpPlugin.Online || !OutOfRange(__instance)) return;
 		__instance.Pause();
 		Interlocked.Increment(ref Silenced);
 	}
@@ -109,12 +110,12 @@ internal static class SoundRange
 	// until they cross the range edge twice, so a base's machines kept playing from anywhere.
 	// Only loops the game itself holds out of range: one it still counts in range would never get the transition
 	// that resumes it.
-	private static bool ResumePrefix(AudioEventLoopingInstance3D __instance) => __instance.IsInRange || !OutOfRange(__instance);
+	private static bool ResumePrefix(AudioEventLoopingInstance3D __instance) => !MpPlugin.Online || __instance.IsInRange || !OutOfRange(__instance);
 
 	// Explosions call Play before UpdatePosition, so the start-time check could not know where they are.
 	private static void PlacedPostfix(AudioEventInstance3D __instance)
 	{
-		if (__instance.IsAttached || __instance.IsInRange || !OutOfRange(__instance)) return;
+		if (!MpPlugin.Online || __instance.IsAttached || __instance.IsInRange || !OutOfRange(__instance)) return;
 		if (__instance is AudioEventLoopingInstance3D loop) loop.Pause();
 		else Fmod(__instance).stop(FMOD.Studio.STOP_MODE.IMMEDIATE);
 		Interlocked.Increment(ref Silenced);
@@ -122,7 +123,7 @@ internal static class SoundRange
 
 	private static bool OneShotPrefix(AudioEventInstance __instance)
 	{
-		if (__instance is not AudioEventOneShotInstance3D oneShot) return true;
+		if (__instance is not AudioEventOneShotInstance3D oneShot || !MpPlugin.Online) return true;
 		if (OutOfRange(oneShot))
 		{
 			Interlocked.Increment(ref Silenced);
@@ -141,7 +142,7 @@ internal static class SoundRange
 	// ISpatialAudioPlayer.Play(event, transform): a one-shot at a point, started before the game ever positions it.
 	private static bool PlayAtPrefix(AudioEngineComponent __instance, AudioEvent audioEvent, WorldTransform transform)
 	{
-		if (__instance.GetEventDescription(audioEvent) is not { } description || description.getMinMaxDistance(out _, out float max) != FMOD.RESULT.OK) return true;
+		if (!MpPlugin.Online || __instance.GetEventDescription(audioEvent) is not { } description || description.getMinMaxDistance(out _, out float max) != FMOD.RESULT.OK) return true;
 		if (transform.Position == Vector3D.Zero) return true;
 		double distance = __instance.GetDistanceToListener(transform);
 		if (!AudioRouting.OutOfRange(distance, max)) return true;

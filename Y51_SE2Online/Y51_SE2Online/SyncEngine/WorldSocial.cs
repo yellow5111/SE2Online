@@ -58,7 +58,7 @@ internal sealed class WorldSocial
         if (!ob.BuildPermissions.HasValue && Online) __instance._buildPermissions = Private;
     }
 
-    private static bool Online => DedicatedRuntime.Requested || MpPlugin.Controller?.Current is { } current && (current.Host || current.Join);
+    private static bool Online => MpPlugin.Online;
 
     public sealed class WorldSocialSaveComponent : Component, IWorldSessionSaveGameListener
     {

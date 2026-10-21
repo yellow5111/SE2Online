@@ -72,7 +72,9 @@ public sealed class DedicatedConfig
         // Top-level settings on a dedicated server; under Network they are refused.
         "Network.Motd", "Network.MotdTitle",
         // Read-only, worked out from BindAddress and ListenPort.
-        "Network.BindEndpoint"
+        "Network.BindEndpoint",
+        // The client's own record of the Host screen; a server.json states its hacking options outright.
+        "Network.HackingChosen"
     };
 
     /// <summary>Writes options this version added into the host's server.json with their defaults; returns their paths.</summary>

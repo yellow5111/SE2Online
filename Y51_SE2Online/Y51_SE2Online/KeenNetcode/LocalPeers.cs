@@ -55,6 +55,11 @@ internal static class LocalPeers
 
 	internal static void ClearAlias(GameServiceUser user) => Aliases.TryRemove(user, out _);
 
+	internal const int KeyBytes = 32;
+
+	/// <summary>The loopback listener's key, in this OS user's own app data: a process of another user cannot join.</summary>
+	internal static string KeyPath(int port) => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Y51_SE2Online", $"loopback-{port}.key");
+
 	internal const int HeaderBytes = 6;
 
 	internal static void WriteFrame(Stream stream, ReadOnlySpan<byte> data, byte channel, MessageReliability reliability)
@@ -101,15 +106,29 @@ internal static class LocalPeers
 /// <summary>Messages received from local peers, handed to the game as <see cref="IPeerToPeerSession.Message"/>s.</summary>
 internal abstract class LocalMessageSource
 {
+	private const long MaxQueuedBytes = 512L * 1024 * 1024;
+
 	private readonly ConcurrentDictionary<byte, ConcurrentQueue<(GameServiceUser From, MessageReliability Reliability, byte[] Data)>> _inbox = new();
 
+	private long _queuedBytes;
+
 	protected void Enqueue(GameServiceUser from, byte channel, MessageReliability reliability, byte[] data)
-		=> _inbox.GetOrAdd(channel, _ => new()).Enqueue((from, reliability, data));
+	{
+		if (!GameChannels.Read(channel)) return;
+		if (Interlocked.Add(ref _queuedBytes, data.Length) > MaxQueuedBytes)
+		{
+			Interlocked.Add(ref _queuedBytes, -data.Length);
+			GameLog.Instance.WarnOnce("local-inbox-full", $"network: over {MaxQueuedBytes / (1024 * 1024)} MiB of messages wait unread; dropping a message from {from} on channel {channel}");
+			return;
+		}
+		_inbox.GetOrAdd(channel, _ => new()).Enqueue((from, reliability, data));
+	}
 
 	protected bool TryDequeue(IPeerToPeerSession session, byte channel, out IPeerToPeerSession.Message message)
 	{
 		message = default;
 		if (!_inbox.TryGetValue(channel, out var queue) || !queue.TryDequeue(out var item)) return false;
+		Interlocked.Add(ref _queuedBytes, -item.Data.Length);
 		nint buffer = Marshal.AllocHGlobal(Math.Max(1, item.Data.Length));
 		Marshal.Copy(item.Data, 0, buffer, item.Data.Length);
 		message = Create(item.From, buffer, item.Data.Length, item.Reliability, session);
@@ -142,6 +161,10 @@ internal sealed class LocalServerSession : LocalMessageSource, IPeerToPeerSessio
 
 	private volatile bool _disposed;
 
+	private readonly byte[] _key = System.Security.Cryptography.RandomNumberGenerator.GetBytes(LocalPeers.KeyBytes);
+
+	private string? _keyPath;
+
 	public IPeerToPeerSession Inner => _inner;
 
 	public LocalServerSession(IPeerToPeerSession inner, int port, DirectIpPeers? direct, IMpLog log)
@@ -153,12 +176,17 @@ internal sealed class LocalServerSession : LocalMessageSource, IPeerToPeerSessio
 		{
 			_listener = new TcpListener(IPAddress.Loopback, port);
 			_listener.Start();
+			string keyPath = LocalPeers.KeyPath(port);
+			Directory.CreateDirectory(Path.GetDirectoryName(keyPath)!);
+			File.WriteAllBytes(keyPath, _key);
+			_keyPath = keyPath;
 			new Thread(Accept) { IsBackground = true, Name = "Y51 local players" }.Start();
 			_log.Info($"local players: other game instances on this PC join through 127.0.0.1:{port} (TCP)");
 		}
 		catch (Exception ex)
 		{
 			// Only same-PC test play depends on it; a busy port must not stop the server.
+			try { _listener?.Stop(); } catch (Exception) { }
 			_listener = null;
 			_log.Warn($"local players: no loopback listener on 127.0.0.1:{port} ({ex.GetType().Name}: {ex.Message}); other instances of this Steam account cannot join");
 		}
@@ -185,12 +213,10 @@ internal sealed class LocalServerSession : LocalMessageSource, IPeerToPeerSessio
 			catch (Exception) { return; }
 			client.NoDelay = true;
 			var stream = client.GetStream();
-			// Loopback only, so the account a local game names is taken as given (test play on this PC).
 			var account = new byte[8];
 			client.ReceiveTimeout = 5000;
 			try { if (stream.ReadAtLeast(account, 8, throwOnEndOfStream: false) < 8) { client.Close(); continue; } }
 			catch (Exception) { client.Close(); continue; }
-			client.ReceiveTimeout = 0;
 			ulong steamId = BitConverter.ToUInt64(account);
 			if (steamId == KeenMods.LocalQuery)
 			{
@@ -205,20 +231,26 @@ internal sealed class LocalServerSession : LocalMessageSource, IPeerToPeerSessio
 				client.Close();
 				continue;
 			}
-			GameServiceUser user = steamId != 0 ? KeenNet.UserOf(steamId) : default;
-			string who;
-			// A co-op host already plays as its own account, so another instance of that account is an extra player.
-			bool hostAccount = !Y51_SE2Online.Dedicated.DedicatedRuntime.Requested && steamId == Steamworks.SteamUser.GetSteamID().m_SteamID;
-			if (steamId != 0 && !hostAccount && !_peers.ContainsKey(user) && !KeenNet.IsSteamPeer(user)) who = $"Steam account {steamId}";
-			else
+			// Nothing proves the account a local game names, only that it could read this host's key file (same OS user).
+			// It plays under an alias of that account, never as the account itself.
+			var key = new byte[LocalPeers.KeyBytes];
+			try
 			{
-				int slot = 1;
-				while (slot <= PeerAlias.MaxSlots && _peers.ContainsKey(LocalPeers.UserFor(slot))) slot++;
-				if (slot > PeerAlias.MaxSlots) { client.Close(); continue; }
-				user = LocalPeers.UserFor(slot);
-				LocalPeers.SetAlias(user, PeerAlias.Make(steamId, slot));
-				who = $"extra instance #{slot} of Steam account {steamId}";
+				if (stream.ReadAtLeast(key, key.Length, throwOnEndOfStream: false) < key.Length || !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(key, _key))
+				{
+					_log.Warn("local players: refused a loopback connection without this game's key");
+					client.Close();
+					continue;
+				}
 			}
+			catch (Exception) { client.Close(); continue; }
+			client.ReceiveTimeout = 0;
+			int slot = 1;
+			while (slot <= PeerAlias.MaxSlots && _peers.ContainsKey(LocalPeers.UserFor(slot))) slot++;
+			if (slot > PeerAlias.MaxSlots) { client.Close(); continue; }
+			GameServiceUser user = LocalPeers.UserFor(slot);
+			LocalPeers.SetAlias(user, PeerAlias.Make(steamId, slot));
+			string who = $"extra instance #{slot} of Steam account {steamId}";
 			// The game on the other end claims its player by game user; an extra instance must claim this one, not its account's.
 			try { stream.Write(user.Id.ToByteArray()); }
 			catch (Exception) { client.Close(); continue; }
@@ -308,6 +340,7 @@ internal sealed class LocalServerSession : LocalMessageSource, IPeerToPeerSessio
 	{
 		_disposed = true;
 		try { _listener?.Stop(); } catch (Exception) { }
+		try { if (_keyPath != null) File.Delete(_keyPath); } catch (Exception) { }
 		_direct?.Dispose();
 		foreach (var stream in _peers.Values) stream.Close();
 		_peers.Clear();
@@ -344,7 +377,16 @@ internal sealed class LocalClientSession : LocalMessageSource, IGameSession, IPe
 		_client = new TcpClient { NoDelay = true };
 		_client.Connect(endpoint);
 		_stream = _client.GetStream();
+		byte[] key;
+		try { key = File.ReadAllBytes(LocalPeers.KeyPath(endpoint.Port)); }
+		catch (Exception ex)
+		{
+			// The host runs as another OS user (or is gone): it refuses this connection.
+			GameLog.Instance.Warn($"local players: no key from the game on port {endpoint.Port} ({ex.GetType().Name}); join it by its LAN address instead");
+			key = new byte[LocalPeers.KeyBytes];
+		}
 		_stream.Write(BitConverter.GetBytes(Steamworks.SteamUser.GetSteamID().m_SteamID));
+		_stream.Write(key);
 		var assigned = new byte[16];
 		_client.ReceiveTimeout = 10000;
 		_stream.ReadExactly(assigned);

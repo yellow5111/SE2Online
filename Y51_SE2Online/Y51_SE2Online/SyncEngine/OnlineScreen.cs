@@ -288,7 +288,7 @@ public sealed partial class OnlineScreen : ScreenView
             Motd = _motd.Text ?? "", MotdTitle = (_motdTitle.Text ?? "").Trim(), MaxModDownloadGiB = MpMenu.Settings.MaxModDownloadGiB,
             VoiceKey = _voiceKey.Binding, EmoteKey = _emoteKey.Binding, VoiceEnabled = _voice.IsChecked == true, VoiceOpenMic = _openMic.IsChecked == true, VoiceVolume = (int)Math.Round(_voiceVolume.S.Value), VoiceRadiusMeters = Math.Round(_voiceRadius.S.Value),
             MutedVoices = MpMenu.Settings.MutedVoices,
-            Hacking = _hacking.IsChecked == true, AllowHackingPlayerGrids = _hackPlayers.IsChecked == true, HackTimeMultiplier = Math.Round(_hackTime.S.Value) / 10, HackKey = _hackKey.Binding,
+            Hacking = _hacking.IsChecked == true, AllowHackingPlayerGrids = _hackPlayers.IsChecked == true, HackingChosen = true, HackTimeMultiplier = Math.Round(_hackTime.S.Value) / 10, HackKey = _hackKey.Binding,
             HackLockdownSeconds = (int)Math.Round(_lockdown.S.Value), HackLockdownCooldownSeconds = (int)Math.Round(_lockdownCooldown.S.Value),
             EnergyUsageMultiplier = Math.Round(_energyUse.S.Value) / 10, HydrogenUsageMultiplier = Math.Round(_hydrogenUse.S.Value) / 10, OxygenUsageMultiplier = Math.Round(_oxygenUse.S.Value) / 10, PlayerInventoryMultiplier = Math.Round(_playerInventory.S.Value) / 10, CargoInventoryMultiplier = Math.Round(_cargoInventory.S.Value) / 10
         };
