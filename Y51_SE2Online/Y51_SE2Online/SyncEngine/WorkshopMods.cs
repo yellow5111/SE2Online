@@ -73,6 +73,7 @@ internal static class WorkshopMods
 		Prompt prompt = null;
 		try
 		{
+			await RefreshAsync(mods.Where(m => m.WorkshopId != 0 && Installed(new PublishedFileId_t(m.WorkshopId))).ToList(), log, progress, stop);
 			var installed = new List<string>();
 			var missing = new List<WorldMod>();
 			foreach (WorldMod mod in mods)
@@ -231,6 +232,50 @@ internal static class WorkshopMods
 			log.Info($"mods: {mod.Describe()} downloaded");
 		}
 		return null;
+	}
+
+	/// <summary>
+	/// Steam calls a copy on disk current until it has asked the Workshop, so a mod downloaded once stayed at that version
+	/// (a 2.4 build after 4.0 broke it) while the server ran the new one. DownloadItem asks, answers at once for a current
+	/// copy and downloads an update; updates of mods the player already has are not asked about again.
+	/// </summary>
+	private static async System.Threading.Tasks.Task RefreshAsync(List<WorldMod> mods, IMpLog log, Action<string> progress, CancellationToken stop)
+	{
+		if (mods.Count == 0) return;
+		var waiting = new HashSet<ulong>();
+		using var answered = Callback<DownloadItemResult_t>.Create(r => { lock (waiting) waiting.Remove(r.m_nPublishedFileId.m_PublishedFileId); });
+		foreach (WorldMod mod in mods)
+		{
+			lock (waiting) waiting.Add(mod.WorkshopId);
+			if (!SteamUGC.DownloadItem(new PublishedFileId_t(mod.WorkshopId), bHighPriority: true)) lock (waiting) waiting.Remove(mod.WorkshopId);
+		}
+		progress?.Invoke("Checking the host's Workshop mods for updates...");
+		ulong lastBytes = 0;
+		long lastChange = MpClock.NowMs();
+		while (true)
+		{
+			ThrowIfLeft(stop);
+			ulong[] left;
+			lock (waiting) left = waiting.ToArray();
+			if (left.Length == 0) break;
+			ulong got = 0, total = 0;
+			foreach (ulong id in left)
+			{
+				SteamUGC.GetItemDownloadInfo(new PublishedFileId_t(id), out ulong g, out ulong t);
+				got += g;
+				total += t;
+			}
+			long now = MpClock.NowMs();
+			if (got != lastBytes) (lastBytes, lastChange) = (got, now);
+			else if (now - lastChange > 30000)
+			{
+				log.Warn($"mods: Steam did not say whether {left.Length} downloaded Workshop mod(s) are current; using the copies on disk");
+				return;
+			}
+			if (total > 0) progress?.Invoke($"Updating the host's Workshop mods  /  {got / 1048576.0:0.0} of {total / 1048576.0:0.0} MiB");
+			await System.Threading.Tasks.Task.Delay(250, stop);
+		}
+		log.Info($"mods: {mods.Count} downloaded Workshop mod(s) are the Workshop's current version");
 	}
 
 	private static bool Installed(PublishedFileId_t id)
