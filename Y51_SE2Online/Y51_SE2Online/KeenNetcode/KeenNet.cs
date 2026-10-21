@@ -251,6 +251,36 @@ internal static class KeenNet
 
 	public static GameServiceUser UserOf(ulong steamId) => LocalPeers.UserOf(steamId) ?? _ids?.GetServiceUser(new CSteamID(steamId)) ?? IdGenerator.GetGameServiceUserFromUserSteamId(new CSteamID(steamId));
 
+	/// <summary>Whether Steam still holds a connected session with this player (only over Steam; false for loopback and direct IP).</summary>
+	public static bool SteamSessionConnected(bool host, GameServiceUser user) => SteamSession(host, user, out _) == ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_Connected;
+
+	private static ESteamNetworkingConnectionState SteamSession(bool host, GameServiceUser user, out SteamNetConnectionRealTimeStatus_t status)
+	{
+		status = default;
+		if ((host ? _serverFramed : ClientComms as FramedSession)?.Inner is not SteamPeerToPeerSession steam || !steam.TryGetIdentity(user, out SteamNetworkingIdentity id))
+			return ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_None;
+		return steam._isServer
+			? SteamGameServerNetworkingMessages.GetSessionConnectionInfo(ref id, out _, out status)
+			: SteamNetworkingMessages.GetSessionConnectionInfo(ref id, out _, out status);
+	}
+
+	private static long _linksLoggedMs;
+
+	// Input lag reports need the link's numbers: Steam's ping and how much waits ahead of the next input or update.
+	private static void LogLinks(GameServerNetworkingComponent server)
+	{
+		long now = Environment.TickCount64;
+		if (now - _linksLoggedMs < 30000) return;
+		_linksLoggedMs = now;
+		foreach (GameServiceUser user in server._validatedPeers)
+		{
+			if (SteamSession(true, user, out var q) != ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_Connected) continue;
+			_log.Info($"steam link {SteamIdOf(user)?.ToString() ?? user.ToString()}: ping {q.m_nPing} ms, quality {q.m_flConnectionQualityLocal:P0} here / {q.m_flConnectionQualityRemote:P0} there, "
+				+ $"out {q.m_flOutBytesPerSec / 1024:0} KiB/s of {q.m_nSendRateBytesPerSecond / 1024} KiB/s allowed, in {q.m_flInBytesPerSec / 1024:0} KiB/s, "
+				+ $"waiting {q.m_cbPendingReliable / 1024} KiB reliable + {q.m_cbPendingUnreliable / 1024} KiB unreliable ({q.m_usecQueueTime.m_SteamNetworkingMicroseconds / 1000} ms queue)");
+		}
+	}
+
 	// ponytail: no pending-bytes query yet (Steam returns LimitExceeded once its send buffer is full, MpTransport retries);
 	// add SteamNetworkingMessages.GetSessionConnectionInfo if bulk sends starve the replication channel.
 	public static int PendingReliableBytes(bool host, GameServiceUser user) => 0;
@@ -323,6 +353,7 @@ internal static class KeenNet
 		_serverFramed?.Flush();
 		ServerComms = __instance._comms;
 		if (ServerComms == null) return;
+		LogLinks(__instance);
 		while (Kicks.TryDequeue(out var kick))
 		{
 			_log.Info($"keen gate: closing {kick.User}: {kick.Why}");

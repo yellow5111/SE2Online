@@ -30,6 +30,10 @@ internal static class BrokenMods
 
 	private static readonly List<string> Unannounced = new List<string>();
 
+	// Definitions whose file could not even be read (a mod referencing a definition the game no longer has: "Cannot
+	// locate value for definition ..."). That exception names only the missing definition, not the file holding the reference.
+	private static readonly List<string> Unreadable = new List<string>();
+
 	[ThreadStatic] private static bool _original;
 
 	public static IReadOnlyList<string> Skipped { get { lock (Sync) return SkippedNames.ToList(); } }
@@ -38,6 +42,27 @@ internal static class BrokenMods
 	{
 		harmony.Patch(AccessTools.Method(typeof(GameDataLoaderComponent), nameof(GameDataLoaderComponent.LoadWorldDataIfNeeded)), prefix: new HarmonyMethod(typeof(BrokenMods), nameof(LoadPrefix)));
 		harmony.Patch(AccessTools.Method(typeof(GameDataLoaderComponent), nameof(GameDataLoaderComponent.SetRequiredProjects), new[] { typeof(ModList) }), postfix: new HarmonyMethod(typeof(BrokenMods), nameof(RequiredPostfix)));
+		var read = new HarmonyMethod(typeof(BrokenMods), nameof(ReadFinalizer));
+		harmony.Patch(AccessTools.Method(Loader, "LoadObjectBuilderThrowing"), finalizer: read);
+		harmony.Patch(AccessTools.Method(Loader, "LoadPartialObjectBuilderThrowing"), finalizer: read);
+	}
+
+	private static readonly Type Loader = AccessTools.TypeByName("Keen.VRage.Library.Definitions.DefinitionLoader");
+
+	private static readonly System.Reflection.FieldInfo Locator = AccessTools.Field(Loader, "_locator");
+
+	private static Exception? ReadFinalizer(object __instance, Exception? __exception, object[] __args)
+	{
+		if (__exception != null && __args.OfType<Guid>().FirstOrDefault() is var id && id != Guid.Empty)
+		{
+			try
+			{
+				string name = (string)Locator.FieldType.GetMethod("GetDebugName")!.Invoke(Locator.GetValue(__instance), new object[] { id })!;
+				lock (Sync) Unreadable.Add(name);
+			}
+			catch (Exception) { }
+		}
+		return __exception;
 	}
 
 	private static bool LoadPrefix(GameDataLoaderComponent __instance, ref Task __result)
@@ -61,6 +86,7 @@ internal static class BrokenMods
 		for (int attempt = 1; ; attempt++)
 		{
 			Task load;
+			lock (Sync) Unreadable.Clear();
 			_original = true;
 			try { load = loader.LoadWorldDataIfNeeded(); }
 			finally { _original = false; }
@@ -81,6 +107,7 @@ internal static class BrokenMods
 		try
 		{
 			var failed = BrokenModMatch.FailedDefinitions(ex.ToString());
+			lock (Sync) failed = failed.Concat(Unreadable).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 			if (failed.Count == 0) return false;
 			var mods = loader._projects.LoadedProjects.Where(p => p.Data.Type == ProjectType.Mod).ToList();
 			var owners = BrokenModMatch.Owners(failed, mods.Select(p => p.Data.Name).ToList()).Select(i => mods[i]).Where(p => loader._requiredProjects.Any(r => r.Guid == p.Data.ProjectID.Guid)).ToList();

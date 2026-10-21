@@ -58,6 +58,8 @@ public sealed class MpTransport : ITransport, IDisposable
 
 		public int HelloResends;
 
+		public bool PingLateNoted;
+
 		public bool StateAckDirty;
 
 		public long LastStateSentMs;
@@ -331,9 +333,19 @@ public sealed class MpTransport : ITransport, IDisposable
 		long lastHeardMs = p.Stats.LastPongMs > 0 ? p.Stats.LastPongMs : p.Stats.ConnectedMs;
 		if (now - lastHeardMs > _o.PingTimeoutMs)
 		{
-			Close(p, DisconnectCodes.PingTimeout, $"no Pong for {_o.PingTimeoutMs} ms", byPeer: false, "timeout", notifyPeer: true);
-			return;
+			bool alive = now - lastHeardMs <= _o.PingTimeoutMs * 10L && _link.IsSessionAlive(p.Conn);
+			if (!alive)
+			{
+				Close(p, DisconnectCodes.PingTimeout, $"no Pong for {now - lastHeardMs} ms", byPeer: false, "timeout", notifyPeer: true);
+				return;
+			}
+			if (!p.PingLateNoted)
+			{
+				p.PingLateNoted = true;
+				_log.Warn($"peer {p.Id}: no Pong for {now - lastHeardMs} ms, but the connection itself is up (a long queue ahead of our pings); waiting up to {_o.PingTimeoutMs * 10L / 1000} s");
+			}
 		}
+		else p.PingLateNoted = false;
 		_scratchTokens.Clear();
 		p.StateAcks.Expire(now, _o.StateAckTimeoutMs, null, _scratchTokens);
 		if (_scratchTokens.Count > 0)

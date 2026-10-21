@@ -200,6 +200,19 @@ public static class AutoUpdate
     }
 
     /// <summary>Deletes the "*.old" files a previous update left in <paramref name="directory"/> and its Content folder.</summary>
+    /// <summary>
+    /// Moves temp over path. Antivirus opens every freshly written file, and a reader that doesn't share delete holds
+    /// the target, each for a few ms ("Access to the path is denied"): the replace is retried before it fails.
+    /// </summary>
+    public static void ReplaceFile(string temp, string path)
+    {
+        for (int attempt = 1; ; attempt++)
+        {
+            try { File.Move(temp, path, true); return; }
+            catch (Exception ex) when (attempt < 5 && ex is UnauthorizedAccessException or IOException) { System.Threading.Thread.Sleep(20 * attempt); }
+        }
+    }
+
     public static int CleanOld(string directory)
     {
         int removed = 0;

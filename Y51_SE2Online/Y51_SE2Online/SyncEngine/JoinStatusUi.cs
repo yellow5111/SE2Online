@@ -77,27 +77,41 @@ internal sealed class JoinStatusUi
 
 	private static long _holdSinceMs = -1;
 
-	/// <summary>Keeps SE2's loading screen up after its own load ends, until the joiner is in their character.</summary>
+	private static bool _releasing;
+
+	/// <summary>
+	/// Keeps SE2's loading screen up after its own load ends, until the player is in their character: SE2 4.0 downloads
+	/// the world after that point. Every close goes through CloseLoadingTransitionScreenIfNeeded (the transition end,
+	/// and the initial possession, which used to drop the screen and show the half-loaded world under our dialog).
+	/// </summary>
 	internal static void Install(HarmonyLib.Harmony harmony)
 	{
-		var end = HarmonyLib.AccessTools.GetDeclaredMethods(typeof(SharedUIComponent)).Single(m => m.Name.EndsWith("ITransitionListener.OnTransitionToGameEnd", StringComparison.Ordinal));
-		harmony.Patch(end, prefix: new HarmonyLib.HarmonyMethod(typeof(JoinStatusUi), nameof(GameEndPrefix)));
+		harmony.Patch(HarmonyLib.AccessTools.Method(typeof(SharedUIComponent), nameof(SharedUIComponent.CloseLoadingTransitionScreenIfNeeded)),
+			prefix: new HarmonyLib.HarmonyMethod(typeof(JoinStatusUi), nameof(ClosePrefix)));
 	}
 
-	private static bool GameEndPrefix(Exception? loadingErrorInfo)
+	private static bool ClosePrefix(SharedUIComponent __instance)
 	{
-		if (loadingErrorInfo != null || MpPlugin.Controller?.Current?.Join != true || ClientWorld.Progress.Stage >= JoinStage.Playing) return true;
-		_holdSinceMs = MpClock.NowMs();
+		if (_releasing || __instance._loadingTransitionScreen == null || !Holding(ClientWorld.Progress.Stage)) return true;
+		if (_holdSinceMs < 0)
+		{
+			_holdSinceMs = MpClock.NowMs();
+			GameLog.Instance.Info($"client: loading screen kept up while the world arrives ({ClientWorld.Progress.Stage})");
+		}
 		return false;
 	}
+
+	private static bool Holding(JoinStage stage) => MpPlugin.Controller?.Current?.Join == true && stage is >= JoinStage.Receiving and < JoinStage.Playing;
 
 	private static void ReleaseHold(SharedUIComponent shared, JoinProgress progress, long now)
 	{
 		if (_holdSinceMs < 0) return;
-		bool joining = MpPlugin.Controller?.Current?.Join == true && progress.Stage is >= JoinStage.Receiving and < JoinStage.Playing;
-		if (joining && now - _holdSinceMs < 180_000 && ClientWorld.Current?.BoundSession?.SpawnMenu == null) return;
+		if (Holding(progress.Stage) && now - _holdSinceMs < 180_000 && ClientWorld.Current?.BoundSession?.SpawnMenu == null) return;
+		GameLog.Instance.Info($"client: loading screen released after {(now - _holdSinceMs) / 1000.0:0.0} s ({progress.Stage})");
 		_holdSinceMs = -1;
-		shared.CloseLoadingTransitionScreenIfNeeded();
+		_releasing = true;
+		try { shared.CloseLoadingTransitionScreenIfNeeded(); }
+		finally { _releasing = false; }
 	}
 
 	internal void Apply(SharedUIComponent shared, JoinProgress progress, long now)
@@ -170,7 +184,7 @@ internal sealed class JoinStatusUi
 		screen.Name = new LocalizableText(JoinProgress.Sanitize(title, 60));
 		screen.FrontText = OnlineUi.Raw(JoinProgress.Sanitize(detail, 400));
 		screen.LoadingText = OnlineUi.Raw(JoinProgress.Sanitize(status, 20));
-		LoadingUpdates++;
+		if (LoadingUpdates++ == 0) _log.Info($"client: join progress shown on the loading screen ({title}: {detail.Split('\n')[0]})");
 		return true;
 	}
 

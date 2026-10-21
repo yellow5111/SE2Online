@@ -170,6 +170,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		Optional("seat guard (sitting while seated)", () => SeatGuard.Install(_harmony));
 		Optional("control panel group names", () => NameSync.Install(_harmony));
 		Optional("join status", () => JoinStatusUi.Install(_harmony));
+		Optional("client clock", () => KeenNetcode.ClientClock.Install(_harmony));
 		Optional("block size names", () => BlockSizeFilter.Install(_harmony));
 		Optional("autosave blob fix", () => BackupBlobFix.Install(_harmony));
 		Optional("resource usage", () => ResourceMultiplierRules.Install(_harmony));

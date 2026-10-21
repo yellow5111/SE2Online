@@ -21,8 +21,9 @@ internal static class KeenMods
 {
 	private const string Key = "y51mods";
 
-	// Steam caps a game server rule value well below a lobby value; both get the same chunked text.
-	private const int Chunk = 200;
+	// Steam cuts game server rule values short (about 127 characters): 200-character chunks arrived truncated, the
+	// joined text was no longer Base64 and joins hung on "Connecting".
+	private const int Chunk = 100;
 
 	private static string? _published;
 
@@ -154,6 +155,8 @@ internal static class KeenMods
 			if (!rules.TryGetValue(Key + i, out string part)) return null;
 			text.Append(part);
 		}
-		return Decode(text.ToString());
+		// A server from before the shorter chunks publishes a list that cannot be read: join with this game's mods.
+		try { return Decode(text.ToString()); }
+		catch (FormatException) { return null; }
 	}
 }

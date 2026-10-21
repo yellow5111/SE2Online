@@ -570,15 +570,12 @@ internal sealed partial class NetSession
 				});
 				TurretRelations.SetPvp(host.Pvp);
 				PvpRules.OfflineRaid = host.OfflineRaidProtection;
-				_log.Info("net: joiners' turning " + (_o.Predict ? "applied from their running look totals (exact, matches their look prediction)" : "applied from the newest ControlData per tick (-y51online:predict:off)"));
 				HostWorld.Current.Bind(host);
 			}
 			else if (_o.Join && ClientWorld.Current != null)
 			{
 				_playerName = name;
 				client = NewClientSession(transport);
-				_log.Info("net: remote motion smoothing " + (_o.InterpMs > 0 ? $"on, {_o.InterpMs} ms playout delay" : "off (-y51online:interp:0)"));
-				_log.Info("net: look prediction " + (_o.Predict ? "on: the own character turns locally the same frame, the host's orientation only corrects it" : "off (-y51online:predict:off): the own character turns when the host's state comes back"));
 				_log.Info(_o.Rejoin ? "net: rejoin without restarting: on (lost connection: back to the main menu and join again by itself; after leaving: F3 at the main menu or 'Join Game' in Steam)" : "net: rejoin without restarting: off (-y51online:rejoin:off): restart the game to join again");
 				ClientWorld.Current.Bind(client);
 				_rejoinHandler = why => _rejoinWhy = why;

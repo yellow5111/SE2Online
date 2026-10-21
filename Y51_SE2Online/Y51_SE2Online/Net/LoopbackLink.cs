@@ -33,6 +33,11 @@ public sealed class LoopbackLink : IPacketLink, IDisposable
 
 	public int SendBufferBytes { get; set; } = 4194304;
 
+	/// <summary>Test knob: what <see cref="IsSessionAlive"/> answers.</summary>
+	public bool SessionAlive { get; set; }
+
+	public bool IsSessionAlive(uint conn) => SessionAlive;
+
 	public long SentMessages { get; private set; }
 
 	public long DroppedUnreliable { get; private set; }

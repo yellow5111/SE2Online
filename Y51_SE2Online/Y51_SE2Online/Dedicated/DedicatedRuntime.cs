@@ -68,6 +68,7 @@ internal static class DedicatedRuntime
         string selected = args.FirstOrDefault(a => a.StartsWith(Argument, StringComparison.OrdinalIgnoreCase));
         if (selected == null) return;
         Requested = true;
+        _harmony = harmony;
         Headless = args.Contains("-y51headless");
         // A blocking full collection stops the server frame, and every joiner sees the world pop when it resumes.
         System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLowLatency;
@@ -79,6 +80,12 @@ internal static class DedicatedRuntime
             if (!args.Contains("-localDedicatedServer"))
                 throw new ArgumentException("SE2 4.0 dedicated hosting runs on the game's own dedicated server; start the game with -localDedicatedServer (the runner adds it).");
             Config = DedicatedConfig.Read(selected.Substring(Argument.Length));
+            try
+            {
+                var added = DedicatedConfig.AddNewOptions(Config.ConfigPath);
+                if (added.Count > 0) GameLog.Instance.Info($"dedicated: added {added.Count} new option(s) to {Path.GetFileName(Config.ConfigPath)} with their defaults, your settings untouched (previous file kept as {Path.GetFileName(Config.ConfigPath)}.bak): {string.Join(", ", added)}");
+            }
+            catch (Exception ex) { GameLog.Instance.Warn($"dedicated: could not add new options to {Path.GetFileName(Config.ConfigPath)} ({ex.GetType().Name}: {ex.Message}); the server runs on it as it is"); }
             KeenNet.DedicatedListen = (new System.Net.IPEndPoint(System.Net.IPAddress.TryParse(Config.Network.BindAddress, out var bind) ? bind : System.Net.IPAddress.Any, Config.Network.ListenPort), Config.Network.SessionName);
             // Steam runs as a game server on every 4.0 dedicated server, so the Workshop is fetched through it either way.
             DedicatedMods.Install(harmony);
@@ -111,6 +118,8 @@ internal static class DedicatedRuntime
     }
 
     private static long _lastSlowLogMs, _statusCostMs;
+    private static int _slowFramesLoaded;
+    private static Harmony _harmony;
     private static readonly object StatusFileLock = new();
 
     private static int _statusFailures;
@@ -122,10 +131,21 @@ internal static class DedicatedRuntime
         var frame = Requested ? ServerProfiler.BeginFrame(_saving) : null;
         long started = ServerProfiler.Now;
         // A stalled server frame pauses every player's and grid's updates; joiners see it as a pop when they resume.
-        if (frame != null && _loaded && frame.FrameMs > ServerProfiler.SlowFrameMs && MpClock.NowMs() - _lastSlowLogMs > 2000)
+        bool slow = frame != null && _loaded && frame.FrameMs > ServerProfiler.SlowFrameMs;
+        string jobs = JobProfiler.TakeFrame(slow);
+        if (slow && MpClock.NowMs() - _lastSlowLogMs > 2000)
         {
             _lastSlowLogMs = MpClock.NowMs();
-            GameLog.Instance.Warn($"dedicated: slow server frame {frame.Describe()}; last status write {_statusCostMs} ms, command {_commandCostMs} ms, save start {_saveStartCostMs} ms");
+            GameLog.Instance.Warn($"dedicated: slow server frame {frame!.Describe()}; last status write {_statusCostMs} ms, command {_commandCostMs} ms, save start {_saveStartCostMs} ms{(jobs.Length > 0 ? "; slowest game jobs (ms): " + jobs : "")}");
+        }
+        if (slow && !JobProfiler.Installed && ++_slowFramesLoaded >= 3)
+        {
+            try
+            {
+                JobProfiler.Install(_harmony);
+                GameLog.Instance.Info("dedicated: slow frames keep coming; timing the game's jobs so the next warnings name the slowest");
+            }
+            catch (Exception ex) { GameLog.Instance.Warn("dedicated: could not time the game's jobs: " + ex); }
         }
         try { TickCore(app); }
         finally
@@ -350,7 +370,7 @@ internal static class DedicatedRuntime
             Directory.CreateDirectory(Path.GetDirectoryName(Config.ResumePath));
             string temp = Config.ResumePath + ".tmp";
             File.WriteAllText(temp, JsonSerializer.Serialize(state, DedicatedConfig.Json));
-            File.Move(temp, Config.ResumePath, true);
+            AutoUpdate.ReplaceFile(temp, Config.ResumePath);
             _savedId = state.SaveId;
             _lastSaveUtc = DateTime.UtcNow;
             _lastSaveFailed = false;
@@ -386,11 +406,31 @@ internal static class DedicatedRuntime
         finally { _saving = false; WriteStatus(true); }
     }
 
+    private static readonly System.Collections.Concurrent.ConcurrentQueue<string> Commands = new();
+    private static System.Threading.Timer _commandPoll;
+    private static int _commandPolling;
+
+    // A slow or busy disk (an HDD under antivirus, a panel's network share) made the per-frame File.Exists cost up to
+    // 750 ms of server frame; the command file is read off the game thread four times a second instead.
+    private static void StartCommandPoll() => _commandPoll ??= new System.Threading.Timer(_ =>
+    {
+        if (System.Threading.Interlocked.Exchange(ref _commandPolling, 1) == 1) return;
+        try
+        {
+            if (!File.Exists(Config.CommandPath)) return;
+            string command = File.ReadAllText(Config.CommandPath).Trim();
+            File.Delete(Config.CommandPath);
+            Commands.Enqueue(command);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        finally { System.Threading.Volatile.Write(ref _commandPolling, 0); }
+    }, null, 250, 250);
+
     private static void CheckCommand(GameAppComponent app)
     {
-        if (!File.Exists(Config.CommandPath) || _saving || (_loading && !_loaded && Error == null)) return;
-        string command = File.ReadAllText(Config.CommandPath).Trim();
-        File.Delete(Config.CommandPath);
+        StartCommandPoll();
+        if (_saving || (_loading && !_loaded && Error == null) || !Commands.TryDequeue(out string command)) return;
         if (command.Equals("stop", StringComparison.OrdinalIgnoreCase))
         {
             _restartRequested = false;
@@ -692,7 +732,7 @@ internal static class DedicatedRuntime
                     try
                     {
                         File.WriteAllText(temp, json);
-                        File.Move(temp, path, true);
+                        AutoUpdate.ReplaceFile(temp, path);
                         if (_statusFailures > 0)
                         {
                             GameLog.Instance.Info($"dedicated: status file written again after {_statusFailures} failed write(s)");

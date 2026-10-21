@@ -65,6 +65,23 @@ public sealed class DedicatedConfig
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
     };
 
+    private static readonly HashSet<string> NotAdded = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // Free-form overrides of the world's own settings: an entry the host did not write must stay unset.
+        "SessionSettings", "DefinitionSettings",
+        // Top-level settings on a dedicated server; under Network they are refused.
+        "Network.Motd", "Network.MotdTitle",
+        // Read-only, worked out from BindAddress and ListenPort.
+        "Network.BindEndpoint"
+    };
+
+    /// <summary>Writes options this version added into the host's server.json with their defaults; returns their paths.</summary>
+    public static List<string> AddNewOptions(string path)
+    {
+        var defaults = (System.Text.Json.Nodes.JsonObject)JsonSerializer.SerializeToNode(new DedicatedConfig(), Json)!;
+        return JsonDefaults.UpgradeFile(path, defaults, NotAdded, text => JsonSerializer.Deserialize<DedicatedConfig>(text, Json));
+    }
+
     public static DedicatedConfig Read(string path)
     {
         path = Path.GetFullPath(path);

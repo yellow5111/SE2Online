@@ -83,6 +83,8 @@ public sealed class MuxLink : IPacketLink
 
 	public bool HasLanePriorities(uint conn) => _inner.TryGetValue(conn, out var at) && _links[at.Link].HasLanePriorities(at.Conn);
 
+	public bool IsSessionAlive(uint conn) => _inner.TryGetValue(conn, out var at) && _links[at.Link].IsSessionAlive(at.Conn);
+
 	public void Close(uint conn, int code, string reason, bool linger)
 	{
 		if (!_inner.Remove(conn, out var at)) return;

@@ -116,6 +116,10 @@ public sealed class KeenLink : IPacketLink
 		return KeenNet.PendingReliableBytes(_host, user);
 	}
 
+	// Our pings share Keen's one reliable Steam stream per player: behind a world still streaming to a slow link they
+	// arrive late, while Steam's own keepalives say the player is there.
+	public bool IsSessionAlive(uint conn) => _userOf.TryGetValue(conn, out GameServiceUser user) && KeenNet.SteamSessionConnected(_host, user);
+
 	public void Close(uint conn, int code, string reason, bool linger)
 	{
 		if (!_userOf.TryGetValue(conn, out GameServiceUser user) || !_closed.Add(conn)) return;

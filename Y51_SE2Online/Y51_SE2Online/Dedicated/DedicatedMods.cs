@@ -268,14 +268,20 @@ internal static class DedicatedMods
 
 	private static string Fetch(PublishedFileId_t id, long deadline)
 	{
-		if (Installed(id)) return null;
+		// Steam calls a copy on disk installed and current until it has asked the Workshop, so checking the state first kept
+		// loading the version a server downloaded first (a 2.4 build after 4.0 broke it). DownloadItem always asks and
+		// answers at once when the copy is current.
+		EResult? result = null;
+		using var answered = Callback<DownloadItemResult_t>.CreateGameServer(r => { if (r.m_nPublishedFileId == id) result = r.m_eResult; });
 		if (!SteamGameServerUGC.DownloadItem(id, bHighPriority: true)) return "Steam would not start the download (bad id, or not a Space Engineers 2 item)";
 		ulong last = ulong.MaxValue;
 		long lastChange = MpClock.NowMs();
 		long nextLog = 0;
-		while (!Installed(id))
+		while (result == null || !Installed(id))
 		{
 			GameServer.RunCallbacks();
+			if (result is { } failed && failed != EResult.k_EResultOK)
+				return Installed(id) ? null : $"Steam could not download it ({failed})";
 			SteamGameServerUGC.GetItemDownloadInfo(id, out ulong got, out ulong total);
 			if (total > MaxItemBytes) return $"{total >> 20} MiB is over the {MaxItemBytes >> 20} MiB limit";
 			long now = MpClock.NowMs();
@@ -287,6 +293,11 @@ internal static class DedicatedMods
 			// A bad or hidden id never even reaches the download queue.
 			if (now - lastChange > 15000 && got == 0 && SteamGameServerUGC.GetItemState(id) == (uint)EItemState.k_EItemStateNone)
 				return "Steam never queued the download (no such public Space Engineers 2 Workshop item?)";
+			if (result == null && got == 0 && now - lastChange > 30000 && Installed(id))
+			{
+				GameLog.Instance.Warn($"dedicated: Steam did not say whether Workshop item {id.m_PublishedFileId} is current; using the copy on disk");
+				return null;
+			}
 			if (now - lastChange > StallMs) return $"no download progress for {StallMs / 1000} s (private, removed, or not public?)";
 			if (now > deadline) return "the 30 minute Workshop download limit ran out";
 			if (now >= nextLog)

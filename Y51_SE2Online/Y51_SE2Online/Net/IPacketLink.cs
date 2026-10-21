@@ -22,5 +22,14 @@ public interface IPacketLink : IDisposable
 		return false;
 	}
 
+	/// <summary>
+	/// Whether the connection underneath still holds this peer (its own keepalives, not our pings). Only a link that
+	/// shares its reliable stream with other traffic answers true: our pings wait behind that traffic there.
+	/// </summary>
+	bool IsSessionAlive(uint conn)
+	{
+		return false;
+	}
+
 	void Close(uint conn, int code, string reason, bool linger);
 }

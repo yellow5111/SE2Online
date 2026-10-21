@@ -165,7 +165,8 @@ internal sealed class ClientWorld
 		{
 			_preparing = null;
 			_pendingJoin = null;
-			var (error, mods) = prepared.Result;
+			var (error, mods) = prepared.IsCompletedSuccessfully ? prepared.Result
+				: ("Could not read the server's mod list (" + prepared.Exception?.GetBaseException().Message + ").", null);
 			if (error == WorkshopMods.Cancelled) Progress.Set(JoinStage.Left, now, error);
 			else if (error != null) Progress.Set(JoinStage.Failed, now, error);
 			else
@@ -237,6 +238,7 @@ internal sealed class ClientWorld
 			_log.Info($"selftest: join bar {Progress.Stage} {bar.Status}: {bar.Detail.Split('\n')[2]}");
 		}
 #endif
+		if (Progress.Stage == JoinStage.Playing) ClientClock.Tick(app.ClientSession, now);
 		s_ui?.Update(app, Progress, now);
 		UpdateNametags();
 #if !PULSAR
