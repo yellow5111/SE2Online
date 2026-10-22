@@ -24,6 +24,18 @@ public sealed class ClientSession
 
 	private readonly IMpLog _log;
 
+	private readonly ConcurrentQueue<byte[]> _rulesOffers = new();
+
+	/// <summary>Main thread: applies custom rules the host sent and answers it.</summary>
+	public void ApplyRulesOffers()
+	{
+		while (_rulesOffers.TryDequeue(out byte[] offer))
+		{
+			byte[] answer = ClientRules.Handle(offer, _log);
+			if (Host is PeerId host && !_detached) _t.Send(host, Channel.Control, answer);
+		}
+	}
+
 	private readonly ClientSyncOptions _o;
 
 	private readonly Func<string, (int TypeId, int Size)?> _resolveType;
@@ -433,7 +445,8 @@ public sealed class ClientSession
 			_log.Error("sync(client): JOIN REJECTED by host: " + reason);
 			break;
 		case SyncMsg.RulesOffer:
-			_t.Send(Host.Value, Channel.Control, ClientRules.Handle(data, _log));
+			// Applied on the main thread (ApplyRulesOffers): the game's threads read the definitions it changes.
+			if (_rulesOffers.Count < 4) _rulesOffers.Enqueue(data);
 			break;
 		case SyncMsg.JoinWait:
 		{

@@ -32,16 +32,15 @@ internal sealed class SignalDedupe
 	private static readonly bool Off = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "signals:all");
 
 	private readonly Dictionary<(string Signal, object Target), object?[]> _last = new();
+	private readonly Dictionary<Entity, List<string>> _signalsOf = new(ReferenceEqualityComparer.Instance);
 
 	public long Skipped;
 
 	/// <summary>An entity this player no longer has, or got again: its signals go again.</summary>
 	public void Forget(Entity entity)
 	{
-		if (_last.Count == 0) return;
-		List<(string, object)>? gone = null;
-		foreach (var key in _last.Keys) if (ReferenceEquals(key.Target, entity)) (gone ??= new()).Add(key);
-		if (gone != null) foreach (var key in gone) _last.Remove(key);
+		if (!_signalsOf.Remove(entity, out var signals)) return;
+		foreach (string signal in signals) _last.Remove((signal, entity));
 	}
 
 	public bool IsRepeat(in RecordedSignal signal, Func<Entity, bool> exact)
@@ -66,8 +65,13 @@ internal sealed class SignalDedupe
 		}
 		// ponytail: one entry per entity and signal for the peer's life, cleared wholesale past 20000 (removed entities
 		// are never pruned one by one).
-		if (_last.Count > 20000) _last.Clear();
-		_last[key] = values;
+		if (_last.Count > 20000) { _last.Clear(); _signalsOf.Clear(); }
+		if (_last.TryAdd(key, values))
+		{
+			if (!_signalsOf.TryGetValue(target, out var signals)) _signalsOf[target] = signals = new List<string>(2);
+			signals.Add(name);
+		}
+		else _last[key] = values;
 		return false;
 	}
 

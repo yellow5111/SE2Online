@@ -34,6 +34,7 @@ internal static class ResilientReplication
 	// drifted further. A change that does not fit the copy is skipped whole.
 	private static bool CollectionChangePrefix(object __instance, Keen.VRage.Multiplayer.Replications.ReplicatedCollectionChange change)
 	{
+		if (!MpPlugin.Online) return true;
 		if (Traverse.Create(__instance).Property("Source").GetValue() is not System.Collections.IList list) return true;
 		bool fits = change.Kind switch
 		{
@@ -54,6 +55,7 @@ internal static class ResilientReplication
 	// now skipped the same way.
 	private static Exception? ChunkReadFinalizer(Exception? __exception)
 	{
+		if (!MpPlugin.Online) return __exception;
 		if (__exception == null || __exception is Keen.VRage.Library.Serialization.SerializationException { InnerException: Keen.VRage.Multiplayer.Replications.InProcess.NoMatchingLocalPairingException })
 			return __exception;
 		System.Threading.Interlocked.Increment(ref SignalsSkipped);
@@ -72,6 +74,7 @@ internal static class ResilientReplication
 	// logging method's caller broke its exception block and with it every guard here; this filters the log call itself.)
 	private static bool PairingWarningPrefix(string __1)
 	{
+		if (!MpPlugin.Online) return true;
 		string message = __1;
 		if (message == null || !message.StartsWith("Transport unit failed network pairing", StringComparison.Ordinal)) return true;
 		long count = System.Threading.Interlocked.Increment(ref _pairingSkips), now = MpClock.NowMs();
@@ -130,6 +133,7 @@ internal static class ResilientReplication
 	// That one signal is skipped; the entity's next state update corrects it.
 	private static Exception? SignalFinalizer(Exception? __exception)
 	{
+		if (!MpPlugin.Online) return __exception;
 		if (__exception is null or OutOfMemoryException or StackOverflowException) return __exception;
 		SignalsSkipped++;
 		GameLog.Instance.WarnOnce("signal-skipped-" + __exception.GetType().Name, $"replication: skipped a signal that failed to apply ({__exception.GetType().Name}: {__exception.Message}); further ones are counted, not logged");
@@ -146,6 +150,7 @@ internal static class ResilientReplication
 
 	private static Exception? GetEntityFinalizer(Exception? __exception, int entityId, ref Entity __result)
 	{
+		if (!MpPlugin.Online) return __exception;
 		if (_readingData <= 0 || __exception is not Keen.VRage.Multiplayer.Replications.InProcess.NoMatchingLocalPairingException) return __exception;
 		__result = _placeholder ??= EntityAllocator.AllocateStub();
 		_placeholderUsed = true;

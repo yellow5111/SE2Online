@@ -111,29 +111,50 @@ internal static class Y51Replication
 		GameLog.Instance.Info($"engine: {transport.Peer} ({why}); {transport.Describe()}, batches {transport.BatchesOut} sent {transport.BatchesAcked} acked");
 	}
 
-	private static void OnUpstream(PeerId peer, byte[] data)
-	{
-		if (Servers.TryGetValue(peer, out var transport)) transport.Offer(data);
-	}
+	private static bool OnUpstream(PeerId peer, byte[] data) => !Servers.TryGetValue(peer, out var transport) || transport.Offer(data);
 
 	/// <summary>
 	/// What a player may write on the server: SE2 4.0 only checks [SyncFromClients] on the sending side. A client keeps an
 	/// entry when its type is [SyncFromClients] and it lands on that player's own character or the ship it sits in.
 	/// </summary>
-	internal static bool ClientMayWrite(ClientId client, int typeId, Entity target)
+	internal static bool ClientMayWrite(ClientId client, int typeId, Entity target, WriteCache cache, long frame)
 	{
 		Type type = RuntimeDataInfo.Of(typeId).RuntimeType;
 		if (!type.IsDefined(typeof(SyncFromClients), inherit: false)) return Refuse(client, type, target, "not a client input type");
 		// A character the server moves from its player's own inputs (OwnMotion) takes the game's copy of them from nobody.
 		if (KeenNetcode.OwnMotion.ReplacesClientData(type, target)) return false;
-		long identity = (long)ServerAccess.IdentityOf(client);
+		if (cache.Frame != frame)
+		{
+			cache.Frame = frame;
+			cache.Identity = (long)ServerAccess.IdentityOf(client);
+			OwnBodies(client, cache.Characters, cache.Roots);
+			cache.Pilots.Clear();
+		}
+		long identity = cache.Identity;
 		if (identity == 0) return Refuse(client, type, target, "no identity yet");
 		if (target.TryGet<CharacterComponent>() != null)
 			return TeamPermissions.OwnerOf(target) == identity || Refuse(client, type, target, "another player's character");
 		var root = target.GetTopLevelParent();
-		foreach (Entity character in target.Scene == null ? Array.Empty<Entity>() : CharactersOf(identity))
-			if (character.FirstOrDefault<ISeatable>()?.CurrentSeat?.Entity.GetTopLevelParent() == root) return true;
-		return Refuse(client, type, target, "a ship the player is not seated in");
+		if (target.Scene == null || !cache.Roots.Contains(root)) return Refuse(client, type, target, "a ship the player is not seated in");
+		// The host's one-pilot setting: flight input for a ship counts only from the player who flies it.
+		if (KeenNetcode.OnePilot.IsFlightInput(type) && KeenNetcode.OnePilot.Enabled && root.TryGet<Keen.Game2.Simulation.WorldObjects.CubeGrids.CubeGridComponent>() != null)
+		{
+			if (!cache.Pilots.TryGetValue(root, out long pilot)) cache.Pilots[root] = pilot = KeenNetcode.OnePilot.PilotOf(root);
+			if (pilot != 0 && pilot != identity)
+			{
+				KeenNetcode.OnePilot.NoteDropped(identity, pilot);
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/// <summary>What ClientMayWrite looks up once per frame of a player's input: its identity, bodies, seats and pilots.</summary>
+	internal sealed class WriteCache
+	{
+		public long Frame = -1, Identity;
+		public readonly HashSet<Entity> Characters = new(ReferenceEqualityComparer.Instance), Roots = new(ReferenceEqualityComparer.Instance);
+		public readonly Dictionary<Entity, long> Pilots = new(ReferenceEqualityComparer.Instance);
 	}
 
 	/// <summary>A player's living characters and the top-level ships they sit in: what that player's game simulates itself.</summary>

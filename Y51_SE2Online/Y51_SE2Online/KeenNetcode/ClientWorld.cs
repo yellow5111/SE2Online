@@ -37,6 +37,8 @@ internal sealed class ClientWorld
 
 	private string? _lostReason;
 
+	private long _lostAtMs;
+
 	private bool _left;
 
 	private bool _retired;
@@ -139,7 +141,8 @@ internal sealed class ClientWorld
 		var current = Current;
 		if (current == null || current._session != session) return;
 		current._lostReason = string.IsNullOrWhiteSpace(reason) ? "connection closed" : reason;
-		Progress.Set(JoinStage.Lost, MpClock.NowMs(), current._lostReason);
+		current._lostAtMs = MpClock.NowMs();
+		Progress.Set(JoinStage.Lost, current._lostAtMs, current._lostReason);
 	}
 
 	/// <summary>Main thread, every frame (GameAppComponent.GameUpdate prefix).</summary>
@@ -201,6 +204,14 @@ internal sealed class ClientWorld
 				// player on a frozen 0% loading screen.
 				_backToMenu = true;
 			}
+		}
+		// The server dropped this player (a long server hitch outlasts the ping timeout): its game session cannot resume, so
+		// leave the world and join again, as the loss notice says. Nothing did, and the player sat on "Rejoining..." forever.
+		if (_lostAtMs > 0 && _o.Rejoin && Progress.Stage == JoinStage.Lost && now - _lostAtMs > 3000)
+		{
+			_lostAtMs = 0;
+			_log.Info("client: the connection to the server is lost; leaving its world and joining again");
+			MpMenu.Retry();
 		}
 		if (_backToMenu && !app._isTransitioning.IsSet && app.Client == null && app.Server == null)
 		{

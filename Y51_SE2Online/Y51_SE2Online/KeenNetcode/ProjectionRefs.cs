@@ -48,30 +48,35 @@ internal static class ProjectionRefs
 
 	private static bool WriteTyped(ref BinarySerializationContext destination, ref ProjectionSourceComponent.ChildRef value)
 	{
+		if (!MpPlugin.Online) return true;
 		Write(ref destination, value);
 		return false;
 	}
 
 	private static bool WriteBoxed(ref BinarySerializationContext destination, object? value)
 	{
+		if (!MpPlugin.Online) return true;
 		Write(ref destination, value is ProjectionSourceComponent.ChildRef r ? r : default);
 		return false;
 	}
 
 	private static bool ReadTyped(ref BinaryDeserializationContext source, ref ProjectionSourceComponent.ChildRef value)
 	{
+		if (!MpPlugin.Online) return true;
 		value = ReadRef(ref source);
 		return false;
 	}
 
 	private static bool ReadBoxed(ref BinaryDeserializationContext source, ref object? value)
 	{
+		if (!MpPlugin.Online) return true;
 		value = ReadRef(ref source);
 		return false;
 	}
 
 	private static bool ReadResult(ref BinaryDeserializationContext source, ref ProjectionSourceComponent.ChildRef __result)
 	{
+		if (!MpPlugin.Online) return true;
 		__result = ReadRef(ref source);
 		return false;
 	}

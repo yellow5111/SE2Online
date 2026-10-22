@@ -255,7 +255,7 @@ internal static class EngineWire
 			{
 			case Unit.ReplicationArchive:
 			case Unit.SequenceArchive:
-				sink.OnArchive(unit, r.ReadBytes(r.ReadInt32()));
+				sink.OnArchive(unit, Bytes(r, r.ReadInt32()));
 				break;
 			case Unit.TypeDef:
 				sink.OnTypeDef(r.ReadUInt16(), r.ReadString());
@@ -264,7 +264,7 @@ internal static class EngineWire
 			{
 				uint id = r.ReadUInt32();
 				ushort key = r.ReadUInt16();
-				sink.OnData(id, key, r.ReadBytes(r.ReadUInt16()));
+				sink.OnData(id, key, Bytes(r, r.ReadUInt16()));
 				break;
 			}
 			case Unit.DataRemove:
@@ -275,7 +275,7 @@ internal static class EngineWire
 				long stamp = r.ReadInt64();
 				uint id = r.ReadUInt32();
 				ushort key = r.ReadUInt16();
-				sink.OnSampled(stamp, true, id, key, r.ReadBytes(r.ReadUInt16()));
+				sink.OnSampled(stamp, true, id, key, Bytes(r, r.ReadUInt16()));
 				break;
 			}
 			case Unit.SampledRemove:
@@ -285,6 +285,13 @@ internal static class EngineWire
 				throw new InvalidDataException($"unknown engine unit {(byte)unit}");
 			}
 		}
+	}
+
+	// A declared length is checked against what the frame still holds before anything that size is allocated.
+	private static byte[] Bytes(BinaryReader r, int length)
+	{
+		if (length < 0 || length > r.BaseStream.Length - r.BaseStream.Position) throw new InvalidDataException($"an engine unit claims {length} bytes, the frame has {r.BaseStream.Length - r.BaseStream.Position} left");
+		return r.ReadBytes(length);
 	}
 
 	/// <summary>Unreliable sampled state: [kind][i64 stamp][u16 n]{u32 id, u16 key, u16 len, bytes}, split to fit one state packet each.</summary>

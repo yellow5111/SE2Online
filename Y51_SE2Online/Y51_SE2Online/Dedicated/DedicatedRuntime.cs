@@ -755,7 +755,7 @@ internal static class DedicatedRuntime
                 Players = network?.Players.Where(p => p.Peer.HasValue).Select(p => new
                 {
                     SteamId = p.Peer.Value.Value, p.Name, State = p.CharacterNetId > 0 ? "Playing" : "Joining"
-                }).ToArray(),
+                }).ToArray() ?? [],
                 Headless, NativeClientPresent = MpPlugin.App?.Client != null,
                 NativePlayerClientIds = _loaded ? MpPlugin.App?.Server?.Entity.Get<WorldSessionComponent>()?.OwnedSession.SessionComponents
                     .Get<Keen.Game2.Simulation.GameSystems.Identities.IdentitiesSessionComponent>().GetClientIds().Select(id => id.Id).ToArray() : null,

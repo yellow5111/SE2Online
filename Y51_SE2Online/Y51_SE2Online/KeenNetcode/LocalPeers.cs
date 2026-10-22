@@ -60,6 +60,24 @@ internal static class LocalPeers
 	/// <summary>The loopback listener's key, in this OS user's own app data: a process of another user cannot join.</summary>
 	internal static string KeyPath(int port) => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Y51_SE2Online", $"loopback-{port}.key");
 
+	// Readable by this OS user only (0600 in a 0700 folder on Linux; LocalApplicationData is per user on Windows). The
+	// folder stays outside the game's -appData so instances with their own profile folders on this PC still join.
+	internal static void WriteKey(string path, byte[] key)
+	{
+		string dir = Path.GetDirectoryName(path)!;
+		if (OperatingSystem.IsWindows())
+		{
+			Directory.CreateDirectory(dir);
+			File.WriteAllBytes(path, key);
+			return;
+		}
+		Directory.CreateDirectory(dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+		File.SetUnixFileMode(dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+		File.Delete(path);
+		using var file = new FileStream(path, new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite });
+		file.Write(key);
+	}
+
 	internal const int HeaderBytes = 6;
 
 	internal static void WriteFrame(Stream stream, ReadOnlySpan<byte> data, byte channel, MessageReliability reliability)
@@ -190,8 +208,7 @@ internal sealed class LocalServerSession : LocalMessageSource, IPeerToPeerSessio
 			_listener = new TcpListener(IPAddress.Loopback, port);
 			_listener.Start();
 			string keyPath = LocalPeers.KeyPath(port);
-			Directory.CreateDirectory(Path.GetDirectoryName(keyPath)!);
-			File.WriteAllBytes(keyPath, _key);
+			LocalPeers.WriteKey(keyPath, _key);
 			_keyPath = keyPath;
 			new Thread(Accept) { IsBackground = true, Name = "Y51 local players" }.Start();
 			_log.Info($"local players: other game instances on this PC join through 127.0.0.1:{port} (TCP)");

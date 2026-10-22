@@ -387,7 +387,8 @@ public sealed partial class HostSession : IStorySink
 				OnRulesAck(peer, data);
 				break;
 			case SyncMsg.EngineUp:
-				if (StatusOf(peer) == ClientStatus.Synced) EngineUpstream?.Invoke(peer, data);
+				if (StatusOf(peer) == ClientStatus.Synced && EngineUpstream?.Invoke(peer, data) == false)
+					_t.Disconnect(peer, DisconnectCodes.ProtocolError, "too much engine data not yet read");
 				break;
 			case SyncMsg.ClientStatus:
 			{
@@ -1798,7 +1799,7 @@ public sealed partial class HostSession : IStorySink
 	}
 
 	/// <summary>Network thread: a player's replication frame for the engine transport (Engine/Y51ServerTransport).</summary>
-	public static Action<PeerId, byte[]>? EngineUpstream;
+	public static Func<PeerId, byte[], bool>? EngineUpstream;
 
 	/// <summary>A replication frame or state message to one player (any thread); false if it is not synced.</summary>
 	public bool SendEngine(PeerId peer, byte[] message, bool state)

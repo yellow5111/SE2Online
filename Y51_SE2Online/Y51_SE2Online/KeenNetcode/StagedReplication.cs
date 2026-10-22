@@ -31,6 +31,7 @@ internal static class StagedReplication
 
 	private static void CompletePostfix(ReplicationServerSessionComponent __instance, Entity[] entities)
 	{
+		if (!MpPlugin.Online) return;
 		var set = Replicated(__instance);
 		foreach (var entity in entities)
 			if (!EngineCodec.IsDead(entity)) set.Add(entity);
@@ -40,6 +41,7 @@ internal static class StagedReplication
 	// paired it would stay listed, and a joining player must not be sent a dead entity.
 	private static void InitialSetPrefix(ReplicationServerSessionComponent __instance)
 	{
+		if (!MpPlugin.Online) return;
 		int removed = Replicated(__instance).RemoveWhere(EngineCodec.IsDead);
 		if (removed > 0) GameLog.Instance.WarnOnce("staged-dead", $"replication: {removed} removed entities were still listed for joining players; left out");
 	}

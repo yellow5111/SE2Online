@@ -17,6 +17,9 @@ public sealed partial class HostSession
 
 	[System.ThreadStatic] private static bool _rulesAnswered;
 
+	// Per connection: how often the rules were sent again because the player answered for other ones (once is allowed).
+	private readonly ConditionalWeakTable<RemoteClient, StrongBox<int>> _rulesResent = new();
+
 	/// <summary>True while the player still has to apply the host's rules (the offer is sent once per connection).</summary>
 	private bool OfferRules(RemoteClient c)
 	{
@@ -69,6 +72,12 @@ public sealed partial class HostSession
 		}
 		if (HostRules.Offer is { } offer && offer.Hash != hash)
 		{
+			var resent = _rulesResent.GetValue(c, _ => new StrongBox<int>());
+			if (++resent.Value > 1)
+			{
+				Reject(peer, "Your game answered for other custom rules than this server's twice, so joining would put you out of step with the server.");
+				return;
+			}
 			_log.Info($"sync(host): {peer} applied custom rules {hash}, but the world now runs {offer.Hash}; sending those");
 			RequestCapture(c);
 			return;

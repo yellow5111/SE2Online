@@ -20,8 +20,8 @@ using Y51_SE2Online.SyncEngine;
 [assembly: IgnoresAccessChecksTo("VRage.Physics")]
 [assembly: AssemblyCompany("Y51_SE2Online")]
 [assembly: AssemblyConfiguration("Release")]
-[assembly: AssemblyFileVersion("0.16.4.0")]
-[assembly: AssemblyInformationalVersion("0.16.4")]
+[assembly: AssemblyFileVersion("0.16.5.0")]
+[assembly: AssemblyInformationalVersion("0.16.5")]
 [assembly: AssemblyProduct("Y51_SE2Online")]
 [assembly: AssemblyTitle("Y51_SE2Online")]
 [assembly: IndexMetadata]
@@ -32,8 +32,8 @@ using Y51_SE2Online.SyncEngine;
 	"VRage.Platform.Windows", "VRage.Render", "VRage.Render12", "VRage.Scripting", "VRage.Steam", "VRage.UI", "VRage.UI.Shared", "VRage.Voxels.Client", "VRage.Voxels", "VRage.Water.Client",
 	"VRage.Water", "Game2.Client", "Game2.Simulation", "SpaceEngineers2", "VRage.Multiplayer"
 })]
-[assembly: Bundle("Y51_SE2Online", "0.16.4.0")]
-[assembly: AssemblyVersion("0.16.4.0")]
+[assembly: Bundle("Y51_SE2Online", "0.16.5.0")]
+[assembly: AssemblyVersion("0.16.5.0")]
 [module: ModuleIndexedAttributes(typeof(WithLifetimeAdapterAttribute), new Type[] { typeof(NametagMarkerProvider), typeof(Y51_SE2Online.Engine.Y51ServerTransport), typeof(Y51_SE2Online.Engine.Y51ClientTransport) }, new string[] { })]
 [module: ModuleIndexedAttributes(typeof(IndexedComponentAttribute), new Type[] { typeof(NametagMarkerProvider), typeof(Y51_SE2Online.Dedicated.HeadlessEngine.HeadlessParallelInitComponent), typeof(Y51_SE2Online.Dedicated.HeadlessEngine.ServerParallelInitComponent), typeof(WorldSocial.WorldSocialSaveComponent) }, new string[] { })]
 

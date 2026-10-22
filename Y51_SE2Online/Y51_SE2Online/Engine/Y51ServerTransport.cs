@@ -126,13 +126,16 @@ internal sealed class Y51ServerTransport : Y51PeerTransport, IServerPeerTranspor
 		GameLog.Instance.WarnOnce("engine-server-msg-" + message.GetType().Name, $"engine {Name}: a player sent {message.GetType().Name}, which only the server sends; ignored");
 	}
 
-	protected override bool AcceptData(int typeId, Entity target, bool removal) => Y51Replication.ClientMayWrite(PeerClientId, typeId, target);
+	private readonly Y51Replication.WriteCache _writes = new();
+
+	protected override bool AcceptData(int typeId, Entity target, bool removal) => Y51Replication.ClientMayWrite(PeerClientId, typeId, target, _writes, FramesIn);
 
 	protected override IAsyncStateMachine RestoreStoryStateMachine(ClientId sender, StoryId storyId, StateMachineEnvelope envelope)
 	{
 		var plan = OopTransport.PlanFor(envelope);
 		var machine = plan.Restore(envelope, storyId, _server.ReplicationComponent);
 		plan.CompleteServerRequest(machine, ReplicationEventContext.ForRemoteClient(Session, sender));
+		KeenNetcode.ServerAccess.CheckRestoredStory(sender, ref machine);
 		return machine;
 	}
 }

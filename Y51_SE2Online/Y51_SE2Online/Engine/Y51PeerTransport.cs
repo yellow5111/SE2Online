@@ -69,6 +69,8 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 	private readonly Dictionary<(uint, ushort), long> _lastApplied = new();
 
 	private readonly Dictionary<StoryId, Keen.VRage.Library.Threading.TaskCompletionSource<StoryProgress>> _storiesInFlight = new();
+	// The state machine each in-flight story left as: one that comes back under its id must be the same story.
+	private readonly Dictionary<StoryId, Type> _storyTypes = new();
 
 	public long FramesOut, FramesIn, BytesOut, BytesIn, UnitsIn, UnitsFailed, SignalsOut, SignalsIn, DataOut, DataIn, SampledOut, SampledIn, StaleSampled, StoriesOut, StoriesIn, Dropped;
 	private bool _disposed;
@@ -82,6 +84,7 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 		Name = name;
 		TargetContext = new ReplicationTargetContext(peer);
 		_pipeline = new OutOfProcessSignalPipeline(component.GetSession(), component.IsServer, Trace.CreateChannel("Y51 " + name));
+		if (component.IsServer) _frames.MaxBuffered = MaxEarlyFramesFromClient;
 	}
 
 	protected Session Session => Component.GetSession();
@@ -95,6 +98,7 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 		_disposed = true;
 		foreach (var tcs in _storiesInFlight.Values) tcs.Dispose();
 		_storiesInFlight.Clear();
+		_storyTypes.Clear();
 		TaskLifetime.EndLifetimeOnTime(this, TimeSpan.FromSeconds(1L));
 	}
 
@@ -195,6 +199,7 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 		catch (Exception ex) when (ex.CanHandle()) { return KTask.FromException<StoryProgress>(ex); }
 		var tcs = new Keen.VRage.Library.Threading.TaskCompletionSource<StoryProgress>($"Y51 story #{id} to {PeerClientId}");
 		_storiesInFlight[id] = tcs;
+		_storyTypes[id] = storyMove.StateMachine.GetType();
 		_sequence.Add(story);
 		StoriesOut++;
 		EngineCoverage.Note("story", StoryName(story), Out);
@@ -367,17 +372,44 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 
 	// --- inbound ---
 
-	/// <summary>Network thread.</summary>
-	public void Offer(byte[] message)
+	// What a player may have the server hold for it before the scene thread reads it: frames that came early (out of
+	// sequence) and frames waiting to be read, by count and by bytes. A player past either is disconnected.
+	private const int MaxEarlyFramesFromClient = 1024;
+	private const long MaxPendingBytesFromClient = 64L << 20;
+	private long _pendingBytes;
+	private volatile bool _overflowed;
+
+	/// <summary>Network thread. False when the peer sent more than the server holds for one player (disconnect it).</summary>
+	public bool Offer(byte[] message)
 	{
 		BytesIn += message.Length;
 		if ((SyncMsg)message[0] == SyncMsg.EngineState)
 		{
 			if (_state.Count < 4096) _state.Enqueue(message);
-			return;
+			return true;
 		}
-		if (!_frames.Offer(EngineWire.SeqOf(message), message))
-			GameLog.Instance.WarnOnce("engine-frame-dup-" + Name, $"engine {Name}: frame #{EngineWire.SeqOf(message)} was a duplicate or overflowed the reorder buffer (waiting for #{_frames.NextExpected})");
+		bool server = Component.IsServer;
+		if (_overflowed) return false;
+		if (server && System.Threading.Interlocked.Read(ref _pendingBytes) + message.Length > MaxPendingBytesFromClient)
+		{
+			_overflowed = true;
+			GameLog.Instance.Warn($"engine {Name}: the player sent more than {MaxPendingBytesFromClient >> 20} MiB the server had not read yet; disconnecting it");
+			return false;
+		}
+		long overflowBefore = _frames.Overflow;
+		if (_frames.Offer(EngineWire.SeqOf(message), message))
+		{
+			System.Threading.Interlocked.Add(ref _pendingBytes, message.Length);
+			return true;
+		}
+		if (server && _frames.Overflow != overflowBefore)
+		{
+			_overflowed = true;
+			GameLog.Instance.Warn($"engine {Name}: more than {MaxEarlyFramesFromClient} frames came out of sequence (waiting for #{_frames.NextExpected}); disconnecting the player");
+			return false;
+		}
+		GameLog.Instance.WarnOnce("engine-frame-dup-" + Name, $"engine {Name}: frame #{EngineWire.SeqOf(message)} was a duplicate or overflowed the reorder buffer (waiting for #{_frames.NextExpected})");
+		return true;
 	}
 
 	/// <summary>Scene thread, in the game's inbound replication job.</summary>
@@ -387,6 +419,7 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 		while (_frames.TryTake(out _, out byte[] frame))
 		{
 			FramesIn++;
+			System.Threading.Interlocked.Add(ref _pendingBytes, -frame.Length);
 			try { EngineWire.Read(_inflater.Unpack(frame), this); }
 			catch (Exception ex)
 			{
@@ -451,7 +484,10 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 			EngineCoverage.Note("signal", signal.Signal.String, In);
 			if (!AcceptSignal(in signal)) break;
 			if (!Component.IsServer && !NoSignalHold && Building(in signal)) { _parkedSignals.Add((signal, MpClock.NowMs())); SignalsParked++; break; }
-			Component.ProcessSignal(signal, _pipeline);
+			if (!Component.IsServer) { Component.ProcessSignal(signal, _pipeline); break; }
+			var sender = KeenNetcode.ServerAccess.EnterSignal(PeerClientId);
+			try { Component.ProcessSignal(signal, _pipeline); }
+			finally { KeenNetcode.ServerAccess.LeaveSignal(sender); }
 			break;
 		case IStoryData story:
 			StoriesIn++;
@@ -738,6 +774,12 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 	{
 		if (_storiesInFlight.Remove(story.StoryId, out var tcs))
 		{
+			_storyTypes.Remove(story.StoryId, out var sent);
+			if (story is StateMachineEnvelope back && KeenNetcode.ServerAccess.ReturningStoryRefusal(PeerClientId, sent, back) is { } refused)
+			{
+				tcs.SetResult(new StoryProgress.Complete(new StoryFault(refused)));
+				return;
+			}
 			tcs.SetResult(story is StateMachineEnvelope envelope
 				? new StoryProgress.Move(RestoreStoryStateMachine(PeerClientId, story.StoryId, envelope))
 				: new StoryProgress.Complete(((StoryComplete)story).Completion));
@@ -764,8 +806,16 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 		StoryProgress result;
 		try
 		{
-			var machine = RestoreStoryStateMachine(PeerClientId, local, move);
-			result = await Component.ReplicationComponent.HostNetworkStory(PeerClientId, local, machine);
+			// The story's server part runs inside HostNetworkStory up to its first wait: the access checks know its caller.
+			var caller = Component.IsServer ? KeenNetcode.ServerAccess.EnterStory(PeerClientId) : default;
+			Keen.VRage.Library.Threading.Task<StoryProgress> hosted;
+			try
+			{
+				var machine = RestoreStoryStateMachine(PeerClientId, local, move);
+				hosted = Component.ReplicationComponent.HostNetworkStory(PeerClientId, local, machine);
+			}
+			finally { if (Component.IsServer) KeenNetcode.ServerAccess.LeaveStory(caller); }
+			result = await hosted;
 		}
 		catch (Exception ex) when (ex.CanHandle())
 		{

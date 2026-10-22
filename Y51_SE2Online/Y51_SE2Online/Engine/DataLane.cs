@@ -28,6 +28,8 @@ internal sealed class DataLane
 	private readonly Dictionary<(uint, ushort), (byte[] Bytes, bool Sampled, long DueMs)> _deferred = new();
 	private readonly Dictionary<(uint, ushort), long> _nextAllowed = new();
 	private readonly Dictionary<(uint, ushort), int> _rateOf = new();
+	// The keys each entity has had a value of, so forgetting one entity touches only its own entries.
+	private readonly Dictionary<uint, HashSet<ushort>> _keysOf = new();
 
 	/// <summary>Minimum milliseconds between values of one entity for a type key; absent = every dispatch.</summary>
 	public readonly Dictionary<ushort, int> Rates = new();
@@ -47,6 +49,8 @@ internal sealed class DataLane
 			_ops.Add(new Op { Kind = sampled ? Kind.SampledSet : Kind.Set, NetId = netId, Key = key, Bytes = bytes });
 			return;
 		}
+		if (!_keysOf.TryGetValue(netId, out var keys)) _keysOf[netId] = keys = new HashSet<ushort>();
+		keys.Add(key);
 		int rate = rateMs >= 0 ? rateMs : Rates.GetValueOrDefault(key);
 		if (rate > 0) _rateOf[id] = rate;
 		else _rateOf.Remove(id);
@@ -131,16 +135,14 @@ internal sealed class DataLane
 	/// <summary>An entity this peer no longer has: forget what it was sent.</summary>
 	public void Forget(uint netId)
 	{
-		Drop(_lastSent, netId);
-		Drop(_nextAllowed, netId);
-		Drop(_deferred, netId);
-		Drop(_rateOf, netId);
-	}
-
-	private static void Drop<T>(Dictionary<(uint, ushort), T> map, uint netId)
-	{
-		List<(uint, ushort)>? gone = null;
-		foreach (var key in map.Keys) if (key.Item1 == netId) (gone ??= new()).Add(key);
-		if (gone != null) foreach (var key in gone) map.Remove(key);
+		if (!_keysOf.Remove(netId, out var keys)) return;
+		foreach (ushort key in keys)
+		{
+			var id = (netId, key);
+			_lastSent.Remove(id);
+			_nextAllowed.Remove(id);
+			_deferred.Remove(id);
+			_rateOf.Remove(id);
+		}
 	}
 }

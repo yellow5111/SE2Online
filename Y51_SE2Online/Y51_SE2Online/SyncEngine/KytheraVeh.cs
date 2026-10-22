@@ -22,6 +22,7 @@ internal static class KytheraVeh
 	public static void Tick()
 	{
 		if (_off) return;
+		if (!MpPlugin.Online) return;
 		try
 		{
 			if (_base == IntPtr.Zero)

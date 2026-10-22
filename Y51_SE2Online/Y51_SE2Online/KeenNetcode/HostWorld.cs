@@ -238,7 +238,7 @@ internal sealed partial class HostWorld : IHostWorld
 
 	public void RegisterPlayer(PeerId client, ushort clientId, string identityKey, string name) => _unidentified[clientId] = (client.Value, name);
 
-	public string Stats() => $"Keen netcode, {_identityOf.Count} identified player(s)";
+	public string Stats() => $"SE2 Online netcode, {_joiners.Values.Count(j => !j.Local)} player(s) online";
 
 	public string DesyncDescribe() => "desync checks: Keen netcode";
 
@@ -287,6 +287,7 @@ internal sealed partial class HostWorld : IHostWorld
 		KeenNetcode.TurretProbe.Tick(__instance);
 		KeenNetcode.ContractsProbe.Tick(__instance);
 		KeenNetcode.ProjectionProbe.Tick(__instance);
+		if (ReferenceEquals(__instance, MpPlugin.App?.ClientSession) && MpPlugin.App?.ServerSession == null) KeenNetcode.AccessProbe.ClientTick(__instance);
 		if (ReferenceEquals(__instance, MpPlugin.App?.ServerSession)) Engine.SyncProbe.Tick(__instance, server: true);
 		else if (ReferenceEquals(__instance, MpPlugin.App?.ClientSession) && MpPlugin.App?.ServerSession == null) Engine.SyncProbe.Tick(__instance, server: false);
 		if (ReferenceEquals(__instance, MpPlugin.App?.ServerSession)) Engine.StateProbe.Tick(__instance, server: true);

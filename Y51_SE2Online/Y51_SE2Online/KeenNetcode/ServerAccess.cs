@@ -28,7 +28,7 @@ namespace Y51_SE2Online.KeenNetcode;
 /// player (an empty check), so SE2 Online's "access denied" showed in the UI while the action still went through. The
 /// server now refuses them with the same rules the UI shows: grid sharing, factions, block allow and deny lists.
 /// </summary>
-internal static class ServerAccess
+internal static partial class ServerAccess
 {
 	public static long Refused;
 
@@ -44,15 +44,29 @@ internal static class ServerAccess
 			prefix: nameof(StoryPrefix), finalizer: nameof(StoryFinalizer));
 		Patch(harmony, "story arguments", AccessTools.Method(typeof(Keen.VRage.Multiplayer.Transport.OutOfProcess.Server.OutOfProcessServerPeerTransport), "RestoreStoryStateMachine"),
 			postfix: nameof(RestoredStoryPostfix));
+		if (!ReturningStoriesOff)
+		{
+			// Not MoveNetworkStory itself: its exception filter breaks Harmony's rewrite. This is where it captures the story.
+			Patch(harmony, "returning stories (sent)", AccessTools.Method(typeof(Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport), "TransformStoryInternal",
+				new[] { typeof(Keen.VRage.Multiplayer.NetworkStories.StoryProgress), typeof(Keen.VRage.Multiplayer.NetworkStories.StoryId) }), postfix: nameof(MoveStoryPostfix));
+			Patch(harmony, "returning stories", AccessTools.Method(typeof(Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport), "TryAcceptReturningStory"), prefix: nameof(ReturningStoryPrefix));
+		}
 		var toolbar = typeof(Keen.Game2.Simulation.WorldObjects.CubeBlocks.Toolbar.BlockToolbarServerComponent);
 		Patch(harmony, "button panels", System.Linq.Enumerable.FirstOrDefault(AccessTools.GetDeclaredMethods(toolbar), m => m.Name == "ActivateTile" && m.GetParameters().Length == 3), prefix: nameof(ToolbarPrefix));
+		// A press arrives through the one-argument overload, which the JIT inlines the three-argument one into.
+		Patch(harmony, "button panel presses", System.Linq.Enumerable.FirstOrDefault(AccessTools.GetDeclaredMethods(toolbar), m => m.Name == "ActivateTile" && m.GetParameters().Length == 1), prefix: nameof(ToolbarPrefix));
 		Patch(harmony, "button panel edits", AccessTools.Method(toolbar, "ClearTile"), prefix: nameof(ToolbarPrefix));
+		foreach (var story in ToolbarStories())
+			Patch(harmony, "button panel requests", AccessTools.Method(story, "MoveNext"), prefix: nameof(ToolbarStoryPrefix), finalizer: nameof(ToolbarStoryFinalizer));
+		Patch(harmony, "story caller (host's own)", AccessTools.Method(typeof(Keen.VRage.Multiplayer.Transport.InProcess.InProcessPeerTransportSessionComponent), "HostStory"),
+			prefix: nameof(InProcessStoryPrefix), finalizer: nameof(StoryFinalizer));
 		Patch(harmony, "admin tools", AccessTools.Method(typeof(Keen.VRage.Game.Utilities.CoreValidators), nameof(Keen.VRage.Game.Utilities.CoreValidators.HasAdminAccess)), prefix: nameof(AdminPrefix));
 		var inventories = typeof(Keen.Game2.Simulation.StreamedUI.Terminal.Inventories.StreamedInventorySessionComponent);
 		var inventoryList = typeof(Keen.Game2.Simulation.StreamedUI.Terminal.Inventories.InventoryListModelStreamed);
 		Patch(harmony, "inventory lists", AccessTools.Method(inventories, "Attach", new[] { typeof(Entity), inventoryList, typeof(ReplicationEventContext) }), prefix: nameof(InventoryListPrefix));
 		Patch(harmony, "inventory list entries", AccessTools.Method(inventories, "AddEntity"), prefix: nameof(InventoryEntryPrefix));
 		Patch(harmony, "mission ownership", AccessTools.Method(typeof(Keen.Game2.Simulation.GameSystems.Missions.Triggers.Actions.SetEntityOwnershipActionComponent), "Activate"), prefix: nameof(MissionOwnerPrefix));
+		InstallRequests(harmony);
 	}
 
 	// A mission step that hands a ship or crate "to the player" gives it to SE2's first player identity: the co-op host, or
@@ -96,6 +110,64 @@ internal static class ServerAccess
 	// The client started this story (it is not one of the server's own coming back from that client).
 	[ThreadStatic] private static bool _hostingStory;
 
+	/// <summary>
+	/// Kill switch for one check, for a server whose players hit a false refusal: -y51online:access-off:&lt;check&gt;.
+	/// </summary>
+	internal static bool Off(string check)
+	{
+		bool off = MpPlugin.LaunchArgs.Any(a => a.Equals(MpOptions.Prefix + "access-off:" + check, StringComparison.OrdinalIgnoreCase));
+		if (off) GameLog.Instance.Info($"access: the {check} check is off (launch option)");
+		return off;
+	}
+
+	private static readonly bool ReturningStoriesOff = Off("returning stories"), ToolbarUnknownOff = Off("toolbar callers");
+
+	// The state machine type of every story Keen's transport has in flight to a peer.
+	private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport,
+		System.Collections.Generic.Dictionary<Keen.VRage.Multiplayer.NetworkStories.StoryId, Type>> _sentStories = new();
+
+	// Also runs for a peer's story this side hosted and sends back under the peer's id; those entries are never asked for
+	// again, so the table is emptied past 4096 (an entry missing there only skips the check for that story).
+	private static void MoveStoryPostfix(Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport __instance, Keen.VRage.Multiplayer.NetworkStories.StoryProgress story,
+		Keen.VRage.Multiplayer.NetworkStories.StoryId id)
+	{
+		if (story is not Keen.VRage.Multiplayer.NetworkStories.StoryProgress.Move move) return;
+		var sent = _sentStories.GetOrCreateValue(__instance);
+		lock (sent)
+		{
+			if (sent.Count > 4096) sent.Clear();
+			sent[id] = move.StateMachine.GetType();
+		}
+	}
+
+	private static bool ReturningStoryPrefix(Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport __instance, Keen.VRage.Multiplayer.NetworkStories.IStoryData story, ref bool __result)
+	{
+		if (!_sentStories.TryGetValue(__instance, out var sent)) return true;
+		Type? type;
+		lock (sent) sent.Remove(story.StoryId, out type);
+		if (story is not Keen.VRage.Multiplayer.NetworkStories.StateMachineEnvelope back || ReturningStoryRefusal(__instance.PeerClientId, type, back) is not { } refused) return true;
+		if (!__instance._storiesInFlight.Remove(story.StoryId, out var tcs)) return true;
+		tcs.SetResult(new Keen.VRage.Multiplayer.NetworkStories.StoryProgress.Complete(new Keen.VRage.Multiplayer.Transport.StoryFault(refused)));
+		__result = true;
+		return false;
+	}
+
+	/// <summary>
+	/// A story this side moved to the peer may come back under its id only as the same state machine: the peer swapping in
+	/// another story there would get it run without the checks a story the peer starts goes through. Both transports.
+	/// </summary>
+	internal static Exception? ReturningStoryRefusal(Keen.VRage.Multiplayer.ClientId peer, Type? sent, Keen.VRage.Multiplayer.NetworkStories.StateMachineEnvelope back)
+	{
+		if (ReturningStoriesOff || sent == null) return null;
+		Type? came;
+		try { came = Type.GetType(back.StateMachineTypeName); }
+		catch (Exception ex) when (ex is ArgumentException or System.IO.IOException or TypeLoadException or BadImageFormatException) { came = null; }
+		if (came == sent) return null;
+		Refused++;
+		if (LogDue(peer, "returning-story")) GameLog.Instance.Info($"access: refused ClientId {peer.Id}'s answer to {sent.DeclaringType?.Name}.{StoryName(sent)}: it came back as another story ({back.StateMachineTypeName}; further ones within 5 s not logged)");
+		return new InvalidOperationException("Access denied: the answer is another story");
+	}
+
 	private static void StoryPrefix(Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport __instance, Keen.VRage.Multiplayer.NetworkStories.IStoryData story,
 		out (Keen.VRage.Multiplayer.ClientId? Client, bool Hosting) __state)
 	{
@@ -103,6 +175,22 @@ internal static class ServerAccess
 		_storyClient = __instance.PeerClientId;
 		_hostingStory = !__instance._storiesInFlight.ContainsKey(story.StoryId);
 	}
+
+	/// <summary>
+	/// SE2 Online's own transport hosts a player's story itself (not through the game's ProcessStory): the same caller
+	/// and argument checks apply while it is restored and runs its server part.
+	/// </summary>
+	internal static (Keen.VRage.Multiplayer.ClientId? Client, bool Hosting) EnterStory(Keen.VRage.Multiplayer.ClientId client)
+	{
+		var before = (_storyClient, _hostingStory);
+		_storyClient = client;
+		_hostingStory = true;
+		return before;
+	}
+
+	internal static void LeaveStory((Keen.VRage.Multiplayer.ClientId? Client, bool Hosting) before) => (_storyClient, _hostingStory) = before;
+
+	internal static void CheckRestoredStory(Keen.VRage.Multiplayer.ClientId sender, ref System.Runtime.CompilerServices.IAsyncStateMachine machine) => RestoredStoryPostfix(sender, ref machine);
 
 	private static Exception? StoryFinalizer(Exception? __exception, (Keen.VRage.Multiplayer.ClientId? Client, bool Hosting) __state)
 	{
@@ -135,6 +223,7 @@ internal static class ServerAccess
 		long caller = (long)IdentityOf(sender);
 		if (IsAdminIdentity(caller)) return null;
 		if (PasteOnce.HostGate((ushort)sender.Id, story) is { } paste) return paste;
+		if (RequestRefusal(sender, caller, story) is { } request) return request;
 		var arguments = StoryArguments.GetValue(story.GetType(), Arguments);
 		if (arguments.Initiator?.GetValue(story) is IdentityId initiator && (long)initiator != caller) return "an ownership transfer in another player's name";
 		foreach (var field in arguments.Entities)
@@ -196,11 +285,48 @@ internal static class ServerAccess
 	internal static bool IsForeignCharacter(Entity entity, long identity)
 		=> entity.TryGet<CharacterLifeComponent>() is { IsAlive: true } && TeamPermissions.OwnerOf(entity) is long owner && owner != 0 && owner != identity && PlayerIdentities.IsHuman(owner);
 
+	// The players' toolbar requests: pressing a tile, and clearing one from the toolbar or the control panel.
+	private static System.Collections.Generic.IEnumerable<Type> ToolbarStories()
+	{
+		static Type? Machine(Type owner, string story) => owner.GetNestedTypes(System.Reflection.BindingFlags.NonPublic).FirstOrDefault(t => t.Name.StartsWith("<" + story + ">", StringComparison.Ordinal));
+		var toolbar = typeof(Keen.Game2.Simulation.WorldObjects.CubeBlocks.Toolbar.BlockToolbarServerComponent);
+		foreach (var machine in new[] { Machine(toolbar, "RequestActivateTile"), Machine(toolbar, "RequestClearTile"), Machine(typeof(StreamedControlPanelSessionComponent), "RequestClearTile") })
+			if (machine != null) yield return machine;
+	}
+
+	// Inside a player's toolbar request a press or edit with no known caller is refused; the server's own presses (timers,
+	// sensors, event controllers, mission steps) run outside one and stay allowed.
+	[ThreadStatic] private static int _toolbarStories;
+
+	private static void ToolbarStoryPrefix() => _toolbarStories++;
+
+	private static Exception? ToolbarStoryFinalizer(Exception? __exception)
+	{
+		_toolbarStories--;
+		return __exception;
+	}
+
+	// The co-op host's own player reaches the server in process, not through a transport that names a client.
+	private static void InProcessStoryPrefix(out (Keen.VRage.Multiplayer.ClientId? Client, bool Hosting) __state)
+	{
+		__state = (_storyClient, _hostingStory);
+		_storyClient = Keen.VRage.Multiplayer.ClientId.Server;
+		_hostingStory = false;
+	}
+
 	// Button panels and every other block toolbar: pressing or clearing a tile needs the block's use access (2.4 checked
 	// grid sharing on the host; 4.0's RequestActivateTile has no validator).
 	private static bool ToolbarPrefix(Component __instance)
 	{
-		if (!Enforcing || _storyClient is not { } client || client == Keen.VRage.Multiplayer.ClientId.Server) return true;
+		if (!Enforcing) return true;
+		if (_storyClient is not { } client)
+		{
+			if (_toolbarStories <= 0 || ToolbarUnknownOff) return true;
+			Refused++;
+			GameLog.Instance.WarnOnce("toolbar-unknown-caller", $"access: refused a toolbar request on {__instance.Entity.GetComposition()?.DebugNameShort} from an unknown caller (further ones not logged)");
+			return false;
+		}
+		if (client == Keen.VRage.Multiplayer.ClientId.Server) return true;
 		var who = IdentityOf(client);
 		if ((long)who != 0 && MayUse(null, who, __instance.Entity)) return true;
 		Refused++;

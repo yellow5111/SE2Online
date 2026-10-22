@@ -163,6 +163,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		Optional("projection block references", () => ProjectionRefs.Install(_harmony));
 		Optional("ghost block delete ownership", () => GhostBlocks.Install(_harmony));
 		Optional("resilient replication", () => ResilientReplication.Install(_harmony));
+		Optional("story closures for players' requests", () => KeenNetcode.StoryClosures.Install(_harmony));
 		Optional("SE2 Online replication engine", () => Engine.Y51Replication.Install(_harmony));
 		Optional("death ragdolls follow the server", () => Engine.ClientRagdolls.Install(_harmony));
 		Optional("corpses follow the server", () => Engine.CorpseMotion.Install(_harmony));
@@ -313,6 +314,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		if (app.Server == null) _observedWorld = null;
 		Controller?.Tick(MpClock.NowMs());
 		DedicatedRuntime.Tick(app);
+		NetSession.Current?.Client?.ApplyRulesOffers();
 		ClientWorld.Current?.MainTick(app);
 		HostWorld.Current?.MainTick(app);
 		KeenNet.ApplyLobby();
@@ -438,7 +440,10 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			try
 			{
 				_plugin.InstallMode(options);
-				if (options.Host && _observedWorld != null) HostWorld.Current?.SetWorldSession(_observedWorld);
+				// _observedWorld is cleared on any tick without a server, which a load can have after the world's init: a world
+				// loaded in single player and hosted from the pause menu is then taken from the running server.
+				var world = _observedWorld ?? App?.Server?.Entity.TryGet<WorldSessionComponent>();
+				if (options.Host && world != null) HostWorld.Current?.SetWorldSession(world);
 				ClientWorld.Current?.CaptureMainQueue("Multiplayer button");
 				if (_steamReady) NetSession.Current?.SignalSteamReady("in-game multiplayer");
 			}

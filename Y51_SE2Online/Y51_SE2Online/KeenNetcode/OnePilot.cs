@@ -44,7 +44,7 @@ internal static class OnePilot
 
 	private static void IncomingPrefix(OutOfProcessPeerTransport __instance, object dataBatch)
 	{
-		if (!AdminAccess.Hosting || !(HostWorld.Current?.OnePilot ?? true) || __instance is not Keen.VRage.Multiplayer.Transport.OutOfProcess.Server.OutOfProcessServerPeerTransport) return;
+		if (!Enabled || __instance is not Keen.VRage.Multiplayer.Transport.OutOfProcess.Server.OutOfProcessServerPeerTransport) return;
 		if (dataBatch.GetType().GetField("DataLists")?.GetValue(dataBatch) is not IList lists) return;
 		long sender = 0;
 		Dictionary<Entity, long>? pilots = null;
@@ -62,13 +62,24 @@ internal static class OnePilot
 				if (!pilots.TryGetValue(root, out long pilot)) pilots[root] = pilot = PilotOf(root);
 				if (pilot == 0 || pilot == sender) continue;
 				entries.RemoveAt(i);
-				if (Dropped++ == 0) GameLog.Instance.Info($"one pilot: identity {sender}'s flight input for a ship identity {pilot} flies is ignored (further ones counted)");
+				NoteDropped(sender, pilot);
 			}
 		}
 	}
 
+	/// <summary>The host's one-pilot setting is on in this hosted world.</summary>
+	internal static bool Enabled => AdminAccess.Hosting && (HostWorld.Current?.OnePilot ?? true);
+
+	/// <summary>Flight input: what only the ship's pilot may send.</summary>
+	internal static bool IsFlightInput(Type type) => ControlTypes.Contains(type);
+
+	internal static void NoteDropped(long sender, long pilot)
+	{
+		if (Dropped++ == 0) GameLog.Instance.Info($"one pilot: identity {sender}'s flight input for a ship identity {pilot} flies is ignored (further ones counted)");
+	}
+
 	/// <summary>Identity of the player who has sat longest in one of the ship's control seats, or 0.</summary>
-	private static long PilotOf(Entity root)
+	internal static long PilotOf(Entity root)
 	{
 		long now = MpClock.NowMs(), best = long.MaxValue, owner = 0;
 		root.Get<CubeGridComponent>().VisitAllBlocksWithComponent((SeatComponent seat) =>

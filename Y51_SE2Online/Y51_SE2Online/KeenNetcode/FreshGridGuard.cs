@@ -31,6 +31,7 @@ internal static class FreshGridGuard
 	{
 		long now = MpClock.NowMs();
 		Added.Clear();
+		if (!MpPlugin.Online) return;
 		if (MpPlugin.App?.ServerSession is not { } session) return;
 		foreach (Entity grid in session.GetEntitiesOfType<CubeGridComponent>())
 		{
