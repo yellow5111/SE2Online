@@ -131,6 +131,21 @@ internal sealed partial class NetSession
 		}
 	}
 
+	private static LocalSessionID ThisPcHost() => new(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, MpMenu.Settings?.ListenPort ?? MpOptions.DefaultIpPort));
+
+	private static bool IsThisPc(System.Net.IPAddress address)
+	{
+		if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+		try
+		{
+			foreach (var nic in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+				foreach (var unicast in nic.GetIPProperties().UnicastAddresses)
+					if (unicast.Address.Equals(address)) return true;
+		}
+		catch (System.Net.NetworkInformation.NetworkInformationException) { }
+		return false;
+	}
+
 	/// <summary>The Keen session to join: a dedicated server's address, or the hosting friend's Steam lobby.</summary>
 	private GameSessionID? KeenTarget()
 	{
@@ -138,7 +153,8 @@ internal sealed partial class NetSession
 		if (_o.KeenSession is { } chosen) return chosen;
 		if (_o.JoinCode is { } code)
 		{
-			if (KeenNet.FindLobby(code) is CSteamID lobby) return new SteamLobbyID(lobby);
+			if (KeenNet.FindLobby(code) is CSteamID lobby)
+				return SteamMatchmaking.GetLobbyOwner(lobby).m_SteamID == _localIdentity ? ThisPcHost() : new SteamLobbyID(lobby);
 			_codeSearchSinceMs = _codeSearchSinceMs == 0 ? MpClock.NowMs() : _codeSearchSinceMs;
 			if (MpClock.NowMs() - _codeSearchSinceMs > 20000)
 			{
@@ -151,7 +167,10 @@ internal sealed partial class NetSession
 		// second instance joining over Steam drops the first one's connection.
 		if (_o.JoinIp is { } ip)
 		{
-			if (System.Net.IPAddress.IsLoopback(ip.Address)) return new LocalSessionID(ip);
+			// This PC's own LAN address too: over Steam an extra instance is the account itself, so it took the host's
+			// identity and the host's character (both games drove one body and neither saw the other).
+			if (System.Net.IPAddress.IsLoopback(ip.Address) || IsThisPc(ip.Address) && System.IO.File.Exists(LocalPeers.KeyPath(ip.Port)))
+				return new LocalSessionID(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, ip.Port));
 			// Dedicated servers take IP joins on the game's own socket; a co-op host listens through SE2 Online's.
 			// The game finds the server's Steam id through a server query to the address it joins, then connects by that id.
 			var query = ServerPinger.QueryEndpoint(ip);
@@ -160,7 +179,7 @@ internal sealed partial class NetSession
 		}
 		if (_joinTarget == 0) return null;
 		// Steam will not connect this account to itself: another instance of it hosts on this PC.
-		if (_joinTarget == _localIdentity) return new LocalSessionID(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, MpMenu.Settings?.ListenPort ?? MpOptions.DefaultIpPort));
+		if (_joinTarget == _localIdentity) return ThisPcHost();
 		if (SteamFriends.GetFriendGamePlayed(new CSteamID(_joinTarget), out FriendGameInfo_t game) && game.m_steamIDLobby.IsValid())
 		{
 			return new SteamLobbyID(game.m_steamIDLobby);

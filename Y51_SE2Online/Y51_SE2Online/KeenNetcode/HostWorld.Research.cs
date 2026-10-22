@@ -12,12 +12,13 @@ using Y51_SE2Online.Sync;
 
 namespace Y51_SE2Online.SyncEngine;
 
-// Shared research (the default): every player reads and writes the world owner's progression, colonization, contracts
-// and credits, as on 2.4. Each player's record list and the per-player data the game replicates hold the owner's own
+// Shared research (the default): every player reads and writes the world owner's progression, colonization and credits,
+// as on 2.4. Contracts are not in the list: SE2 4.0 already shares accepted and finished contracts between all players
+// (HostContractStorageSessionComponent), and its per-player record only holds which contracts that player focuses. Each player's record list and the per-player data the game replicates hold the owner's own
 // objects, so clients find the shared research under their own identity without any change on their side.
 internal sealed partial class HostWorld
 {
-	private static readonly Type[] SharedResearchTypes = { typeof(PlayerProgressionData), typeof(ColonizationProgressData), typeof(ContractPerPlayerData), typeof(PlayerCreditsData) };
+	private static readonly Type[] SharedResearchTypes = { typeof(PlayerProgressionData), typeof(ColonizationProgressData), typeof(PlayerCreditsData) };
 
 	private ResearchMode _research = ResearchMode.Shared;
 

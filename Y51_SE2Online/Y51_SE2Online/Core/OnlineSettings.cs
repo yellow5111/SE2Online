@@ -77,6 +77,10 @@ public sealed class OnlineSettings
     public double StreamingRadiusMeters { get; set; }
     /// <summary>Experimental: mirrors debug-menu water to joiners. Costs bandwidth and performance; not meant for full-time use yet.</summary>
     public bool WaterSync { get; set; }
+    /// <summary>Hosting: each player's own game predicts their character on foot and by jetpack, so it responds at once at any ping and while the server lags; the server still simulates it from the player's inputs and has the last word.</summary>
+    public bool ClientMovement { get; set; } = true;
+    /// <summary>Hosting: SE2 Online's own replication engine carries the world to players (ordering, lanes, motion timing); off falls back to the game's own netcode. Players need the same setting from the host, which they get on joining.</summary>
+    public bool OwnReplication { get; set; } = true;
     /// <summary>Hosting: players see the placement outline of anyone building near them.</summary>
     public bool BuildGhosts { get; set; } = true;
     /// <summary>Hosting: the respawn ships players may choose (Pathfinder, ...); empty offers every ship.</summary>
@@ -228,6 +232,8 @@ public sealed class OnlineSettings
         options.SunPeriodMinutes = SunPeriodMinutes;
         options.StreamingRadiusMeters = StreamingRadiusMeters;
         options.WaterSync = WaterSync;
+        options.ClientMovement = ClientMovement;
+        options.OwnReplication = OwnReplication;
         options.VoiceRadiusMeters = VoiceRadiusMeters;
         options.UsageMultipliers = UsageMultipliers;
         options.InventorySizes = InventorySizes;

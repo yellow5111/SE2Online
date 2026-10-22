@@ -52,6 +52,30 @@ internal static class ServerAccess
 		var inventoryList = typeof(Keen.Game2.Simulation.StreamedUI.Terminal.Inventories.InventoryListModelStreamed);
 		Patch(harmony, "inventory lists", AccessTools.Method(inventories, "Attach", new[] { typeof(Entity), inventoryList, typeof(ReplicationEventContext) }), prefix: nameof(InventoryListPrefix));
 		Patch(harmony, "inventory list entries", AccessTools.Method(inventories, "AddEntity"), prefix: nameof(InventoryEntryPrefix));
+		Patch(harmony, "mission ownership", AccessTools.Method(typeof(Keen.Game2.Simulation.GameSystems.Missions.Triggers.Actions.SetEntityOwnershipActionComponent), "Activate"), prefix: nameof(MissionOwnerPrefix));
+	}
+
+	// A mission step that hands a ship or crate "to the player" gives it to SE2's first player identity: the co-op host, or
+	// on a dedicated server the server's own identity, which no player is, so nobody could use what the quest gave out.
+	// In an online world it goes to the player who set the step off, else to the first player who is connected.
+	private static bool MissionOwnerPrefix(Keen.Game2.Simulation.GameSystems.Missions.Triggers.ITriggerContext context,
+		Keen.Game2.Simulation.GameSystems.Missions.Triggers.Actions.SetEntityOwnershipActionObjectBuilder ____ob,
+		Keen.Game2.Simulation.GameSystems.Missions.MissionSessionComponent ____missions, IdentitiesSessionComponent ____identities, OwnershipSessionComponent ____ownership)
+	{
+		if (!Enforcing || ____ob.TargetOwnership != Keen.Game2.Simulation.GameSystems.Missions.Triggers.Actions.SetEntityOwnershipActionComponent.OwnershipType.Player) return true;
+		var entity = ____missions.TryGetEntityWithId(____ob.EntityId);
+		var ownership = entity?.TryGet<OwnershipComponent>();
+		if (entity == null || ownership == null) return true;
+		IdentityId who = default;
+		if (context.TryGetValue("TriggeringEntity") is Entity trigger && trigger.TryGet<OwnershipComponent>()?.Owner is { } by && ____identities.TryGetClientFromIdentity(by) != null) who = by;
+		if (!who.IsValid()) who = ____identities.GetPlayerIdentityIds().FirstOrDefault(i => ____identities.TryGetClientFromIdentity(i) != null);
+		if (!who.IsValid()) return true;
+		GameLog.Instance.Info($"access: mission gives {entity.GetComposition()?.DebugNameShort} to player identity {(long)who}");
+		if ((long)ownership.Owner == (long)who || !____ownership.TryTransferOwnership(entity, who) || !____ob.ApplyToSubgrids) return false;
+		if (entity.TryGet<CubeGridComponent>() is { } grid)
+			foreach (var sub in grid.GridGraphHandler.GetAllConnectedEntities(entity))
+				if (sub != entity) ____ownership.TryTransferOwnership(sub, who);
+		return false;
 	}
 
 	private static void Patch(Harmony harmony, string what, System.Reflection.MethodBase? target, string? prefix = null, string? postfix = null, string? finalizer = null)
@@ -238,6 +262,9 @@ internal static class ServerAccess
 			// No admin or host exemption: only a player's own access bypass (Admin Panel) lifts the rules. A request with no
 			// player behind it (the game's own server stories) is not a player's use.
 			if ((long)identity == 0 || AccessBypass.IsOn((long)identity)) return true;
+			// NPC and unowned grids keep SE2's own rule, which is no check: stations' trade terminals, encounter loot and
+			// vehicles are there to be used, and SE2's owner-only answer refused them all.
+			if (!PlayerIdentities.IsHuman(TeamPermissions.OwnerOf(entity))) return true;
 			var permissions = MpPlugin.App?.ServerSession?.SessionComponents.TryGet<PermissionsSessionComponent>();
 			if (permissions == null) return true;
 			if (entity.TryGet<CubeBlockComponent>() is { } block)
@@ -262,11 +289,24 @@ internal static class ServerAccess
 	private static bool MayUseGrid(PermissionsSessionComponent permissions, IdentityId identity, Entity grid)
 		=> grid.TryGet<OwnershipComponent>() == null || permissions.IsOwner(grid, identity) || permissions.CanPlaceBlock(grid, identity);
 
+	// Not GetIdentityFromClient: it throws for a request the server makes itself (ClientId 0), such as the item transfer
+	// inside every trade at a trade terminal, and the throw ended the server.
 	private static IdentityId IdentityOf(ReplicationEventContext context)
-		=> context.Session.SessionComponents.Get<IdentitiesSessionComponent>().GetIdentityFromClient(context.ClientId);
+		=> context.Session.SessionComponents.Get<IdentitiesSessionComponent>()._clientIds.TryGetValue(context.ClientId, out var identity) ? identity : default;
+
+	/// <summary>Our refusal. On the co-op host the host's own request fails in-process with the raw exception (a player gets a
+	/// remote fault), and the game's screens await these in async void methods, so a refusal reached the crash handler.</summary>
+	internal sealed class AccessDeniedException(string message) : Exception(message);
+
+	private static long _localRefusedMs = long.MinValue / 2;
+
+	/// <summary>This game's own request was refused in the last few seconds (SE2 then throws its own "No Entity found").</summary>
+	internal static bool RefusedLocalRecently => MpClock.NowMs() - System.Threading.Interlocked.Read(ref _localRefusedMs) < 3000;
 
 	private static void Note(ReplicationEventContext context, Entity entity)
 	{
+		if (context.IsLocal || (long)IdentityOf(context) is var who && who != 0 && who == (long)context.Session.SessionComponents.Get<IdentitiesSessionComponent>().LocalIdentity)
+			System.Threading.Interlocked.Exchange(ref _localRefusedMs, MpClock.NowMs());
 		Refused++;
 		GameLog.Instance.Info($"access: refused identity {(long)IdentityOf(context)} on {entity.GetComposition()?.DebugNameShort ?? entity.ToString()} (no access)");
 	}
@@ -274,7 +314,7 @@ internal static class ServerAccess
 	private static Exception Refuse(ReplicationEventContext context, Entity entity)
 	{
 		Note(context, entity);
-		return context.Throw("Access denied");
+		return new AccessDeniedException("Access denied");
 	}
 
 	// A refused block reads as "not there": the screen skips it instead of the request failing.

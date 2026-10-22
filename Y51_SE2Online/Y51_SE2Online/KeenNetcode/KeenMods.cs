@@ -33,25 +33,35 @@ internal static class KeenMods
 	/// <summary>Asks for the mod list of a game on this PC: an 8-byte all-ones account id instead of a player's.</summary>
 	public const ulong LocalQuery = ulong.MaxValue;
 
-	public static string Encode(IReadOnlyList<WorldMod> mods)
+	// After the mod list: the host's world runs SE2's missions and contracts. Older players stop reading at the list.
+	private const byte MissionsMark = 0x4D;
+
+	/// <summary>Whether the text read last (the server a player is about to join) runs missions.</summary>
+	public static bool LastMissions { get; private set; }
+
+	public static string Encode(IReadOnlyList<WorldMod> mods, bool missions = false)
 	{
-		if (mods.Count == 0) return "";
+		if (mods.Count == 0 && !missions) return "";
 		var w = new WireWriter();
 		WorldMods.Write(w, mods);
+		if (missions) w.U8(MissionsMark);
 		return Convert.ToBase64String(w.ToArray());
 	}
 
 	public static List<WorldMod> Decode(string text)
 	{
+		LastMissions = false;
 		if (string.IsNullOrEmpty(text)) return new List<WorldMod>();
 		var r = new WireReader(Convert.FromBase64String(text));
-		return WorldMods.Read(ref r);
+		var mods = WorldMods.Read(ref r);
+		LastMissions = r.Remaining >= 1 && r.U8() == MissionsMark;
+		return mods;
 	}
 
 	/// <summary>Main thread or server thread: keeps the published list on the hosted lobby or the game server's rules.</summary>
-	public static void Publish(IReadOnlyList<WorldMod> mods, bool dedicated)
+	public static void Publish(IReadOnlyList<WorldMod> mods, bool dedicated, bool missions)
 	{
-		string text = Encode(mods);
+		string text = Encode(mods, missions);
 		Current = text;
 		if (text == _published) return;
 		try

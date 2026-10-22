@@ -39,6 +39,36 @@ internal static class TurretRelations
         __result = RelationTable.MayFight(_table.Of(a, b), PlayersHostile) ? RelationState.Hostile : RelationState.NonHostile;
     }
 
+    public static long Retargeted;
+
+    /// <summary>
+    /// A turret whose only reachable shot is blocked by its own grid ("SelfBlocked", hold fire) keeps that target for good:
+    /// SE2 re-checks only the current target's sight and switches only for priority targets. Its first pick gives up after a
+    /// few sight checks per frame and falls back to such a target, and in multiplayer the nearest hostile is often a player
+    /// standing inside or behind the base, so player turrets held fire at them while an NPC in plain sight went unshot.
+    /// While held, the turret looks for a target it can see at its idle check rate.
+    /// </summary>
+    public static void InstallRetarget(Harmony harmony)
+        => harmony.Patch(AccessTools.Method(typeof(AutoTargetingComponent), "AlignToTarget"), prefix: new HarmonyMethod(typeof(TurretRelations), nameof(AlignPrefix)));
+
+    private static void AlignPrefix(AutoTargetingComponent __instance)
+    {
+        if (!PvpRules.Active || __instance._targetLineOfSight != AutoTargetingComponent.LineOfSightState.SelfBlocked || !__instance.IsPowered || __instance.IsControlling
+            || !__instance.CanCheckTarget(isIdle: true)) return;
+        Entity held = __instance._target.Entity;
+        __instance._lastTargetCheckTime = __instance._gameTime.CurrentGameTime;
+        // Only a target it can see replaces the held one; SE2's own pick would fall back to another held target and flip.
+        var candidates = __instance._gridTargeting.PotentialTargets;
+        for (int i = 0; i < candidates.Count && i < __instance._coreConfiguration.MaxNonPriorityTargetsToCheck && __instance._targetingSession.CanCheckTargets(); i++)
+        {
+            Entity candidate = candidates[i];
+            if (candidate == held || __instance.VerifyRules(candidate) != AutoTargetingComponent.LineOfSightState.Clear) continue;
+            __instance.TryTarget(candidate, AutoTargetingComponent.LineOfSightState.Clear);
+            System.Threading.Interlocked.Increment(ref Retargeted);
+            return;
+        }
+    }
+
     /// <summary>Publishes faction membership and treaties; returns true when they changed so turrets need re-evaluating.</summary>
     public static bool SetRelations(IEnumerable<Sync.OnlineFaction> factions, IEnumerable<Sync.FactionPact> pacts)
     {

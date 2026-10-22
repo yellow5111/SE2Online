@@ -116,6 +116,18 @@ internal sealed class DirectIpPeers : IDisposable
 	// Steam's IP sockets take 512 KiB per message too; FragmentLink keeps each frame under that.
 	private bool SendFrame(GameServiceUser user, byte channel, MessageReliability reliability, byte[] fragment)
 	{
+#if !PULSAR
+		if (FramedSession.LagMs > 0)
+		{
+			var copy = (byte[])fragment.Clone();
+			return FramedSession.Later(() => SendNow(user, channel, reliability, copy));
+		}
+#endif
+		return SendNow(user, channel, reliability, fragment);
+	}
+
+	private bool SendNow(GameServiceUser user, byte channel, MessageReliability reliability, byte[] fragment)
+	{
 		lock (_sync)
 		{
 			if (!_conns.TryGetValue(user, out uint conn)) return false;

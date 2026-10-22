@@ -50,6 +50,10 @@ public sealed class DedicatedConfig
     public string DefinitionDumpFile { get; set; } = "native-definitions.json";
     public string ResumeFile { get; set; } = "dedicated-state.json";
     public string CommandFile { get; set; } = "dedicated-command.txt";
+    /// <summary>Headless: how far behind the wall clock the server still runs missed ticks back to back (ms); 0 keeps Keen's 83 ms.</summary>
+    public int CatchUpMs { get; set; } = 1000;
+    /// <summary>Headless: the game's worker threads; 0 keeps the game's own count (up to 15).</summary>
+    public int WorkerThreads { get; set; }
     /// <summary>Opt-in JSONL server frame and network profile (relative to this file's folder); empty is off.</summary>
     public string ProfileFile { get; set; } = "";
     [JsonIgnore] public string ConfigPath { get; private set; }
@@ -106,6 +110,8 @@ public sealed class DedicatedConfig
             throw new ArgumentException("WorldName must be a valid native save name.");
         if (config.SaveIntervalSeconds < 0 || (config.SaveIntervalSeconds > 0 && config.SaveIntervalSeconds < 30))
             throw new ArgumentException("SaveIntervalSeconds must be 0 or at least 30.");
+        if (config.CatchUpMs is < 0 or > 10_000) throw new ArgumentException("CatchUpMs must be between 0 and 10000.");
+        if (config.WorkerThreads is < 0 or > 256) throw new ArgumentException("WorkerThreads must be 0 (the game's own count) or between 1 and 256.");
         if (config.ShutdownCountdownSeconds is < 0 or > 600)
             throw new ArgumentException("ShutdownCountdownSeconds must be between 0 and 600.");
         config.AutoRestart.Validate();

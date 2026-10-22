@@ -35,6 +35,14 @@ public sealed partial class HostSession
 		if (peer.HasValue) _t.Send(peer.Value, Channel.Control, SocialMessage.Encode(SyncMsg.FightLock, new FightLockMessage(locked)));
 	}
 
+	/// <summary>Where the server has a player's own character: an ack every tick (unreliable) or a resync (reliable).</summary>
+	public void SendOwnMotion(ushort clientId, OwnPose pose, bool reliable)
+	{
+		PeerId? peer;
+		lock (_sync) peer = _players.Values.FirstOrDefault(p => p.ClientId == clientId)?.Peer;
+		if (peer.HasValue) _t.Send(peer.Value, reliable ? Channel.Control : Channel.State, pose.Encode());
+	}
+
 	/// <summary>A system chat line for one player; the hosting player's goes straight into the local chat log.</summary>
 	public void GpsNotice(ushort clientId, string text)
 	{

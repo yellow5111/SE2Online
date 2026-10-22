@@ -17,8 +17,64 @@ internal sealed class FramedSession : IPeerToPeerSession
 	public FramedSession(IPeerToPeerSession inner, IMpLog log, Func<GameServiceUser, bool>? admitted = null)
 	{
 		Inner = inner;
-		_link = new FragmentLink<GameServiceUser>((user, channel, reliability, frame) => inner.SendMessage(user, frame, channel, reliability), log, CloseConnection, admitted);
+		_link = new FragmentLink<GameServiceUser>((user, channel, reliability, frame) => Send(inner, user, frame, channel, reliability), log, CloseConnection, admitted);
 	}
+
+	private static bool Send(IPeerToPeerSession inner, GameServiceUser user, byte[] frame, byte channel, MessageReliability reliability)
+	{
+#if !PULSAR
+		if (LagMs > 0)
+		{
+			var copy = (byte[])frame.Clone();
+			return Later(() => inner.SendMessage(user, copy, channel, reliability));
+		}
+#endif
+		return inner.SendMessage(user, frame, channel, reliability);
+	}
+
+#if !PULSAR
+	private static int _lagMs;
+
+	/// <summary>Test rig (-y51online:fakejitter:&lt;every ms&gt;:&lt;hold ms&gt;, with fakelag): every so often this game's sends
+	/// are held back for a moment and leave together, a network hiccup.</summary>
+	internal static long JitterEveryMs, JitterHoldMs;
+
+	/// <summary>Test rig: runs <paramref name="send"/> on the fake-lag thread after the lag (false: no lag, send now).
+	/// The direct IP and loopback connections of same-PC rigs take it too.</summary>
+	internal static bool Later(Action send)
+	{
+		if (_lagMs <= 0) return false;
+		long now = MpClock.NowMs(), due = now + _lagMs;
+		if (JitterEveryMs > 0 && now % JitterEveryMs is long phase && phase < JitterHoldMs) due += JitterHoldMs - phase;
+		Lagged.Add((due, send));
+		return true;
+	}
+
+	private static readonly System.Collections.Concurrent.BlockingCollection<(long Due, Action Send)> Lagged = new();
+
+	/// <summary>
+	/// Test rig (-y51online:fakelag:&lt;ms&gt;): everything this game sends on the game's connection leaves this much later,
+	/// in order. Steam's own fake lag setting never reached the game's connection.
+	/// </summary>
+	internal static int LagMs
+	{
+		get => _lagMs;
+		set
+		{
+			if (_lagMs == 0 && value > 0)
+				new System.Threading.Thread(() =>
+				{
+					foreach (var (due, send) in Lagged.GetConsumingEnumerable())
+					{
+						long wait = due - MpClock.NowMs();
+						if (wait > 0) System.Threading.Thread.Sleep((int)wait);
+						send();
+					}
+				}) { IsBackground = true, Name = "Y51 fake lag" }.Start();
+			_lagMs = value;
+		}
+	}
+#endif
 
 	public event Action<GameServiceUser> ConnectionRequested
 	{

@@ -371,6 +371,7 @@ public sealed partial class HostSession : IStorySink
 			case SyncMsg.AdminRequest:
 			case SyncMsg.GpsShare:
 			case SyncMsg.Punch:
+			case SyncMsg.OwnMotion:
 			case SyncMsg.ServerInfo:
 			case SyncMsg.VoiceUp:
 			case SyncMsg.BuildGhost:
@@ -381,6 +382,12 @@ public sealed partial class HostSession : IStorySink
 				break;
 			case SyncMsg.RosterSync:
 				if (data.Length == 2) OnFullRequested(peer, data[1]);
+				break;
+			case SyncMsg.RulesAck:
+				OnRulesAck(peer, data);
+				break;
+			case SyncMsg.EngineUp:
+				if (StatusOf(peer) == ClientStatus.Synced) EngineUpstream?.Invoke(peer, data);
 				break;
 			case SyncMsg.ClientStatus:
 			{
@@ -732,6 +739,9 @@ public sealed partial class HostSession : IStorySink
 			break;
 		case SyncMsg.Punch:
 			if (client.Status == ClientStatus.Synced && data.Length <= 64) _world.OnPunch(client.Player.ClientId, SocialMessage.Decode<PunchRequest>(data).Target);
+			break;
+		case SyncMsg.OwnMotion:
+			if (client.Status == ClientStatus.Synced && _o.Settings.ClientMovement) _world.OnOwnMotion(client.Player.ClientId, data);
 			break;
 		case SyncMsg.VoiceUp:
 			HandleVoice(client, data);
@@ -1346,6 +1356,7 @@ public sealed partial class HostSession : IStorySink
 
 	private void RequestCapture(RemoteClient c)
 	{
+		if (OfferRules(c)) return;
 		c.Status = ClientStatus.CaptureRequested;
 		PlayerRecord player = c.Player;
 		if (player != null && _o.Settings.Identities)
@@ -1408,7 +1419,7 @@ public sealed partial class HostSession : IStorySink
 			client.Status = ClientStatus.Synced;
 			client.SyncedMs = _clock();
 			firstLifeSeq = client.NextLifeSeq;
-			client.NextLifeSeq += (uint)Math.Max(1, parts);
+			client.NextLifeSeq += (uint)Math.Max(0, parts);
 			_syncedCount++;
 			name = client.Name;
 		}
@@ -1783,6 +1794,27 @@ public sealed partial class HostSession : IStorySink
 		{
 			_log.Warn($"sync(host): disconnecting {peer}: {reason}");
 			_t.Disconnect(peer, 1000, reason);
+		}
+	}
+
+	/// <summary>Network thread: a player's replication frame for the engine transport (Engine/Y51ServerTransport).</summary>
+	public static Action<PeerId, byte[]>? EngineUpstream;
+
+	/// <summary>A replication frame or state message to one player (any thread); false if it is not synced.</summary>
+	public bool SendEngine(PeerId peer, byte[] message, bool state)
+	{
+		lock (_sync)
+		{
+			if (!_clients.TryGetValue(peer, out RemoteClient client) || client.Status != ClientStatus.Synced) return false;
+			Channel channel = state ? Channel.State : message.Length > SyncProtocol.ControlLifecycleLimit ? Channel.Bulk : Channel.Control;
+			_t.Send(peer, channel, message);
+			if (state) client.StateBytes += message.Length;
+			else
+			{
+				client.LifecycleMessages++;
+				client.LifecycleBytes += message.Length;
+			}
+			return true;
 		}
 	}
 

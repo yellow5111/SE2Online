@@ -21,42 +21,74 @@ internal static class KeenGuards
 {
 	public static void Install(Harmony harmony)
 	{
-		var wheelAudio = AccessTools.Method(AccessTools.Inner(typeof(DrivingWheelAudioComponent), "AudioAdapter"), "TryGetEffectDefinition");
-		harmony.Patch(wheelAudio, finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(WheelAudioFinalizer)));
-		harmony.Patch(AccessTools.Method(typeof(DiscoveriesServerSessionComponent), nameof(DiscoveriesServerSessionComponent.TryIncreaseDiscoveryState)),
-			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(DiscoveryFinalizer)));
-		harmony.Patch(AccessTools.Method(typeof(HavokSessionComponent), "OnUpdateBodyFlags"), prefix: new HarmonyMethod(typeof(KeenGuards), nameof(BodyFlagsPrefix)));
-		harmony.Patch(AccessTools.Method(typeof(PlanetFloraSectorPhysicsComponent), "Init", new[] { typeof(PlanetFloraSectorPhysicsComponentObjectBuilder) }),
-			transpiler: new HarmonyMethod(typeof(KeenGuards), nameof(ServerOnlyDataTranspiler)));
-		harmony.Patch(AccessTools.Method(typeof(FloraEntityPhysicsComponent), "Init", new[] { typeof(Keen.VRage.Game.Components.Physics.ScalablePhysicsObjectBuilder) }),
-			transpiler: new HarmonyMethod(typeof(KeenGuards), nameof(ServerOnlyDataTranspiler)));
-		var reorder = AccessTools.Method(typeof(HavokLargeWorldManager), "GetEntityReorderEntryIndex",
-			new[] { typeof(DEntity), typeof(BufferReference<HavokLargeWorldManager.EntityReorderEntry>), typeof(System.Collections.Generic.Dictionary<DEntity, int>) });
-		harmony.Patch(reorder, prefix: new HarmonyMethod(typeof(KeenGuards), nameof(ReorderEntryPrefix)));
-		harmony.Patch(AccessTools.Method(typeof(HavokLargeWorldManager), nameof(HavokLargeWorldManager.SetBodyMotionType)),
-			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(MotionTypePrefix)), finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(MotionTypeFinalizer)));
-		harmony.Patch(AccessTools.Method(typeof(HavokLargeWorldManager), "DestroyBody", new[] { typeof(DEntity), typeof(bool) }),
-			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(DestroyBodyPrefix)));
-		harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Steam.EngineComponents.SteamSocialInteractionServiceComponent), "GetDisplayName"),
-			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(DisplayNameFinalizer)));
-		harmony.Patch(AccessTools.Method(AccessTools.TypeByName("Keen.VRage.Library.Threading.SkipWaitMonitor"), "ProcessException"),
-			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(UnawaitedExceptionPrefix)));
-		harmony.Patch(AccessTools.Method(AccessTools.TypeByName("Keen.Game2.Client.UI.TerminalScreen.ControlPanel.ControlPanelTreeViewModel"), "SortGrids"),
-			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(SortGridsPrefix)));
+		int installed = 0, total = 0;
+		// Each guard installs on its own: a method this game build renamed or overloaded turns off that guard only.
+		void Guard(string name, Action patch)
+		{
+			total++;
+			try { patch(); installed++; }
+			catch (Exception ex) { GameLog.Instance.Warn($"keen guards: '{name}' not installed for this game build ({ex.GetType().Name}: {ex.Message.Split('\n')[0]})"); }
+		}
+		Guard("wheel audio", () => harmony.Patch(AccessTools.Method(AccessTools.Inner(typeof(DrivingWheelAudioComponent), "AudioAdapter"), "TryGetEffectDefinition"),
+			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(WheelAudioFinalizer))));
+		Guard("discoveries", () => harmony.Patch(AccessTools.Method(typeof(DiscoveriesServerSessionComponent), nameof(DiscoveriesServerSessionComponent.TryIncreaseDiscoveryState)),
+			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(DiscoveryFinalizer))));
+		Guard("body flags", () => harmony.Patch(AccessTools.Method(typeof(HavokSessionComponent), "OnUpdateBodyFlags"), prefix: new HarmonyMethod(typeof(KeenGuards), nameof(BodyFlagsPrefix))));
+		Guard("flora sector server-only data", () => harmony.Patch(AccessTools.Method(typeof(PlanetFloraSectorPhysicsComponent), "Init", new[] { typeof(PlanetFloraSectorPhysicsComponentObjectBuilder) }),
+			transpiler: new HarmonyMethod(typeof(KeenGuards), nameof(ServerOnlyDataTranspiler))));
+		Guard("flora entity server-only data", () => harmony.Patch(AccessTools.Method(typeof(FloraEntityPhysicsComponent), "Init", new[] { typeof(Keen.VRage.Game.Components.Physics.ScalablePhysicsObjectBuilder) }),
+			transpiler: new HarmonyMethod(typeof(KeenGuards), nameof(ServerOnlyDataTranspiler))));
+		Guard("havok reorder entry", () => harmony.Patch(AccessTools.Method(typeof(HavokLargeWorldManager), "GetEntityReorderEntryIndex",
+			new[] { typeof(DEntity), typeof(BufferReference<HavokLargeWorldManager.EntityReorderEntry>), typeof(System.Collections.Generic.Dictionary<DEntity, int>) }),
+			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(ReorderEntryPrefix))));
+		Guard("motion type", () =>
+		{
+			harmony.Patch(AccessTools.Method(typeof(HavokLargeWorldManager), nameof(HavokLargeWorldManager.SetBodyMotionType)),
+				prefix: new HarmonyMethod(typeof(KeenGuards), nameof(MotionTypePrefix)), finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(MotionTypeFinalizer)));
+			harmony.Patch(AccessTools.Method(typeof(HavokSessionComponent), "ProcessMotionTypeChanges"), postfix: new HarmonyMethod(typeof(KeenGuards), nameof(MotionChangesPostfix)));
+		});
+		Guard("destroy body", () => harmony.Patch(AccessTools.Method(typeof(HavokLargeWorldManager), "DestroyBody", new[] { typeof(DEntity), typeof(bool) }),
+			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(DestroyBodyPrefix))));
+		Guard("steam display name", () => harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Steam.EngineComponents.SteamSocialInteractionServiceComponent), "GetDisplayName"),
+			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(DisplayNameFinalizer))));
+		Guard("replay signals", () => harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Multiplayer.Transport.InProcess.InProcessServerPeerTransportSessionComponent), "ReplaySignals"),
+			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(ReplaySignalsFinalizer))));
+		Guard("unawaited exception", () => harmony.Patch(AccessTools.Method(AccessTools.TypeByName("Keen.VRage.Library.Threading.SkipWaitMonitor"), "ProcessException"),
+			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(UnawaitedExceptionPrefix))));
+		Guard("sort grids", () => harmony.Patch(AccessTools.Method(AccessTools.TypeByName("Keen.Game2.Client.UI.TerminalScreen.ControlPanel.ControlPanelTreeViewModel"), "SortGrids"),
+			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(SortGridsPrefix))));
 		if (AccessTools.TypeByName("Keen.VRage.Render12.SceneSystem.SceneManager") is { } sceneManager)
 			foreach (var method in AccessTools.GetDeclaredMethods(sceneManager))
 				if (method.Name.StartsWith("IRootEntity_", StringComparison.Ordinal) && !method.IsAbstract && !method.ContainsGenericParameters)
-					harmony.Patch(method, finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(RenderEntityFinalizer)));
-		harmony.Patch(AccessTools.Method(AccessTools.TypeByName("Keen.Game2.Client.GameSystems.CameraSystems.CameraSystemComponent"), "TrySyncCameraData"),
-			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(CameraSyncFinalizer)));
-		harmony.Patch(AccessTools.Method(AccessTools.TypeByName("Keen.Game2.Client.WorldObjects.Shared.Movement.Effects.GridThrustEffectsComponent"), "UnsubscribeBlock"),
-			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(ThrustUnsubscribePrefix)));
-		harmony.Patch(AccessTools.Method(typeof(Keen.Game2.ReconnectComponent), "UnsubscribeFromNetworking"),
-			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(UnsubscribeNetworkingPrefix)));
-		harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Core.Platform.CrashReporting.CrashHandler), "HandleUnobservedException"),
-			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(RefusedRequestPrefix)));
-		harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Multiplayer.Replications.OutOfProcess.ReplicationEntitySerializationContext), "GetEntityId"),
-			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(EntityIdFinalizer)));
+					Guard("render entity " + method.Name, () => harmony.Patch(method, finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(RenderEntityFinalizer))));
+		Guard("camera sync", () => harmony.Patch(AccessTools.Method(AccessTools.TypeByName("Keen.Game2.Client.GameSystems.CameraSystems.CameraSystemComponent"), "TrySyncCameraData"),
+			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(CameraSyncFinalizer))));
+		Guard("thrust unsubscribe", () => harmony.Patch(AccessTools.Method(AccessTools.TypeByName("Keen.Game2.Client.WorldObjects.Shared.Movement.Effects.GridThrustEffectsComponent"), "UnsubscribeBlock"),
+			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(ThrustUnsubscribePrefix))));
+		Guard("unsubscribe networking", () => harmony.Patch(AccessTools.Method(typeof(Keen.Game2.ReconnectComponent), "UnsubscribeFromNetworking"),
+			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(UnsubscribeNetworkingPrefix))));
+		Guard("refused request", () => harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Core.Platform.CrashReporting.CrashHandler), "HandleUnobservedException"),
+			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(RefusedRequestPrefix))));
+		Guard("entity id", () => harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Multiplayer.Replications.OutOfProcess.ReplicationEntitySerializationContext), "GetEntityId"),
+			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(EntityIdFinalizer))));
+		Guard("support contacts", () => harmony.Patch(AccessTools.Method(typeof(HavokSessionComponent), "UpdateSupportDataFromCharacters"),
+			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(SupportContactsFinalizer))));
+		// Recharge is also the name of the static job stub around it; the instance one reads the seat's ownership.
+		Guard("seat recharge", () => harmony.Patch(System.Linq.Enumerable.Single(AccessTools.GetDeclaredMethods(AccessTools.TypeByName("Keen.Game2.Simulation.WorldObjects.Characters.CharacterChargeStatFromSeatResourceComponent")), m => m.Name == "Recharge" && !m.IsStatic),
+			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(SeatRechargeFinalizer))));
+		GameLog.Instance.Info($"keen guards: {installed} of {total} installed");
+	}
+
+	// A character's controller can still hold a contact with a body that was destroyed this frame (a corpse or grid piece
+	// removed under its feet); reading that body's freed owner handle threw and the game died. The character has no
+	// contacts for this one frame and the controller drops the stale one on its next step.
+	private static Exception? SupportContactsFinalizer(Exception? __exception, ref Keen.VRage.Physics.Character.CharacterSupportData support)
+	{
+		if (__exception is not InvalidOperationException) return __exception;
+		support.CharacterContacts.Clear();
+		support.AnyBreachedContacts = false;
+		GameLog.Instance.WarnOnce("support-contact", "keen guards: a character stood on a body removed this frame; its contacts were skipped for one frame");
+		return null;
 	}
 
 	// A client's static-object tree can keep a body whose static data never landed (Keen's command-buffer replay drops a
@@ -155,13 +187,44 @@ internal static class KeenGuards
 	// Same gap for a motion change: a grid that just arrived (a respawn lander placed and held on its site) can be switched
 	// static or dynamic before this client's Havok holds its body; reading that body crashed the client. The change is
 	// skipped; the body is built with the grid's current motion when it is added.
-	private static unsafe bool MotionTypePrefix(HavokLargeWorldManager __instance, DEntity body)
+	private static unsafe bool MotionTypePrefix(HavokLargeWorldManager __instance, DEntity body, BodyArgs.Motion motionType)
 	{
 		var context = new DEntityContext(__instance._session.Scene, body);
+		// A body that already has its Havok proxy but no cluster yet (a lander's grids arriving while the server switches
+		// them dynamic, or back to static as the lander settles): the switch reads the cluster, after it took a static body
+		// out of the static tree, so it threw half done ("Data not found") and the client died. The change waits for the
+		// next frames instead.
+		// Only the two switches that read the cluster wait: static to dynamic/kinematic, and anything to static
+		// (HavokLargeWorldManager.SetBodyMotionType); a dynamic/kinematic switch never needs it.
+		bool readsCluster = context.Has<HavokLargeWorldManager.StaticData>() ? motionType != BodyArgs.Motion.Static : motionType == BodyArgs.Motion.Static;
+		if (readsCluster && context.Has<BodyProxy>() && !context.Has<Keen.VRage.Physics.Havok.ClusterIndex>())
+		{
+			lock (DeferredMotion)
+			{
+				int tries = DeferredMotion.TryGetValue(body, out var d) ? d.Tries + 1 : 1;
+				if (tries <= MaxMotionTries) DeferredMotion[body] = (__instance._session, motionType, tries);
+				else DeferredMotion.Remove(body);
+			}
+			GameLog.Instance.WarnOnce("motion-type-cluster", $"keen guards: held back a motion change for a static physics body that has no cluster yet (entity {body})");
+			return false;
+		}
+		if (DeferredMotion.Count > 0) lock (DeferredMotion) DeferredMotion.Remove(body);
 		if (context.Has<HavokLargeWorldManager.StaticData>() || !context.TryGet<BodyProxy>(out var proxy)) return true;
 		if (proxy.World != null && proxy.World->isBodyValid(body) && proxy.World->isBodyAdded(body)) return true;
 		GameLog.Instance.WarnOnce("motion-type-invalid", $"keen guards: skipped a motion change for a physics body Havok does not hold yet (entity {body})");
 		return false;
+	}
+
+	private const int MaxMotionTries = 600;
+
+	private static readonly System.Collections.Generic.Dictionary<DEntity, (HavokSessionComponent Session, BodyArgs.Motion Motion, int Tries)> DeferredMotion = new();
+
+	// After the frame's motion changes ran (and were cleared), the held-back ones go in again for the next frame.
+	private static void MotionChangesPostfix(HavokSessionComponent session)
+	{
+		lock (DeferredMotion)
+			foreach (var (body, (owner, motion, _)) in DeferredMotion)
+				if (ReferenceEquals(owner, session)) session.SetBodyMotionType(body, motion);
 	}
 
 	// Reading the body is the first thing the static switch does (nothing has changed yet when it throws), so a body the
@@ -170,6 +233,26 @@ internal static class KeenGuards
 	{
 		if (__exception is not NullReferenceException || __exception.TargetSite?.Name != "getBody") return __exception;
 		GameLog.Instance.WarnOnce("motion-type-nre", $"keen guards: skipped a motion change for a physics body Havok could not read (entity {body})");
+		return null;
+	}
+
+	// A character shot dead in a seat can still be recharged from the seat in the frame it is torn down; the creative check
+	// read its torn-down ownership and the host died (co-op, Classic Survival, a turret killing a seated player).
+	private static Exception? SeatRechargeFinalizer(Exception? __exception)
+	{
+		if (__exception is not NullReferenceException) return __exception;
+		GameLog.Instance.WarnOnce("seat-recharge", "keen guards: skipped a seat recharge for a character torn down this frame");
+		return null;
+	}
+
+	// A co-op host's own game hands its signals to the in-process server as a copied command buffer. The copy ends at the
+	// buffer's allocated size, which a parallel job (an armor sector remesh, e.g. while a new lander settles) has already
+	// bumped before writing its signal, so the server read a half-written signal with a stale object slot and the host died
+	// (ArgumentOutOfRange in Read_..._SectorCollidersChangedSignal). That frame of the host game's signals is dropped instead.
+	private static Exception? ReplaySignalsFinalizer(Exception? __exception)
+	{
+		if (__exception is not (ArgumentOutOfRangeException or IndexOutOfRangeException or InvalidCastException)) return __exception;
+		GameLog.Instance.WarnOnce("replay-signals-torn", "keen guards: skipped one frame of this host game's signals to its server (a torn command buffer: " + __exception.Message.Split('\n')[0] + ")");
 		return null;
 	}
 
@@ -256,9 +339,12 @@ internal static class KeenGuards
 		if (!Y51_SE2Online.SyncEngine.AdminAccess.InSession) return true;
 		for (Exception? e = ex; e != null; e = e is AggregateException a && a.InnerExceptions.Count > 0 ? a.InnerExceptions[0] : e.InnerException)
 		{
-			if (e is not Keen.VRage.Multiplayer.NetworkStories.NetworkStoryRemoteFaultException) continue;
+			bool ownRefusal = e is ServerAccess.AccessDeniedException || (ServerAccess.RefusedLocalRecently && e.Message.StartsWith("No Entity found for EntityId", StringComparison.Ordinal));
+			if (e is not Keen.VRage.Multiplayer.NetworkStories.NetworkStoryRemoteFaultException && !ownRefusal) continue;
 			GameLog.Instance.Warn($"keen guards: the server refused a request ({e.Message.Split('\n')[0]}); the game goes on");
-			Y51_SE2Online.Sync.ChatLog.Add(new Y51_SE2Online.Sync.ChatLine("Server", 0, "Access denied.", Y51_SE2Online.Sync.ChatKind.System, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), MpClock.NowMs());
+			// Only SE2 Online's own refusals are about access; SE2's faults (a block gone, a bad request) are not.
+			string said = e.Message.Contains("Access denied", StringComparison.Ordinal) ? "Access denied." : "The server could not do that.";
+			Y51_SE2Online.Sync.ChatLog.Add(new Y51_SE2Online.Sync.ChatLine("Server", 0, said, Y51_SE2Online.Sync.ChatKind.System, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), MpClock.NowMs());
 			return false;
 		}
 		return true;

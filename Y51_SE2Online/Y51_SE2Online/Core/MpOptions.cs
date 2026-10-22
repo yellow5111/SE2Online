@@ -52,6 +52,8 @@ public sealed class MpOptions
 
 	public double StreamingRadiusMeters { get; internal set; }
 	public bool WaterSync { get; internal set; }
+	public bool ClientMovement { get; internal set; }
+	public bool OwnReplication { get; internal set; } = true;
 	public double VoiceRadiusMeters { get; internal set; }
 	public Y51_SE2Online.Sync.ResourceMultipliers UsageMultipliers { get; internal set; } = Y51_SE2Online.Sync.ResourceMultipliers.Default;
 	public Y51_SE2Online.Sync.InventoryMultipliers InventorySizes { get; internal set; } = Y51_SE2Online.Sync.InventoryMultipliers.Default;

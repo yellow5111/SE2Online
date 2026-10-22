@@ -94,6 +94,8 @@ public sealed partial class OnlineScreen : ScreenView
     private readonly TextBox _motdTitle = OnlineUi.Input("Session name", Motd.MaxTitle);
     private readonly TextBox _motd = new() { Watermark = "No message", MaxLength = Motd.MaxText, FontSize = 22, MinHeight = 100, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap };
     private readonly OnlineToggle _buildGhosts = new OnlineToggle("Build previews (players see where others are about to place blocks)");
+    private readonly OnlineToggle _clientMovement = new OnlineToggle("Responsive movement", "Each player's game predicts their own character: instant at any ping. The server still has the last word.");
+    private readonly OnlineToggle _ownReplication = new OnlineToggle("SE2 Online replication", "SE2 Online's own engine carries the world to players (its own connection lanes and ordering). Off uses the game's own netcode. Applies from the next session.");
     private readonly OnlineToggle _voice = new OnlineToggle("Proximity voice chat (talk to and hear players near you)");
     private readonly OnlineToggle _openMic = new OnlineToggle("Open microphone: transmit whenever you speak instead of holding push to talk");
     private readonly (Slider S, Control Row) _voiceVolume = OnlineUi.Slider(0, 200, 5, v => v + " %");
@@ -175,8 +177,8 @@ public sealed partial class OnlineScreen : ScreenView
         var sessionNavigation = OnlineUi.Row(publicSessions, friendSessions, OnlineUi.Text("Player-hosted worlds", "SubtleNotice", 22));
         sessionNavigation.Margin = new Thickness(0, 0, 0, 16); _sessionPage.Children.Add(sessionNavigation);
         _sessionSource.Content = _sessions; Grid.SetRow(_sessionSource, 1); _sessionPage.Children.Add(_sessionSource);
-        _pages = new Control[] { _servers, _sessionPage, direct, hosting, settings };
-        string[] names = { "Servers", "Sessions", "Direct connect", "Host", "Settings" };
+        _pages = new Control[] { _servers, _sessionPage, direct, hosting, settings, BuildRulesPage() };
+        string[] names = { "Servers", "Sessions", "Direct connect", "Host", "Settings", "Rules" };
         _navigation = new Button[names.Length];
         for (int i = 0; i < names.Length; i++) { int index = i; _navigation[i] = OnlineUi.Button(names[i], () => SelectPage(index), "Online" + names[i].Replace(" ", "")); _navigation[i].MinWidth = 236; _navigation[i].Classes.Add("OnlineNavigation"); }
         Styles.Add(new Style(s => s.OfType<Button>().Class("OnlineNavigation").Class("Selected")) { Setters = { new Setter(Button.BorderThicknessProperty, new Thickness(3)), new Setter(Button.BorderBrushProperty, new VRageDynamicResource("Primary")), new Setter(Button.FontWeightProperty, FontWeight.Bold) } });
@@ -197,6 +199,7 @@ public sealed partial class OnlineScreen : ScreenView
     internal void SelectPage(int index)
     {
         _page.Content = _pages[index];
+        if (index == RulesPageIndex) RulesOpened();
         for (int i = 0; i < _navigation.Length; i++) { if (i == index) _navigation[i].Classes.Add("Selected"); else _navigation[i].Classes.Remove("Selected"); }
         RefreshControls();
     }
@@ -244,7 +247,7 @@ public sealed partial class OnlineScreen : ScreenView
         var s = MpMenu.Settings;
         _name.Text = s.PlayerName; _sessionName.Text = s.SessionName; _description.Text = s.Description; _country.Text = s.Country;
         _limit.S.Value = Math.Clamp(s.MaxPlayers, OnlineSettings.MinPlayers, OnlineSettings.PlayerLimit); ReadVisibility(s);
-        _directIp.IsChecked = s.AllowDirectIp; _waterSync.IsChecked = s.WaterSync; _buildGhosts.IsChecked = s.BuildGhosts;
+        _directIp.IsChecked = s.AllowDirectIp; _waterSync.IsChecked = s.WaterSync; _buildGhosts.IsChecked = s.BuildGhosts; _clientMovement.IsChecked = s.ClientMovement; _ownReplication.IsChecked = s.OwnReplication;
         _bind.Text = s.BindAddress; _port.Text = s.ListenPort.ToString(CultureInfo.InvariantCulture); _publicAddress.Text = s.PublicAddress;
         _team.IsChecked = s.TeamGrids; _research.IsChecked = s.SharedResearch; _turrets.IsChecked = s.Pvp; _nametags.IsChecked = s.Nametags;
         _range.S.Value = Math.Clamp(s.NametagRange, 50, 10000); _spawn.IsChecked = s.SpawnNearHost;
@@ -276,7 +279,7 @@ public sealed partial class OnlineScreen : ScreenView
         {
             ServersDirectory = MpMenu.Settings.ServersDirectory, SessionsDirectory = MpMenu.Settings.SessionsDirectory,
             PlayerName = _name.Text ?? "", SessionName = _sessionName.Text ?? "", Description = _description.Text ?? "", Country = _country.Text ?? "", MaxPlayers = limit,
-            FriendsOnly = _visibility == FriendsOnly, Advertise = _visibility == Public, AdvertiseChosen = true, AllowDirectIp = _directIp.IsChecked == true, WaterSync = _waterSync.IsChecked == true, BuildGhosts = _buildGhosts.IsChecked == true,
+            FriendsOnly = _visibility == FriendsOnly, Advertise = _visibility == Public, AdvertiseChosen = true, AllowDirectIp = _directIp.IsChecked == true, WaterSync = _waterSync.IsChecked == true, BuildGhosts = _buildGhosts.IsChecked == true, ClientMovement = _clientMovement.IsChecked == true, OwnReplication = _ownReplication.IsChecked == true,
             BindAddress = _bind.Text ?? "", ListenPort = port, PublicAddress = _publicAddress.Text ?? "",
             TeamGrids = _team.IsChecked == true, SharedResearch = _research.IsChecked == true, Pvp = _turrets.IsChecked == true, Nametags = _nametags.IsChecked == true, NametagRange = range,
             SpawnNearHost = _spawn.IsChecked == true, AutoReconnect = _reconnect.IsChecked == true, CheckForUpdates = _updates.IsChecked == true, AutoUpdate = _autoUpdate.IsChecked == true, InterpolationMs = smoothing, StateBudgetKiB = bandwidth,

@@ -45,6 +45,7 @@ internal static class HeadlessEngine
     public static void Install(Harmony harmony)
     {
         if (!DedicatedRuntime.Headless) return;
+        ServerPerf.Install(harmony, MpPlugin.LaunchArgs);
         AccessTools.Property(typeof(CrashHandler), "ShowMessageBox").SetValue(Singleton<CrashHandler>.Instance, false);
         harmony.Patch(AccessTools.Method(typeof(CrashHandler), "HandlePrimaryException"),
             prefix: new HarmonyMethod(typeof(HeadlessEngine), nameof(FatalPrefix)));
@@ -104,6 +105,7 @@ internal static class HeadlessEngine
         __instance.ApplicationLoop.TargetFrequency = 60;
         __instance.ApplicationLoop.WaitForInterval = true;
         var engine = new EngineBuilder(__instance, args);
+        ServerPerf.Configure(__instance.ApplicationLoop, engine);
         var scene = new GameCoreScene(new GameCoreSerializer(engine));
         __instance.CoreScene = scene;
         engine.EntitySerializer = scene.Serializer;

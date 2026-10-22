@@ -102,7 +102,7 @@ public sealed partial class OnlineScreen
             choices.Children.Add(button);
         }
 
-        foreach (var toggle in new[] { _directIp, _waterSync, _buildGhosts }) toggle.ColumnDefinitions = new ColumnDefinitions("*,24,200");
+        foreach (var toggle in new[] { _directIp, _waterSync, _buildGhosts, _clientMovement, _ownReplication }) toggle.ColumnDefinitions = new ColumnDefinitions("*,24,200");
         var session = OnlineUi.Section("SESSION",
             OnlineUi.Field("Session name", _sessionName, null, null, 420), OnlineUi.Field("Description", _description, null, null, 420),
             OnlineUi.Field("Maximum players", _limit.Row, $"{OnlineSettings.MinPlayers}-{OnlineSettings.PlayerLimit}, including you", _limitWarning, 420),
@@ -113,7 +113,7 @@ public sealed partial class OnlineScreen
         var direct = OnlineUi.Section("DIRECT IP", _directIp,
             OnlineUi.Field("Bind address", _bind, "0.0.0.0 listens on every IPv4 network", null, 300), OnlineUi.Field("Listen port", _port, "UDP; forward it on your router", null, 300),
             OnlineUi.Field("Public address", _publicAddress, "Shown on the card and in the browser", null, 300));
-        var sync = OnlineUi.Section("SYNC", _buildGhosts, _waterSync);
+        var sync = OnlineUi.Section("SYNC", _ownReplication, _clientMovement, _buildGhosts, _waterSync);
         var columns = new Grid { ColumnDefinitions = new ColumnDefinitions("*,24,*") };
         var leftColumn = OnlineUi.Stack(session, motd);
         var rightColumn = OnlineUi.Stack(direct, sync);

@@ -65,6 +65,22 @@ public static class WorldPick
     public static string SaveName(string ownFolder, bool hasContainer, string worldName) =>
         !string.IsNullOrEmpty(ownFolder) ? ownFolder : hasContainer ? null : worldName;
 
+    /// <summary>
+    /// SE2 serializes each autosave into a full "&lt;world&gt;_autosave.tmp" container beside the world (same shown name) and deletes
+    /// it afterwards; a crash during the slot copy leaves it behind, so it is never a save to pick.
+    /// </summary>
+    public static bool IsTempAutosave(string id) => id != null && id.EndsWith("_autosave.tmp", StringComparison.Ordinal);
+
+    /// <summary>What a dedicated server does when its save fails to load: restore the newest intact autosave slot, or give up.</summary>
+    public static (int? Slot, string Message) Recovery(string saveId, string error, IReadOnlyList<(int Slot, DateTime SavedUtc)> intactSlots)
+    {
+        string head = $"save '{saveId}' failed to load ({error}).";
+        if (intactSlots.Count == 0)
+            return (null, head + " It has no intact autosave in .autosaves to fall back to; put back a copy of the save folder or set SaveId to another save.");
+        var newest = intactSlots.OrderByDescending(s => s.Slot).First();
+        return (newest.Slot, head + $" Restoring its newest intact autosave .autosaves/{newest.Slot} ({newest.SavedUtc:yyyy-MM-dd HH:mm} UTC) over it; the unreadable files are kept in the save's .broken-* folder.");
+    }
+
     private static string Describe(Save s) => string.IsNullOrEmpty(s.Name) || s.Name == s.Id ? $"'{s.Id}'" : $"'{s.Name}' (folder '{s.Id}')";
 
     /// <summary>Saves whose folder or shown name is a near miss (case, spacing, a suffix such as " 1", a typo); closest first.</summary>

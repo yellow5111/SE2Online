@@ -52,6 +52,15 @@ public enum SyncMsg : byte
 	Punch = 86,
 	FightLock = 87,
 	WaterGrids = 88,
+	// A player's own character inputs up, where the server has it down (OwnMotion.cs).
+	OwnMotion = 89,
+	// Our own replication transport (Engine/*): sequenced reliable frames down, unreliable sampled state down, frames up.
+	EngineFrame = 90,
+	EngineState = 91,
+	EngineUp = 92,
+	// Custom rules: the host's definition values, and the player's answer once applied (HostSession.Rules.cs).
+	RulesOffer = 84,
+	RulesAck = 85,
 	// Counted down from SyncProtocol.IsSyncMessage's upper bound.
 	DesyncReport = 94,
 	DesyncCheck = 95,

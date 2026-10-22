@@ -11,7 +11,7 @@ namespace Y51_SE2Online.KeenNetcode;
 /// counts its own ticks: a server below 60 ticks/s falls behind the player, and whatever runs on game time disagrees
 /// (the jetpack boost charge: the player's bar is full, the server is still charging, the boost never fires). The
 /// server's time is sampled every 2 s; a player's clock that is behind jumps forward, one that is ahead is eased back
-/// (at most half slower), never backwards.
+/// (at most 5% slower), never backwards.
 /// </summary>
 internal static class ClientClock
 {
@@ -19,11 +19,22 @@ internal static class ClientClock
 
 	private const long SampleTimeoutMs = 10000;
 
-	private const double MaxSlew = 0.5;
+	// Characters animate on game time while their bodies play back on frame time: a clock eased at up to 50% played every
+	// animation half again as fast for a few frames after most samples (feet sliding). 5% is not visible.
+	private const double MaxSlew = 0.05;
+
+	// Far ahead (a server that stalled 40 s does not catch up; its players' clocks are 35 s ahead): 5% would take 12 min.
+	// More than 5 s ahead, the clock runs at half speed until it is back within 5 s: about a minute for 35 s.
+	private const double FarSlew = 0.5;
+	private static readonly TimeSpan Far = TimeSpan.FromSeconds(5);
 
 	private static GameTimeSessionComponent? _clock;
 
 	private static bool _asking;
+
+	// Our requests still unanswered: a reply that comes after its timeout (a host stall, a big autosave) is ours and
+	// must not reach Keen's Init.
+	private static int _pending;
 
 	private static long _askedMs, _nextMs, _loggedMs;
 
@@ -44,7 +55,11 @@ internal static class ClientClock
 	// Keen's own sync at join goes through untouched; our samples set the target instead of jumping the clock.
 	private static bool InitPrefix(GameTimeSessionComponent __instance, GameTimeSessionComponentObjectBuilder ob)
 	{
-		if (!_asking || __instance != _clock || !ob.Valid || __instance._timeProvider == null) return true;
+		// The wire copy carries no time provider; Keen's Init would null ours and every later game-time read would throw.
+		if (ob.Valid && ob.TimeProvider == null) ob.TimeProvider = __instance._timeProvider;
+		if (__instance != _clock || _pending == 0 || !ob.Valid || __instance._timeProvider == null) return true;
+		_pending--;
+		if (!_asking) return false;
 		_asking = false;
 		TimeSpan raw = __instance._timeProvider.FrameTime;
 		// The server read its time about halfway through the round trip.
@@ -71,6 +86,7 @@ internal static class ClientClock
 		{
 			_clock = clock;
 			_asking = false;
+			_pending = 0;
 			_serverAt = _rawAt = null;
 			_rate = 1;
 			_lastRaw = default;
@@ -84,6 +100,7 @@ internal static class ClientClock
 			_nextMs = now + SampleMs;
 			_askedMs = now;
 			_asking = true;
+			_pending++;
 			_sentRaw = raw;
 			clock.RequestDataFromServer().SkipWait();
 		}
@@ -91,8 +108,8 @@ internal static class ClientClock
 		_lastRaw = raw;
 		if (_serverAt is not { } server || _rawAt is not { } at || step <= TimeSpan.Zero || step > TimeSpan.FromMilliseconds(250)) return;
 		TimeSpan wanted = server + (raw - at) * _rate - raw;
-		TimeSpan max = step * MaxSlew;
 		TimeSpan error = wanted - clock._elapsedTimeOffset;
+		TimeSpan max = step * (error < -Far ? FarSlew : MaxSlew);
 		// Behind (the clock stood still while the world loaded, 40 s on a big one): catch up at once, timers only end
 		// sooner. Ahead: ease back, game time never runs backwards.
 		if (error > TimeSpan.FromSeconds(1)) clock._elapsedTimeOffset = wanted;

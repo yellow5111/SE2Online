@@ -121,6 +121,7 @@ internal sealed class ClientWorld
 		_log.Info($"client: joining {session} with the game's own netcode");
 		_lostReason = null;
 		_left = false;
+		_leftAfterReject = false;
 		_pendingJoin = session;
 		Progress.Set(JoinStage.Connecting, MpClock.NowMs());
 		_joinBytesAtStart = System.Threading.Interlocked.Read(ref JoinBytes.Received);
@@ -143,6 +144,8 @@ internal sealed class ClientWorld
 
 	/// <summary>Main thread, every frame (GameAppComponent.GameUpdate prefix).</summary>
 	private bool _backToMenu;
+
+	private bool _leftAfterReject;
 
 
 	private long _barLogMs;
@@ -205,6 +208,16 @@ internal sealed class ClientWorld
 			_log.Info("client: join failed; back to the main menu");
 			app.Disconnect();
 		}
+		// The server ended this player's session while in its world (kicked, banned, refused after a settings change): leave
+		// the world the way the Leave button does, which also stops SE2 Online's link from dialling the server again. The
+		// kick/ban notice shows at the main menu (AdminAccess.Tick).
+		if (Progress.Stage == JoinStage.Rejected && !_leftAfterReject && app.Client != null && !app._isTransitioning.IsSet)
+		{
+			_leftAfterReject = true;
+			_log.Info("client: the server ended this session (" + (_session?.RejectReason ?? "refused") + "); leaving its world");
+			MpPlugin.Controller?.WorldExiting(now);
+			app.Disconnect();
+		}
 		// Nothing answered (a server still starting, offline or firewalled): the join used to wait on the loading screen forever.
 		if (Progress.Stage == JoinStage.Connecting && _session?.Accept == null && _connectingSinceMs > 0 && now - _connectingSinceMs > ConnectTimeoutMs)
 		{
@@ -247,9 +260,45 @@ internal sealed class ClientWorld
 #endif
 	}
 
+	/// <summary>The world being joined runs missions (read from the server before joining).</summary>
+	internal static volatile bool JoinMissions;
+
+	// SE2 builds a joined player's world as a non-mission world without its mission client parts (GameAppComponent's
+	// network join passes isMission false and BuildGameClient(isDedicatedClient: true) skips ClientMissionCoreComponent),
+	// so players had no contracts screen, quest log, objectives or contract GPS; only an in-process host gets them.
+	internal static void InstallMissions(HarmonyLib.Harmony harmony)
+	{
+		harmony.Patch(HarmonyLib.AccessTools.Method(typeof(Keen.Game2.Client.GameComponents.GameClientWorldBuilder), "BuildGameClient"),
+			postfix: new HarmonyLib.HarmonyMethod(typeof(ClientWorld), nameof(BuildClientPostfix)));
+		harmony.Patch(HarmonyLib.AccessTools.Method(typeof(Keen.Game2.Client.GameSystems.Missions.ClientMissionCoreComponent), "ConfigureSession"),
+			postfix: new HarmonyLib.HarmonyMethod(typeof(ClientWorld), nameof(MissionPartsPostfix)));
+	}
+
+	private static bool _joinedMissionWorld;
+
+	private static void BuildClientPostfix(ref Keen.VRage.DCS.Builders.EntityBuilder builder, bool isDedicatedClient)
+	{
+		_joinedMissionWorld = isDedicatedClient && JoinMissions && builder.Components != null;
+		if (!_joinedMissionWorld) return;
+		foreach (var c in builder.Components!)
+			if (c.ObjectBuilder is Keen.Game2.Game.SessionComponents.WorldSessionComponentObjectBuilder world) world.IsMission = true;
+		builder.WithComponents(typeof(Keen.Game2.Client.GameSystems.Missions.ClientMissionCoreComponent));
+		GameLog.Instance.Info("client: this world is built with missions and contracts");
+	}
+
+	// The mission log overlay is a debug menu screen, and a joined player's game has no debug menu (its world fails to load
+	// with the overlay in it). Missions only ever ask for it with TryGet.
+	private static void MissionPartsPostfix(Keen.VRage.Core.Game.Systems.SessionBuilder sessionBuilder)
+	{
+		if (_joinedMissionWorld)
+			sessionBuilder.SessionComponents.Components?.RemoveAll(c => c.Type == typeof(Keen.Game2.Client.GameSystems.Missions.MissionLogDisplaySessionComponent));
+	}
+
 	private async System.Threading.Tasks.Task<(string? Error, List<WorldMod>? Mods)> PrepareMods(GameSessionID session)
 	{
 		var mods = await KeenMods.QueryAsync(session, _stop.Token);
+		JoinMissions = mods != null && KeenMods.LastMissions;
+		if (JoinMissions) _log.Info("client: the server's world runs missions and contracts");
 		if (mods == null)
 		{
 			_log.Info($"client: {session} publishes no SE2 Online mod list; joining with this game's own mods");

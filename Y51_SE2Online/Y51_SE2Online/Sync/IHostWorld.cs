@@ -9,6 +9,8 @@ public interface IHostWorld
 	void OnAdminRequest(PeerId? peer, ushort clientId, AdminRequest request) { }
 	void OnGpsShare(ushort fromClientId, string fromName, GpsShare share) { }
 	void OnPunch(ushort fromClientId, ushort targetClientId) { }
+	/// <summary>Network thread: a player's own character inputs (<see cref="OwnInputs"/>).</summary>
+	void OnOwnMotion(ushort clientId, byte[] inputs) { }
 	void OnTrade(ushort clientId, byte[] data) { }
 	void OnNotSeated(ushort clientId) { }
 	void OnPossessed(ushort clientId) { }

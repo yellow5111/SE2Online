@@ -2,128 +2,110 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Reflection;
 using System.Text.Json;
-using Keen.Game2.Game.GameComponents;
-using Keen.Game2.Game.SessionComponents;
-using Keen.Game2.Simulation.RuntimeSystems.Saves;
-using Keen.VRage.Core.Game.Systems;
-using Keen.VRage.DCS.Builders;
-using Keen.VRage.Library.Serialization;
 using HarmonyLib;
+using Keen.VRage.Library.Definitions;
+using Keen.VRage.Library.Serialization;
+using Y51_SE2Online.Core;
+using Y51_SE2Online.KeenNetcode;
 
 namespace Y51_SE2Online.Dedicated;
 
+/// <summary>
+/// server.json's SessionSettings and DefinitionSettings are the dedicated server's custom rules (CustomRulesHost applies
+/// them, co-op worlds use the same engine). A bad override is refused or clamped with a log line; it never stops the server.
+/// </summary>
 internal static class NativeSessionSettings
 {
-    private static readonly MethodInfo Deserialize = typeof(SerializationHelper).GetMethod(nameof(SerializationHelper.DeserializeFromJson));
-    private static readonly MethodInfo Serialize = typeof(SerializationHelper).GetMethod(nameof(SerializationHelper.SerializeToJson));
-    private static readonly Dictionary<string, object> Schema = new();
-    private static readonly HashSet<string> Seen = new();
+	private static bool _definitionsDumped;
 
-    internal static void Install(Harmony harmony)
-    {
-        harmony.Patch(AccessTools.Method(typeof(GameWorldBuilder), nameof(GameWorldBuilder.CreateBaseGame)),
-            postfix: new HarmonyMethod(typeof(NativeSessionSettings), nameof(BaseGamePostfix)));
-        harmony.Patch(AccessTools.Method(typeof(SessionComponentsSnapshot), nameof(SessionComponentsSnapshot.Apply)),
-            prefix: new HarmonyMethod(typeof(NativeSessionSettings), nameof(SnapshotPrefix)));
-    }
+	internal static void Install(Harmony harmony)
+	{
+		CustomRulesHost.Install(harmony);
+		CustomRulesHost.Source = _ => (Rules(DedicatedRuntime.Config), Path.Combine(DedicatedRuntime.Config.Directory, "custom-rules-loadcheck.json"));
+		LogDryRun(DedicatedRuntime.Config);
+	}
 
-    internal static void Validate(Dictionary<string, Dictionary<string, JsonElement>> settings)
-    {
-        foreach (var entry in settings)
-        {
-            var type = FindBuilder(entry.Key);
-            object builder = Activator.CreateInstance(type) ?? throw new ArgumentException("Cannot construct " + entry.Key);
-            if (entry.Value == null) throw new ArgumentException(entry.Key + " settings cannot be null.");
-            foreach (var value in entry.Value) Write(builder, value.Key.Split('.'), 0, value.Value, apply: false);
-        }
-    }
+	internal static RulesDocument Rules(DedicatedConfig config) => new() { SessionSettings = config.SessionSettings, DefinitionSettings = config.DefinitionSettings };
 
-    private static Type FindBuilder(string name)
-    {
-        var matches = AppDomain.CurrentDomain.GetAssemblies().Select(a => a.GetType(name, false)).Where(t => t != null).ToArray();
-        if (matches.Length != 1 || !typeof(IAccessible).IsAssignableFrom(matches[0]) || !typeof(ISerializable).IsAssignableFrom(matches[0]))
-            throw new ArgumentException("SessionSettings key must be an exact native object builder full type name: " + name);
-        return matches[0];
-    }
+	/// <summary>Structure only: a null section is a broken file. Values are checked per override (<see cref="TypeCheck"/>).</summary>
+	internal static void Validate(Dictionary<string, Dictionary<string, JsonElement>> settings)
+	{
+		if (settings == null) return;
+		foreach (var entry in settings)
+			if (entry.Value == null) throw new ArgumentException($"'{entry.Key}' has no settings (null); use {{}} or remove it.");
+	}
 
-    private static void BaseGamePostfix(bool isServer, WorldSessionComponentObjectBuilder __result)
-    {
-        if (!DedicatedRuntime.Active || !isServer) return;
-        var previous = __result.SessionBuilderInspector;
-        __result.SessionBuilderInspector = builder =>
-        {
-            previous?.Invoke(builder);
-            foreach (var component in builder.SessionComponents.Components) Apply(component.ObjectBuilder);
-        };
-    }
+	internal static void LogDryRun(DedicatedConfig config)
+	{
+		foreach (var issue in TypeCheck(Rules(config)))
+			GameLog.Instance.Warn("custom rules: server.json " + issue);
+	}
 
-    private static void SnapshotPrefix(SessionComponentsSnapshot __instance)
-    {
-        if (!DedicatedRuntime.Active) return;
-        foreach (var component in __instance.Components ?? Array.Empty<SessionComponentsSnapshot.ComponentInfo>()) Apply(component.ObjectBuilder);
-    }
+	/// <summary>
+	/// Checks every override against the game's own types without a world: the type exists, the member is a writable
+	/// setting, the value resolves and the game's serializer reads it (against the type's default value). Each problem is one
+	/// line naming the override; the server refuses those overrides at load and applies the rest.
+	/// </summary>
+	internal static List<string> TypeCheck(RulesDocument rules)
+	{
+		var problems = new List<string>();
+		foreach (var (key, fields) in rules.SessionSettings)
+		{
+			var type = FindType(key);
+			if (type == null || !typeof(IAccessible).IsAssignableFrom(type) || !typeof(ISerializable).IsAssignableFrom(type))
+			{
+				problems.Add($"SessionSettings[{key}]: no such native session component builder; skipped.");
+				continue;
+			}
+			Check(type, fields, true, $"SessionSettings[{key}]", problems);
+		}
+		foreach (var (key, fields) in rules.DefinitionSettings)
+		{
+			string[] parts = key.Split('#');
+			if (parts.Length > 2 || parts.Length == 2 && !Guid.TryParse(parts[1], out _))
+			{
+				problems.Add($"DefinitionSettings[{key}]: use the full definition type name, or type#Guid for one definition; skipped.");
+				continue;
+			}
+			var type = FindType(parts[0]);
+			if (type == null || !typeof(Definition).IsAssignableFrom(type) || type.IsAbstract)
+			{
+				problems.Add($"DefinitionSettings[{key}]: no such concrete native definition type; skipped.");
+				continue;
+			}
+			Check(type, fields, false, $"DefinitionSettings[{key}]", problems);
+		}
+		return problems;
+	}
 
-    private static void Apply(object builder)
-    {
-        if (builder is not IAccessible accessible) return;
-        string name = builder.GetType().FullName;
-        lock (Seen) Seen.Add(name);
-        if (DedicatedRuntime.Config.SessionSettings.TryGetValue(name, out var settings))
-            foreach (var entry in settings) Write(builder, entry.Key.Split('.'), 0, entry.Value, apply: true);
-        var schema = Describe(accessible);
-        lock (Schema) Schema[name] = schema;
-    }
+	private static void Check(Type type, Dictionary<string, JsonElement> fields, bool session, string scope, List<string> problems)
+	{
+		object instance;
+		try { instance = Activator.CreateInstance(type); }
+		catch (Exception ex) { problems.Add($"{scope}: cannot be checked offline ({ex.GetBaseException().Message})."); return; }
+		var outcome = new CustomRulesEngine.Outcome();
+		CustomRulesEngine.TryApply(instance, fields, session, outcome, write: false, journal: false);
+		problems.AddRange(outcome.Errors.Select(e => scope + ": " + e.Substring(e.IndexOf("] ", StringComparison.Ordinal) + 2)));
+	}
 
-    internal static Dictionary<string, object> Describe(IAccessible accessible)
-    {
-        var schema = new Dictionary<string, object>();
-        foreach (var pair in accessible.GetTypeInfo().Members)
-        {
-            var member = pair.Value;
-            if (!member.CanRead || !member.IsSerializable(SerializerFormat.Json)) continue;
-            object value;
-            try
-            {
-                string serialized = (string)Serialize.MakeGenericMethod(member.Type).Invoke(null, new[] { member.Get(accessible) });
-                value = JsonSerializer.Deserialize<JsonElement>(serialized);
-            }
-            catch (Exception ex) { value = new { SerializationError = ex.GetBaseException().Message }; }
-            schema[pair.Key] = new { Type = member.Type.FullName, Writable = member.CanWrite, Value = value };
-        }
-        return schema;
-    }
+	private static Type FindType(string name)
+	{
+		var matches = AppDomain.CurrentDomain.GetAssemblies().Select(a => { try { return a.GetType(name, false); } catch (Exception) { return null; } }).Where(t => t != null).Distinct().ToArray();
+		return matches.Length == 1 ? matches[0] : null;
+	}
 
-    internal static void Write(object parent, string[] path, int index, JsonElement value, bool apply)
-    {
-        if (parent is not IAccessible accessible || index >= path.Length || string.IsNullOrWhiteSpace(path[index]))
-            throw new ArgumentException("Invalid native setting path: " + string.Join(".", path));
-        var info = accessible.GetTypeInfo();
-        if (!info.Members.TryGetValue(path[index], out var member) || !member.CanWrite || !member.IsSerializable(SerializerFormat.Json))
-            throw new ArgumentException(info.Type.FullName + "." + path[index] + " is not a writable native JSON setting.");
-        if (index == path.Length - 1)
-        {
-            object parsed;
-            try { parsed = Deserialize.MakeGenericMethod(member.Type).Invoke(null, new object[] { value.GetRawText() }); }
-            catch (Exception ex) { throw new ArgumentException(info.Type.FullName + "." + path[index] + ": " + ex.GetBaseException().Message, ex); }
-            if (apply) member.Set(parent, parsed);
-            return;
-        }
-        var child = member.Get(parent) ?? Activator.CreateInstance(member.Type);
-        if (child == null) throw new ArgumentException("Cannot traverse native setting " + string.Join(".", path));
-        Write(child, path, index + 1, value, apply);
-        if (apply) member.Set(parent, child);
-    }
+	/// <summary>One override on one object (kept for the dedicated validation tool): applied with the custom-rules safety rules, or throws why not.</summary>
+	internal static void Write(object parent, string[] path, int index, JsonElement value, bool apply)
+	{
+		var outcome = new CustomRulesEngine.Outcome();
+		CustomRulesEngine.TryApply(parent, new[] { KeyValuePair.Create(string.Join(".", path.Skip(index)), value) }, parent is not Definition, outcome, write: apply, journal: false);
+		if (outcome.Errors.Count > 0) throw new ArgumentException(string.Join(" ", outcome.Errors));
+	}
 
-    internal static void Finish()
-    {
-        lock (Seen)
-        {
-            var missing = DedicatedRuntime.Config.SessionSettings.Keys.Where(k => !Seen.Contains(k)).ToArray();
-            if (missing.Length != 0) throw new ArgumentException("Configured native components are absent from this world: " + string.Join(", ", missing));
-        }
-        Directory.CreateDirectory(Path.GetDirectoryName(DedicatedRuntime.Config.DumpPath));
-        lock (Schema) File.WriteAllText(DedicatedRuntime.Config.DumpPath, JsonSerializer.Serialize(Schema, DedicatedConfig.Json));
-    }
+	internal static void Finish()
+	{
+		CustomRulesHost.WriteDumps(DedicatedRuntime.Config.DumpPath, DedicatedRuntime.Config.DefinitionDumpPath, !_definitionsDumped);
+		_definitionsDumped = true;
+	}
 }

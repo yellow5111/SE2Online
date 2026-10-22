@@ -136,6 +136,23 @@ public sealed class ClientSession
 			_t.Send(Host.Value, Channel.Control, data);
 	}
 
+	/// <summary>This tick's input and the few before it (<see cref="OwnInputs"/>); unreliable, the next one repeats them.</summary>
+	public void SendOwnInputs(byte[] inputs)
+	{
+		if (Host.HasValue && CurrentPhase == Phase.Accepted)
+			_t.Send(Host.Value, Channel.State, inputs);
+	}
+
+	/// <summary>Network thread: a replication frame or state message from the host for the engine transport (Engine/Y51ClientTransport).</summary>
+	public static Action<ClientSession, byte[]>? EngineDownstream;
+
+	public bool SendEngine(byte[] message)
+	{
+		if (!Host.HasValue || CurrentPhase != Phase.Accepted) return false;
+		_t.Send(Host.Value, message.Length > SyncProtocol.ControlLifecycleLimit ? Channel.Bulk : Channel.Control, message);
+		return true;
+	}
+
 	public void SendPunch(ushort target)
 	{
 		if (Host.HasValue && CurrentPhase == Phase.Accepted)
@@ -415,6 +432,9 @@ public sealed class ClientSession
 			_o.Progress?.Set(JoinStage.Rejected, now, reason);
 			_log.Error("sync(client): JOIN REJECTED by host: " + reason);
 			break;
+		case SyncMsg.RulesOffer:
+			_t.Send(Host.Value, Channel.Control, ClientRules.Handle(data, _log));
+			break;
 		case SyncMsg.JoinWait:
 		{
 			string text = TextMessage.Decode(data).Text;
@@ -625,6 +645,9 @@ public sealed class ClientSession
 		case SyncMsg.WaterGrids:
 			WaterGridsMessage.Receive(data);
 			break;
+		case SyncMsg.OwnMotion:
+			if (OwnPose.Decode(data) is { } pose) OwnMotionInbox.Poses.Enqueue(pose);
+			break;
 		case SyncMsg.FightLock:
 			if (data.Length <= 64) FightLockState.Set(SocialMessage.Decode<FightLockMessage>(data).Locked);
 			break;
@@ -728,6 +751,10 @@ public sealed class ClientSession
 				var (namesVersion, tags) = PlayerNamesMessage.Decode(data);
 				OnNames(namesVersion, tags);
 			}
+			break;
+		case SyncMsg.EngineFrame:
+		case SyncMsg.EngineState:
+			EngineDownstream?.Invoke(this, data);
 			break;
 		case SyncMsg.DesyncCheck:
 		{

@@ -1,0 +1,923 @@
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using HarmonyLib;
+using Keen.Game2.Client.GameSystems.PlayerControl;
+using Keen.Game2.Client.WorldObjects.Character;
+using Keen.Game2.Simulation.WorldObjects.Characters;
+using Keen.Game2.Simulation.WorldObjects.CubeBlocks.Pilotable;
+using Keen.Game2.Simulation.WorldObjects.Movement;
+using Keen.Game2.Simulation.WorldObjects.Shared.Movement;
+using Keen.VRage.Core;
+using Keen.VRage.Core.Game.Components;
+using Keen.VRage.Core.Game.Data;
+using Keen.VRage.Core.Game.Systems;
+using Keen.VRage.DCS.Accessors;
+using Keen.VRage.DCS.Components;
+using Keen.VRage.Game.Multiplayer;
+using Keen.VRage.Library.Mathematics;
+using Keen.VRage.Multiplayer.Sessions;
+using Keen.VRage.Physics.Character;
+using Keen.VRage.Physics.Data;
+using Y51_SE2Online.Core;
+using Y51_SE2Online.NetHost;
+using Y51_SE2Online.Sync;
+using Y51_SE2Online.SyncEngine;
+using Transport = Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport;
+
+namespace Y51_SE2Online.KeenNetcode;
+
+/// <summary>
+/// Predicted, server-authoritative movement of a player's own character (on foot and by jetpack). SE2 4.0 simulates
+/// every character on the server and only plays the result back on the player's game, so every ping and every server
+/// stall was input lag. When the server allows it (<see cref="HostSettings.ClientMovement"/>), a joined player's game
+/// builds its own character with the server's physics definition and simulates it at once from its inputs, ignoring the
+/// server's motion samples for it. Each tick it sends that tick's input with a sequence number (<see cref="OwnInputs"/>).
+/// The server never takes a position from a player: it applies those inputs instead of Keen's later ControlData, one per
+/// server tick in order (<see cref="OwnInputBuffer"/>), so Keen's own simulation enforces walls, speed, fuel and gravity,
+/// and sends back where the character is after each input. The player's game compares that with what it predicted for
+/// the same input and eases the difference out (<see cref="OwnCorrection"/>); a teleport, a seat or a new body resyncs
+/// it (new epoch). Seated and dead characters stay server-driven; the co-op host's own character is left alone. If the
+/// two sides lose step (no ack reaches the player's game, or none of its inputs is the one the server is due), both go
+/// back to Keen's own server-driven movement for that player and log it instead of drifting apart.
+/// </summary>
+internal static class OwnMotion
+{
+	private static readonly Guid ServerPhysics = new("80400e4a-57d6-4478-9b46-8a6fe652f5c9");
+
+	private static readonly System.Reflection.FieldInfo PhysicsDefinition = AccessTools.Field(typeof(Keen.VRage.Physics.Components.CharacterPhysicsComponent), "CharacterPhysicsDefinition");
+
+	private const double TickSeconds = 1 / 60.0;
+
+	public static void Install(Harmony harmony)
+	{
+		var motion = AccessTools.TypeByName("Keen.VRage.Game.Multiplayer.MotionStateApplicationSystem");
+		harmony.Patch(AccessTools.Method(motion, "EvaluateMotionState"), prefix: Hook(nameof(EvaluatePrefix)));
+		harmony.Patch(AccessTools.Method(motion, "AttachMotionHistory"), prefix: Hook(nameof(AttachPrefix)));
+		harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Physics.Components.RigidBodyComponent), nameof(Keen.VRage.Physics.Components.RigidBodyComponent.OnAddedToScene)), prefix: Hook(nameof(AddedToScenePrefix)));
+		harmony.Patch(AccessTools.Method(typeof(CharacterMovementControlComponent), nameof(CharacterMovementControlComponent.RequestJump)), postfix: Hook(nameof(JumpPostfix)));
+		harmony.Patch(AccessTools.Method(typeof(CharacterMovementControlComponent), nameof(CharacterMovementControlComponent.RequestSprint)), postfix: Hook(nameof(SprintPostfix)));
+		harmony.Patch(AccessTools.Method(typeof(CharacterMovementControlComponent), nameof(CharacterMovementControlComponent.RequestBoost)), postfix: Hook(nameof(BoostPostfix)));
+		foreach (string request in new[] { nameof(CharacterMovementServerComponent.RequestJump), nameof(CharacterMovementServerComponent.RequestSprint), nameof(CharacterMovementServerComponent.RequestBoost) })
+			harmony.Patch(AccessTools.Method(typeof(CharacterMovementServerComponent), request), prefix: Hook(nameof(KeenRequestPrefix)));
+		var sync = typeof(Keen.Game2.Game.SessionComponents.ServerSessionComponent.ServerToClientDataSynchronizations);
+		harmony.Patch(AccessTools.Method(sync, "SyncMotionState"), prefix: Hook(nameof(SyncMotionPrefix)));
+		harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Physics.Components.CharacterPhysicsComponent), "UpdateOrientationConstraint"), prefix: Hook(nameof(OrientationConstraintPrefix)));
+		harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Physics.Havok.HavokSessionComponent), "CollectDataForCharacters"), prefix: Hook(nameof(CollectCharacterPrefix)));
+		if (!System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "ownyaw:off"))
+			harmony.Patch(AccessTools.Method(typeof(CharacterMovementComponent), "ApplyControlData"), postfix: Hook(nameof(GroundYawPostfix)));
+		harmony.Patch(AccessTools.Method(typeof(Transport), "ProcessIncomingData"), prefix: Hook(nameof(IncomingDataPrefix)));
+		harmony.Patch(AccessTools.Method(typeof(Transport), "ProcessIncomingSampledData"), prefix: Hook(nameof(IncomingSampledPrefix)));
+		OwnStatePrediction.Install(harmony);
+	}
+
+	private static HarmonyMethod Hook(string name) => new(typeof(OwnMotion), name);
+
+	// --- player's game ---
+
+	/// <summary>A joined player's game whose server takes this game's inputs for its own character.</summary>
+	private static bool ClientEnabled => MpPlugin.App?.ServerSession == null && NetSession.Current?.Client?.Accept?.Settings.ClientMovement == true;
+
+	// Read by the motion-state and incoming-data prefixes on the client scene's job and network paths.
+	private static volatile bool _driving;
+	private static DEntity _own;
+	private static volatile Entity? _ownEntity;
+
+	private static ClientSession? _boundTo;
+	private static Entity? _correctedFor;
+	private static ushort _epoch;
+	private static uint _seq;
+	private static volatile bool _jumpPending;
+	private static readonly List<OwnInput> Recent = new();
+	private static readonly OwnCorrection Correction = new();
+	private static readonly OwnStateCheck StateCheck = new();
+
+	// The server answers with its movement state after each input: it takes this game's toggles from its inputs.
+	private static bool _serverStates;
+	private static KeenIds? _clientIds;
+	private static Session? _idsSession;
+	private static long _nextScanMs, _statsLogMs, _ackedMs, _vanillaUntilMs, _ackCount, _errorLogMs;
+
+	// An ack this far off is logged (at most once a second): what the character did when prediction went wrong.
+	private const double ErrorLogMeters = 0.3;
+
+	// No ack for this long while predicting: the server does not take this game's inputs (a path that drops them, a
+	// server out of step), so the character goes back to the server's own movement for a while instead of drifting apart.
+	private const long NoAckMs = 1500, NoFirstAckMs = 5000, VanillaMs = 10000;
+	private static bool _answered;
+	private static bool _logged;
+
+	/// <summary>Frames this game has driven its character (the rig counts its response in frames).</summary>
+	internal static long Frames;
+
+#if !PULSAR
+	/// <summary>Test rig: the movement this game sends instead of its own (absurd inputs the server must clamp).</summary>
+	internal static System.Numerics.Vector3? ProbeSentMovement;
+#endif
+
+	internal static Entity? Driving => _driving ? _ownEntity : null;
+
+	/// <summary>The own character while this game predicts its toggles (<see cref="OwnStatePrediction"/>).</summary>
+	internal static Entity? TogglePredicting => _driving && _serverStates && !OwnStatePrediction.Off ? _ownEntity : null;
+
+	internal static OwnCorrection ClientCorrection => Correction;
+
+	/// <summary>The newest input sequence number this game sent.</summary>
+	internal static uint Seq => _seq;
+
+	internal static long LocalIdentity(Session? session)
+	{
+		if (NetSession.Current?.Client?.IdentityId is long assigned and not 0) return assigned;
+		return session?.SessionComponents.TryGet<ClientPlayersSessionComponent>() is { } players ? (long)players.LocalPlayerIdentity : 0;
+	}
+
+	// The game builds every character from the client physics definition (Simulated false: a kinematic body the server's
+	// samples move). The player's own one gets the server's definition, so this game simulates it. Its owner is not
+	// known yet at Init, so the switch happens just before the body is made, undoing what Init set up as kinematic.
+	private static void AddedToScenePrefix(Keen.VRage.Physics.Components.RigidBodyComponent __instance)
+	{
+		if (__instance is not CharacterPhysicsEntityComponent character || !Own(character) || ServerDefinition() is not { } definition) return;
+		character.Definition = definition;
+		PhysicsDefinition.SetValue(character, definition);
+		character._bodyArgs.MotionType = BodyArgs.Motion.Dynamic;
+		character.Data.TryRemove<TransformDriven>();
+		character._stateMachine?.Dispose();
+		character._stateMachine = definition.CreateStateMachine(character._physics);
+		// Movement and thrust read the motion type in their own Init, which ran while this character was still kinematic:
+		// it got no gravity and no jetpack thrust.
+		if (character.Entity.TryGet<CharacterMovementComponent>() is { } movement)
+			movement.SetGravityType(movement.CurrentMovementState == CharacterMovementState.Jetpack ? movement._definition.JetpackGravityType : movement._definition.GroundedGravityType);
+		character.Entity.TryGet<ThrustComponent>()?.OnMotionTypeChanged(BodyArgs.Motion.Dynamic);
+		GameLog.Instance.Info("own motion: this player's character is predicted by this game");
+	}
+
+	private static bool Own(CharacterPhysicsEntityComponent character)
+	{
+		if (!ClientEnabled || character.Definition?.Simulated != false) return false;
+		long owner = TeamPermissions.OwnerOf(character.Entity);
+		return owner != 0 && owner == LocalIdentity(MpPlugin.App?.ClientSession);
+	}
+
+	private static CharacterPhysicsEntityComponentDefinition? ServerDefinition()
+	{
+		if (Keen.VRage.Library.Utils.Singleton<Keen.VRage.Library.Definitions.DefinitionManager>.Instance.TryGetDefinition(ServerPhysics, out CharacterPhysicsEntityComponentDefinition definition)) return definition;
+		GameLog.Instance.WarnOnce("own-motion-def", "own motion: the server's character physics definition is not loaded; the server moves this player's character");
+		return null;
+	}
+
+	private static bool EvaluatePrefix(DEntity entity) => !(_driving && entity == _own);
+
+	private static bool AttachPrefix(DEntity entity, EntityData<MotionHistory> histories)
+	{
+		if (!_driving || entity != _own) return true;
+		histories.WriteTo(entity, default);
+		return false;
+	}
+
+	// Jump, sprint and boost are server requests: the flags are set here at once, and ride in this tick's input.
+	private static void JumpPostfix(CharacterMovementControlComponent __instance)
+	{
+		if (Driven(__instance.Entity) is not { } own || own.Data.Has<CharacterCrouchTag>()) return;
+		own.Data.GetWritePtr<AdvancedCharacterControlData>().IsJumping = true;
+		_jumpPending = true;
+	}
+
+	private static void SprintPostfix(CharacterMovementControlComponent __instance, bool sprint)
+	{
+		if (Driven(__instance.Entity) is { } own) own.Data.GetWritePtr<AdvancedCharacterControlData>().IsSprinting = sprint;
+	}
+
+	private static void BoostPostfix(CharacterMovementControlComponent __instance, bool boost)
+	{
+		if (Driven(__instance.Entity) is { } own) own.Data.GetWritePtr<AdvancedCharacterControlData>().IsBoosting = boost;
+	}
+
+	private static Entity? Driven(Entity? entity) => _driving && entity != null && ReferenceEquals(entity, _ownEntity) && entity.Data.Has<AdvancedCharacterControlData>() ? entity : null;
+
+	// The server's copies of what this game works out itself for its predicted character come back a round trip late: the
+	// flags would undo a sprint or boost let go of since, the physics state (on ground, falling, ground speed) set the
+	// character's movement and animation back by the round trip at every jump, landing, start and stop, and the states this
+	// game predicts (crouch, dampeners, jetpack tuning) flipped back for a moment after each toggle. The server's state
+	// still wins: it comes with each ack (OwnStateCheck).
+	private static readonly HashSet<Type> PredictedStates = new()
+	{
+		typeof(CharacterCrouchTag), typeof(DampeningData), typeof(MaxThrustData), typeof(CharacterMovementComponent.JetpackModeData), typeof(SoftSpeedLimitData),
+	};
+
+	private static readonly bool KeepServerStates = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "ownfilter:off");
+
+	private static void IncomingDataPrefix(Transport.OutOfProcessDataBatch dataBatch)
+	{
+		if (!_driving || _ownEntity is not { } own) return;
+		if (KeepServerStates)
+		{
+			foreach (var list in dataBatch.DataLists)
+				if (list is Transport.PendingList<AdvancedCharacterControlData> flags) flags.Data.RemoveAll(d => d.Target == own);
+			return;
+		}
+		bool states = TogglePredicting != null;
+		foreach (var list in dataBatch.DataLists)
+			switch (list)
+			{
+			case Transport.PendingList<AdvancedCharacterControlData> flags: flags.Data.RemoveAll(d => d.Target == own); break;
+			case Transport.PendingList<Keen.VRage.Physics.Character.CharacterPhysicsState> physics: physics.Data.RemoveAll(d => d.Target == own); break;
+			case Transport.PendingList<CharacterCrouchTag> crouch when states: crouch.Data.RemoveAll(d => d.Target == own); break;
+			case Transport.PendingList<DampeningData> dampeners when states: dampeners.Data.RemoveAll(d => d.Target == own); break;
+			case Transport.PendingList<MaxThrustData> thrust when states: thrust.Data.RemoveAll(d => d.Target == own); break;
+			case Transport.PendingList<CharacterMovementComponent.JetpackModeData> mode when states: mode.Data.RemoveAll(d => d.Target == own); break;
+			case Transport.PendingList<SoftSpeedLimitData> limit when states: limit.Data.RemoveAll(d => d.Target == own); break;
+			}
+		dataBatch.Removals?.RemoveAll(r => r.Target == own && (r.DataType == typeof(Keen.VRage.Physics.Character.CharacterPhysicsState) || states && PredictedStates.Contains(r.DataType)));
+	}
+
+	private static void IncomingSampledPrefix(Transport __instance, Transport.SampledDataBatch batch)
+	{
+		if (!_driving || _ownEntity is not { } own) return;
+		foreach (var list in batch.Lists)
+			if (list is Transport.SampledList<AdvancedCharacterControlData> flags)
+				flags.Entries.RemoveAll(e => __instance.ResolveSampledTarget(e.Id, __instance.SessionComponent.Entity.Scene) == own);
+	}
+
+	private static bool Seated(Entity character)
+		=> character.TryGet<CharacterMovementComponent>()?.CurrentMovementState == CharacterMovementState.Sitting || character.AsInterface<ISeatable>()?.CurrentSeat != null;
+
+	private static bool Alive(Entity character) => !EngineCodec.IsDead(character) && character.TryGet<CharacterLifeComponent>()?.IsAlive == true;
+
+	/// <summary>Client session thread, after each update (one simulation tick).</summary>
+	public static void ClientTick(Session session)
+	{
+		var client = NetSession.Current?.Client;
+		if (!ReferenceEquals(client, _boundTo))
+		{
+			_boundTo = client;
+			_epoch = 0;
+			_logged = false;
+			_ackedMs = MpClock.NowMs();
+			_answered = false;
+			_serverStates = false;
+			Recent.Clear();
+			Correction.Reset();
+			StateCheck.Reset();
+			OwnStatePrediction.Reset();
+			while (OwnMotionInbox.Poses.TryDequeue(out _)) { }
+		}
+		if (!ClientEnabled || client == null)
+		{
+			_driving = false;
+			return;
+		}
+		if (!_logged)
+		{
+			_logged = true;
+			GameLog.Instance.Info("own motion: the server takes this game's inputs for its own character");
+		}
+		var own = OwnCharacter(session);
+		bool drive = own != null && own.TryGet<CharacterPhysicsEntityComponent>()?.CharacterPhysicsDefinition.Simulated == true && !Seated(own);
+		if (!ReferenceEquals(session, _idsSession)) { _idsSession = session; _clientIds = new KeenIds(session, server: false); }
+		var ids = _clientIds!;
+		if (!ReferenceEquals(own, _correctedFor))
+		{
+			_correctedFor = own;
+			Correction.Reset();
+			StateCheck.Reset();
+		}
+		OwnPose? ack = null;
+		while (OwnMotionInbox.Poses.TryDequeue(out var pose))
+		{
+			if (pose.State.HasValue && !OwnStatePrediction.Off) _serverStates = true;
+			if (OwnPose.NewerEpoch(pose.Epoch, _epoch))
+			{
+				_epoch = pose.Epoch;
+				ack = null;
+				_vanillaUntilMs = 0;
+				_ackedMs = MpClock.NowMs();
+				_answered = false;
+				Recent.Clear();
+				Correction.Reset();
+				StateCheck.Reset();
+				OwnStatePrediction.Reset();
+				if (drive)
+				{
+					Rebase(own!, pose, ids, $"the server moved this character (epoch {_epoch})");
+					if (pose.State is byte resynced && _serverStates && !Seated(own!) && OwnStatePrediction.Differs(own!, resynced)) OwnStatePrediction.Take(own!, resynced, "resync");
+				}
+				continue;
+			}
+			if (pose.Epoch == _epoch && pose.Seq != 0 && (ack is not { } newest || Net.Seq.Newer(pose.Seq, newest.Seq))) ack = pose;
+		}
+		long now = MpClock.NowMs();
+		if (drive && now < _vanillaUntilMs) drive = false;
+		if (!drive)
+		{
+			_ackedMs = now;
+			if (own != null && !Seated(own) && now >= _vanillaUntilMs) GameLog.Instance.WarnOnce("own-motion-sim", "own motion: this player's character kept the client physics definition; the server moves it");
+			_driving = false;
+			return;
+		}
+		_ownEntity = own;
+		_own = own!.DEntity;
+		_driving = true;
+		Frames++;
+		if (ack is { } a)
+			switch (Correction.Measure(a.Seq, a.Parent, a.Position, a.Velocity, a.Rotation))
+			{
+			case OwnCorrection.Outcome.Rebase:
+				Correction.Reset();
+				Rebase(own, a, ids, "this game and the server disagree on what the character stands on");
+				break;
+			case OwnCorrection.Outcome.Snap:
+				GameLog.Instance.Info($"own motion: the server's character is over {OwnCorrection.SnapMeters} m off this game's prediction for input {a.Seq}; applied at once ({Correction.Snaps} so far)");
+				break;
+			}
+		if (ack is { } measured && Correction.LastError.Length > ErrorLogMeters && now - _errorLogMs > 1000)
+		{
+			_errorLogMs = now;
+			var e = Correction.LastError;
+			var ve = Correction.LastVelocityError;
+			GameLog.Instance.Info($"own motion: input {measured.Seq} ({_seq - measured.Seq} ticks ago) {e.Length * 100:0} cm off ({e.X:0.00}, {e.Y:0.00}, {e.Z:0.00}), velocity {ve.Length():0.00} m/s off; state {own.TryGet<CharacterMovementComponent>()?.CurrentMovementState}{(own.Data.TryGet<Keen.VRage.Physics.Character.CharacterPhysicsState>(out var ps) ? " " + ps.State : "")}");
+		}
+		if (ack is { State: byte serverState } stated && TogglePredicting != null && StateCheck.Measure(stated.Seq, serverState) is byte take)
+		{
+			OwnStatePrediction.Take(own, take, $"input {stated.Seq}");
+			StateCheck.TakenAt(_seq);
+		}
+		if (Correction.Acks != _ackCount)
+		{
+			_ackCount = Correction.Acks;
+			_ackedMs = now;
+			_answered = true;
+		}
+		// Still on the loading screen: this game sends no inputs yet, so silence is not an unanswered server. Timing it
+		// gave up on prediction for the first 10 s of play after every join that loaded for over 5 s.
+		else if (ClientWorld.Progress.Stage != Sync.JoinStage.Playing)
+			_ackedMs = now;
+		// The first answer also waits for the join to finish loading on both sides.
+		else if (now - _ackedMs > (_answered ? NoAckMs : NoFirstAckMs))
+		{
+			_vanillaUntilMs = now + VanillaMs;
+			_answered = false;
+			_driving = false;
+			Recent.Clear();
+			Correction.Reset();
+			StateCheck.Reset();
+			OwnStatePrediction.Reset();
+			GameLog.Instance.Warn($"own motion: no answer from the server to this game's inputs for {now - _ackedMs} ms; the server moves this character for {VanillaMs / 1000} s, then prediction retries");
+			return;
+		}
+
+		var input = InputOf(own);
+		var (parent, frame) = FrameOf(own, ids);
+		var at = own.Data.GetWorldTransform();
+		own.Data.TryGet<RigidBodyData>(out var body);
+		var relative = frame is { } f ? WorldTransform.GetRelativeTransform(at, f) : at;
+		var local = relative.Position;
+		var velocity = frame is { } g ? WorldTransform.TransformDirectionInv(body.LinearVelocity, g) : body.LinearVelocity;
+		Correction.Record(++_seq, parent, new Vec3D(local.X, local.Y, local.Z), new System.Numerics.Vector3(velocity.X, velocity.Y, velocity.Z),
+			new System.Numerics.Quaternion(relative.Orientation.X, relative.Orientation.Y, relative.Orientation.Z, relative.Orientation.W));
+		var (dp, dv) = Correction.Step(TickSeconds, velocity.Length());
+		var turn = FacingOff ? System.Numerics.Quaternion.Identity : Correction.StepTurn();
+		if (dp != default || dv != default || !turn.IsIdentity) Shift(own, frame, dp, dv, turn);
+
+#if !PULSAR
+		if (ProbeSentMovement is { } absurd) input = input with { Movement = absurd };
+#endif
+		_ownAt = own.Data.GetWorldTransform().Position;
+		Recent.Insert(0, input);
+		if (Recent.Count > OwnInputs.Redundancy) Recent.RemoveAt(Recent.Count - 1);
+		client.SendOwnInputs(OwnInputs.Encode(_epoch, _seq, Recent, toggles: !OwnStatePrediction.Off));
+		if (!OwnStatePrediction.Off)
+		{
+			if (TogglePredicting != null) StateCheck.Record(_seq, OwnStatePrediction.Pack(own));
+			OwnStatePrediction.Tick(own, predict: TogglePredicting != null);
+		}
+
+		if (now - _statsLogMs >= 30000)
+		{
+			_statsLogMs = now;
+			GameLog.Instance.Info($"own motion: {DescribeCorrection()}; {OwnStatePrediction.Stats}{(_serverStates ? "" : " (the server does not take toggles from inputs)")}");
+		}
+	}
+
+	internal static string DescribeCorrection()
+		=> $"{Correction.Acks} acks, error mean {Correction.MeanError * 100:0.0} cm max {Correction.ErrorMax * 100:0.0} cm, largest eased step {Correction.StepMax * 100:0.0} cm, facing off mean {(Correction.Acks == 0 ? 0 : Correction.TurnErrorSum / Correction.Acks):0.00} max {Correction.TurnErrorMax:0.00} deg, {Correction.Snaps} applied at once, {Correction.Rebases} rebased, {_shiftsTurned}/{_shifts} eased shifts kept the tick's turn, {_snaps} grounded turns snapped, {_turns} facing corrections";
+
+	private static OwnInput InputOf(Entity own)
+	{
+		own.Data.TryGet<ControlData>(out var control);
+		own.Data.TryGet<AdvancedCharacterControlData>(out var flags);
+		bool jump = _jumpPending;
+		_jumpPending = false;
+		return new OwnInput(new System.Numerics.Vector3(control.Movement.X, control.Movement.Y, control.Movement.Z),
+			new System.Numerics.Vector3(control.Rotation.X, control.Rotation.Y, control.Rotation.Z), jump, flags.IsSprinting, flags.IsBoosting,
+			OwnStatePrediction.Off ? OwnToggles.None : OwnStatePrediction.TakeForInput());
+	}
+
+	private static readonly bool FacingOff = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "ownfacing:off");
+
+	private static void Shift(Entity own, WorldTransform? frame, Vec3D dp, System.Numerics.Vector3 dv, System.Numerics.Quaternion turn)
+	{
+		var shift = new Vector3D(dp.X, dp.Y, dp.Z);
+		bool turning = !turn.IsIdentity;
+		if (shift != Vector3D.Zero || turning)
+		{
+			var at = own.Data.GetWorldTransform();
+			var q = new Quaternion(turn.X, turn.Y, turn.Z, turn.W);
+			var relative = frame is { } f0 ? WorldTransform.GetRelativeTransform(at, f0) : at;
+			var orientation = turning ? Quaternion.Normalize(q * relative.Orientation) : relative.Orientation;
+			var to = frame is { } f ? f * new WorldTransform(relative.Position + shift, orientation) : new WorldTransform(relative.Position + shift, orientation);
+			// The tick's own turn is taken from the SoftTransform when the shift lands (CollectCharacterPrefix): it gets
+			// the same correction.
+			if (turning && own.Data.TryGet<SoftTransform>(out var soft))
+			{
+				var softRelative = frame is { } f1 ? WorldTransform.GetRelativeTransform(soft.Value, f1) : soft.Value;
+				softRelative.Orientation = Quaternion.Normalize(q * softRelative.Orientation);
+				soft.Value = frame is { } f2 ? f2 * softRelative : softRelative;
+				own.Data.Set(soft);
+				_turns++;
+			}
+			_shiftedTo = to.Position;
+			_shiftPending = true;
+			_shifts++;
+			own.Data.SetWorldTransform(to);
+		}
+		if (dv != default && own.Data.TryGet<RigidBodyData>(out var body))
+		{
+			var v = new Vector3(dv.X, dv.Y, dv.Z);
+			own.Data.Set(new RigidBodyData(body.LinearVelocity + (frame is { } g ? WorldTransform.TransformDirection(v, g) : v), body.AngularVelocity));
+		}
+	}
+
+	// Havok and the flying orientation constraint take a written WorldTransform over the SoftTransform the next tick's
+	// movement jobs turned, so every eased correction would drop that tick's turn and the facing would drift from the
+	// server's. The shifted position keeps the turned facing.
+	private static volatile bool _shiftPending;
+	private static Vector3D _shiftedTo;
+	private static long _shifts, _shiftsTurned, _snaps, _turns;
+
+	private static void OrientationConstraintPrefix(ref WorldTransform wt, in SoftTransform st, in TransformChangeTypeData tcd)
+	{
+		if (_shiftPending && (tcd.ChangeTypes & TransformChangeTypeData.ModifiedTransform.HardTransform) != 0 && Vector3D.DistanceSquared(wt.Position, _shiftedTo) <= 1e-6)
+			wt.Orientation = st.Value.Orientation;
+	}
+
+	// The server alone runs CharacterMovementServerComponent.SnapOrientationForGroundedYaw: on a tick a grounded character
+	// turns, its WorldTransform turns with the SoftTransform, so Havok takes the turned pose as a hard transform at once.
+	// Here only the SoftTransform turned and the body followed a tick later: the facing lagged the server's by one tick's
+	// turn while turning, and the position drifted with it. The player's own body gets the same snap.
+	private static volatile float _groundYaw;
+	private static Vector3D _ownAt;
+
+	private static void GroundYawPostfix(DEntity dataEntity, in ControlData controlData)
+	{
+		if (_driving && dataEntity == _own && controlData.Rotation.Y != 0f) _groundYaw = controlData.Rotation.Y;
+	}
+
+	private static void CollectCharacterPrefix(ref WorldTransform wt, in SoftTransform st, ref TransformChangeTypeData transformChange)
+	{
+		float yaw = _groundYaw;
+		if (yaw != 0f && Vector3D.DistanceSquared(wt.Position, _ownAt) <= 1e-6)
+		{
+			_groundYaw = 0f;
+			if (!_shiftPending)
+			{
+				wt.Orientation *= Quaternion.CreateFromAxisAngle(Vector3.Up, -yaw);
+				transformChange.ChangeTypes |= TransformChangeTypeData.ModifiedTransform.HardTransform;
+				_snaps++;
+				return;
+			}
+		}
+		if (!_shiftPending || (transformChange.ChangeTypes & TransformChangeTypeData.ModifiedTransform.HardTransform) == 0 || Vector3D.DistanceSquared(wt.Position, _shiftedTo) > 1e-6) return;
+		_shiftPending = false;
+		_shiftsTurned++;
+		wt.Orientation = st.Value.Orientation;
+	}
+
+	private static void Rebase(Entity own, in OwnPose pose, KeenIds ids, string why)
+	{
+		var at = ToWorld(pose, ids, out var parent);
+		own.Data.SetWorldTransform(at);
+		var frame = parent?.Data.GetWorldTransform();
+		var v = new Vector3(pose.Velocity.X, pose.Velocity.Y, pose.Velocity.Z);
+		var w = new Vector3(pose.Angular.X, pose.Angular.Y, pose.Angular.Z);
+		own.Data.Set(new RigidBodyData(frame is { } f ? WorldTransform.TransformDirection(v, f) : v, frame is { } g ? WorldTransform.TransformDirection(w, g) : w));
+		GameLog.Instance.Info($"own motion: {why}; moved to {at.Position.X:0.00}, {at.Position.Y:0.00}, {at.Position.Z:0.00}");
+	}
+
+	private static Entity? OwnCharacter(Session session)
+	{
+		if (_ownEntity is { } known && Alive(known)) return known;
+		_ownEntity = null;
+		long now = MpClock.NowMs();
+		if (now < _nextScanMs) return null;
+		_nextScanMs = now + 250;
+		long me = LocalIdentity(session);
+		if (me == 0) return null;
+		foreach (Entity character in session.GetEntitiesOfType<CharacterLifeComponent>())
+			if (Alive(character) && TeamPermissions.OwnerOf(character) == me) return _ownEntity = character;
+		return null;
+	}
+
+	// What the character stands on, else what Keen moves it with.
+	private static Entity? Parent(Entity character)
+	{
+		Entity? parent = null;
+		if (character.Data.TryGet<CharacterSupportData>(out var support) && support.CharacterContacts.Count > 0)
+			foreach (var contact in support.CharacterContacts)
+				if (contact.IsSupportContact && Entity.TryGetFromDataEntity(new DEntityContext(character.Scene, contact.Entity)) is { } touched) { parent = touched; break; }
+		if (parent == null && character.Data.TryGet<MotionParent>(out var motionParent))
+			parent = Entity.TryGetFromDataEntity(new DEntityContext(character.Scene, motionParent.Parent));
+		for (int depth = 0; parent?.TryGet<HierarchyComponent>()?.Parent is { } up && depth < 16; depth++) parent = up;
+		return parent;
+	}
+
+	// Both sides compare in a moving grid's frame (walking on a flying ship), else in world space: a resting grid or the
+	// ground would only make the frame flip on every step and jump.
+	private static (uint Id, WorldTransform? Frame) FrameOf(Entity character, KeenIds ids)
+	{
+		if (Parent(character) is not { } parent || EngineCodec.IsDead(parent) || !parent.Data.TryGet<RigidBodyData>(out var body)
+			|| body.LinearVelocity.LengthSquared() < 0.0025f && body.AngularVelocity.LengthSquared() < 1e-4f || !ids.TryGet(parent, out uint id))
+			return (0, null);
+		return (id, parent.Data.GetWorldTransform());
+	}
+
+	private static WorldTransform ToWorld(in OwnPose pose, KeenIds ids, out Entity? parent)
+	{
+		var at = new WorldTransform(new Vector3D(pose.Position.X, pose.Position.Y, pose.Position.Z), new Quaternion(pose.Rotation.X, pose.Rotation.Y, pose.Rotation.Z, pose.Rotation.W));
+		parent = null;
+		if (pose.Parent == 0 || !ids.TryGet(pose.Parent, out parent) || EngineCodec.IsDead(parent)) return at;
+		return parent.Data.GetWorldTransform() * at;
+	}
+
+	// --- server ---
+
+	private sealed class Player
+	{
+		public readonly object Gate = new();
+		// Under Gate (network thread offers, server thread takes).
+		public double Tokens = OwnMotionRules.Burst;
+		public long TokensAt, LastInputMs, Dropped;
+		public ushort Epoch;
+		public bool OldEpoch, Toggles;
+		public readonly OwnInputBuffer Inputs = new();
+
+		// Server thread only.
+		public Entity? Character;
+		public bool Held, Driving, Sprint, Boost, BoostHeld, Holding;
+		public int HeldTicks;
+		public Frozen? Frozen;
+		public byte Expected;
+		public uint AppliedSeq;
+		public long Resyncs, LogMs, ResyncMs, RealMs, RealSeen;
+	}
+
+	private static readonly ConcurrentDictionary<ushort, Player> Players = new();
+
+	// Characters this server currently moves from their players' inputs; replaced whole each tick, read by the prefixes.
+	// A DEntity is per scene: a co-op host's client scene only has kinematic characters, which the hooked jobs skip.
+	private static volatile HashSet<DEntity> _drivenServer = new();
+
+	// Driven characters whose players' games put their toggles in their inputs (Keen's own toggle requests are ignored).
+	private static volatile HashSet<DEntity> _togglesServer = new();
+
+	private static readonly ConcurrentQueue<Entity> TeleportedQueue = new();
+
+	// No input for this long: the connection is in trouble, the character goes back to Keen's own ControlData. Longer
+	// than a server stall, after which the inputs that queued up meanwhile arrive together.
+	private const long StaleMs = 2000;
+
+	// Inputs arrive but none is ever the one due: the queue is out of step with the player's game.
+	private const long NoRealInputMs = 1000;
+
+	// Set while this code itself makes the server's jump, sprint and boost requests.
+	private static bool _ourRequest;
+
+	/// <summary>Network thread: a player's newest inputs.</summary>
+	public static void Offer(ushort clientId, byte[] data)
+	{
+		if (OwnInputs.Decode(data) is not { } inputs) return;
+		var player = Players.GetOrAdd(clientId, _ => new Player { TokensAt = MpClock.NowMs() });
+		long now = MpClock.NowMs();
+		lock (player.Gate)
+		{
+			if (!OwnMotionRules.Take(ref player.Tokens, ref player.TokensAt, now)) { player.Dropped++; return; }
+			if (inputs.Epoch != player.Epoch)
+			{
+				player.OldEpoch = true;
+				return;
+			}
+			player.LastInputMs = now;
+			player.Toggles |= inputs.Toggles;
+			for (int i = inputs.NewestFirst.Length - 1; i >= 0; i--) player.Inputs.Offer(inputs.Newest - (uint)i, inputs.NewestFirst[i]);
+		}
+	}
+
+	/// <summary>Server thread, after each update: answers the input the last tick applied and applies the next one.</summary>
+	public static void ServerTick(Session session, IEnumerable<(ushort ClientId, Entity? Character)> players, HostSession host, KeenIds ids)
+	{
+		long now = MpClock.NowMs();
+		long stamp = System.Diagnostics.Stopwatch.GetTimestamp();
+		// Ticks run back to back: the server catches up after a hitch. The inputs sent meanwhile wait unread (direct-IP
+		// players are read with the game's network poll, which runs once a frame, not once a tick) or with SE2 Online's
+		// network thread, so the catch-up ticks guessed and the inputs arriving behind them became extra ticks (metres off
+		// at speed).
+		bool catchingUp = stamp - _lastServerTick < System.Diagnostics.Stopwatch.Frequency * CatchUpMs / 1000;
+		_lastServerTick = stamp;
+		var teleported = new HashSet<Entity>();
+		while (TeleportedQueue.TryDequeue(out var entity)) teleported.Add(entity);
+		var driven = new HashSet<DEntity>();
+		var toggles = new HashSet<DEntity>();
+		var online = new HashSet<ushort>();
+		foreach (var (clientId, character) in players)
+		{
+			online.Add(clientId);
+			var player = Players.GetOrAdd(clientId, _ => new Player { TokensAt = now });
+			if (character == null || !Alive(character))
+			{
+				player.Character = null;
+				player.Driving = false;
+				continue;
+			}
+			if (!ReferenceEquals(player.Character, character))
+			{
+				player.Character = character;
+				player.Held = false;
+				player.Driving = false;
+				Resync(host, clientId, player, character, ids, now, "a new body");
+				continue;
+			}
+			if (Seated(character))
+			{
+				if (player.Driving) StopDriving(player, character);
+				player.Held = true;
+				continue;
+			}
+			if (player.Held)
+			{
+				player.Held = false;
+				Resync(host, clientId, player, character, ids, now, "left a seat");
+				continue;
+			}
+			if (teleported.Contains(character))
+			{
+				StopDriving(player, character);
+				Resync(host, clientId, player, character, ids, now, "the server moved this character");
+				continue;
+			}
+			bool oldEpoch;
+			lock (player.Gate)
+			{
+				oldEpoch = player.OldEpoch;
+				player.OldEpoch = false;
+			}
+			// The resync may have reached the player's game before it was ready for it.
+			if (oldEpoch && now - player.ResyncMs >= 1000)
+			{
+				player.ResyncMs = now;
+				host.SendOwnMotion(clientId, PoseOf(character, 0, player.Epoch, ids, player.Toggles), reliable: true);
+			}
+			if (player.AppliedSeq != 0)
+			{
+				var pose = PoseOf(character, player.AppliedSeq, player.Epoch, ids, player.Toggles);
+				if (pose.State is byte after && OwnState.ForcedBy(player.Expected, after, player.BoostHeld)) pose = pose with { State = (byte)(after | OwnState.Forced) };
+				host.SendOwnMotion(clientId, pose, reliable: false);
+				player.AppliedSeq = 0;
+			}
+			if (player.Frozen is { } frozen) Thaw(character, frozen);
+			if (catchingUp) WaitForInput(player, now);
+			if (player.Driving && ShouldHold(player, catchingUp, now))
+			{
+				player.Frozen ??= Freeze(character);
+				Hold(character);
+				driven.Add(character.DEntity);
+				if (player.Toggles) toggles.Add(character.DEntity);
+				continue;
+			}
+			if (player.Frozen != null)
+			{
+				_holdRuns++;
+				player.Frozen = null;
+			}
+			(OwnInput Input, uint Ack)? next = null;
+			bool resting = character.Data.TryGet<RigidBodyData>(out var body) && body.LinearVelocity.LengthSquared() < 0.09f;
+			lock (player.Gate)
+			{
+				if (now - player.LastInputMs < StaleMs) next = player.Inputs.Take(resting);
+				else player.Inputs.Reset();
+			}
+			if (next is not { } take)
+			{
+				if (player.Driving) StopDriving(player, character);
+				continue;
+			}
+			long real, lastInput;
+			lock (player.Gate) { real = player.Inputs.Real; lastInput = player.LastInputMs; }
+			if (real != player.RealSeen || !player.Driving)
+			{
+				player.RealSeen = real;
+				player.RealMs = now;
+			}
+			else if (now - player.RealMs > NoRealInputMs && now - lastInput < 250)
+			{
+				GameLog.Instance.Warn($"own motion: ClientId {clientId}: none of its inputs applied for {now - player.RealMs} ms while it sends them; its character goes back to Keen's movement until the queue starts over");
+				StopDriving(player, character);
+				lock (player.Gate) player.Inputs.Reset();
+				continue;
+			}
+			Apply(player, character, take.Input);
+			player.AppliedSeq = take.Ack;
+			player.Driving = true;
+			driven.Add(character.DEntity);
+			if (player.Toggles) toggles.Add(character.DEntity);
+			if (now - player.LogMs >= 30000)
+			{
+				player.LogMs = now;
+				var b = player.Inputs;
+				lock (player.Gate)
+					GameLog.Instance.Info($"own motion: ClientId {clientId}: {b.Applied} ticks, {b.Real} of the player's inputs applied, {b.Depth} waiting, {b.Guessed} guessed ({b.Late} late, {b.Rewound} turned into extra ticks), {b.Skipped} idle skipped, {b.Merged} merged, {player.Dropped} over the rate, {player.Resyncs} resyncs, catch-up ticks waited for input {_inputWaits} times ({_inputWaitsServed} got it), {_holdRuns} catch-ups held still for {_heldTicks} ticks");
+			}
+		}
+		foreach (var gone in Players.Keys)
+			if (!online.Contains(gone)) Players.TryRemove(gone, out _);
+		_drivenServer = driven;
+		_togglesServer = toggles;
+	}
+
+	// What Keen's own server does with a client's ControlData and its jump/sprint/boost requests, for this tick's input.
+	private static void Apply(Player player, Entity character, in OwnInput input)
+	{
+		var movement = new Vector3(input.Movement.X, input.Movement.Y, input.Movement.Z);
+		var rotation = new Vector3(input.Rotation.X, input.Rotation.Y, input.Rotation.Z);
+		character.Data.Set(new ControlData { Movement = movement, Rotation = rotation });
+		character.Data.Set(new AngularControlData { TargetAngularVelocity = rotation });
+		if (player.Toggles)
+		{
+			player.Expected = OwnState.Expect(OwnStatePrediction.Pack(character), input.Toggles);
+			player.BoostHeld = input.Boost;
+		}
+		if (input.Toggles != OwnToggles.None && player.Toggles) OwnStatePrediction.ApplyServer(character, input.Toggles);
+		if (character.TryGet<CharacterMovementServerComponent>() is not { } requests) return;
+		_ourRequest = true;
+		try
+		{
+			if (input.Jump) requests.RequestJump();
+			if (input.Sprint != player.Sprint) requests.RequestSprint(input.Sprint);
+			if (input.Boost != player.Boost) requests.RequestBoost(input.Boost);
+		}
+		finally { _ourRequest = false; }
+		player.Sprint = input.Sprint;
+		player.Boost = input.Boost;
+	}
+
+	// A catch-up after a server hitch runs the ticks the player's game already ran, faster than its inputs can arrive
+	// (they are still on the way). Guessing those ticks and applying the real inputs after them as extra ticks put the
+	// character a stall's worth of movement ahead (metres at boost speed). Instead the character holds still in time:
+	// each tick without its input it is put back where it stood, until the inputs are here again with the buffer's
+	// cushion, and runs them from there exactly as the player's game did. -y51online:catchuphold:off guesses instead.
+	private static readonly bool HoldOff = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "catchuphold:off");
+	private const int MaxHeldTicks = 90;
+	private static long _heldTicks, _holdRuns;
+
+	private sealed record Frozen(Entity? Parent, WorldTransform At, Vector3 Velocity, Vector3 Angular);
+
+	private static bool ShouldHold(Player player, bool catchingUp, long now)
+	{
+		if (HoldOff) return false;
+		lock (player.Gate)
+		{
+			bool ready = player.Inputs.HasNext && (!player.Holding || player.Inputs.Depth >= OwnInputBuffer.Target);
+			if (ready || player.HeldTicks >= MaxHeldTicks || now - player.LastInputMs > 250)
+			{
+				player.Holding = false;
+				player.HeldTicks = 0;
+				return false;
+			}
+			if (!player.Holding && !catchingUp) return false;
+			player.Holding = true;
+			player.HeldTicks++;
+			_heldTicks++;
+			return true;
+		}
+	}
+
+	private static Frozen Freeze(Entity character)
+	{
+		var at = character.Data.GetWorldTransform();
+		character.Data.TryGet<RigidBodyData>(out var body);
+		var parent = Parent(character);
+		if (parent == null || EngineCodec.IsDead(parent)) return new Frozen(null, at, body.LinearVelocity, body.AngularVelocity);
+		var frame = parent.Data.GetWorldTransform();
+		return new Frozen(parent, WorldTransform.GetRelativeTransform(at, frame), WorldTransform.TransformDirectionInv(body.LinearVelocity, frame), WorldTransform.TransformDirectionInv(body.AngularVelocity, frame));
+	}
+
+	private static void Thaw(Entity character, Frozen frozen)
+	{
+		if (frozen.Parent is { } parent && !EngineCodec.IsDead(parent))
+		{
+			var frame = parent.Data.GetWorldTransform();
+			character.Data.SetWorldTransform(frame * frozen.At);
+			character.Data.Set(new RigidBodyData(WorldTransform.TransformDirection(frozen.Velocity, frame), WorldTransform.TransformDirection(frozen.Angular, frame)));
+			return;
+		}
+		character.Data.SetWorldTransform(frozen.At);
+		character.Data.Set(new RigidBodyData(frozen.Velocity, frozen.Angular));
+	}
+
+	// One tick standing still in time: no input, no momentum, and the boost charge (game time) waits too.
+	private static void Hold(Entity character)
+	{
+		character.Data.Set(new ControlData());
+		character.Data.Set(new AngularControlData());
+		character.Data.Set(new RigidBodyData(Vector3.Zero, Vector3.Zero));
+		if (character.TryGet<ServerJetpackBoostComponent>() is { BoostState: CharacterBoostState.Charging } boost)
+		{
+			var tick = TimeSpan.FromTicks(TimeSpan.TicksPerSecond / 60);
+			var charge = boost.BoostChargeData;
+			boost.BoostChargeData = charge with { StartTime = charge.StartTime + tick, EndTime = charge.EndTime + tick };
+		}
+	}
+
+	private const long CatchUpMs = 8, InputWaitMs = 4;
+	private static long _lastServerTick, _inputWaits, _inputWaitsServed;
+
+	// A catch-up tick whose input is not here yet waits a few milliseconds for the network thread before guessing.
+	private static void WaitForInput(Player player, long now)
+	{
+		lock (player.Gate)
+			if (player.Inputs.HasNext || now - player.LastInputMs > StaleMs) return;
+		_inputWaits++;
+		(KeenNet.ServerComms as LocalServerSession)?.PumpMessages();
+		long until = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency * InputWaitMs / 1000;
+		while (System.Diagnostics.Stopwatch.GetTimestamp() < until)
+		{
+			System.Threading.Thread.Sleep(0);
+			lock (player.Gate)
+				if (player.Inputs.HasNext) { _inputWaitsServed++; return; }
+		}
+	}
+
+	private static void StopDriving(Player player, Entity character)
+	{
+		player.Driving = false;
+		player.AppliedSeq = 0;
+		player.Frozen = null;
+		player.Holding = false;
+		Apply(player, character, default);
+	}
+
+	private static OwnPose PoseOf(Entity character, uint seq, ushort epoch, KeenIds ids, bool state)
+	{
+		var at = character.Data.GetWorldTransform();
+		character.Data.TryGet<RigidBodyData>(out var body);
+		Vector3 v = body.LinearVelocity, w = body.AngularVelocity;
+		var (parentId, frame) = FrameOf(character, ids);
+		if (frame is { } f)
+		{
+			at = WorldTransform.GetRelativeTransform(at, f);
+			v = WorldTransform.TransformDirectionInv(v, f);
+			w = WorldTransform.TransformDirectionInv(w, f);
+		}
+		return new OwnPose(seq, epoch, parentId, new Vec3D(at.Position.X, at.Position.Y, at.Position.Z),
+			new System.Numerics.Quaternion(at.Orientation.X, at.Orientation.Y, at.Orientation.Z, at.Orientation.W),
+			new System.Numerics.Vector3(v.X, v.Y, v.Z), new System.Numerics.Vector3(w.X, w.Y, w.Z), state ? OwnStatePrediction.Pack(character) : null);
+	}
+
+	/// <summary>The server's pose wins: the player's game jumps there and inputs sent before it are ignored (new epoch).</summary>
+	private static void Resync(HostSession host, ushort clientId, Player player, Entity character, KeenIds ids, long now, string why)
+	{
+		ushort epoch;
+		lock (player.Gate)
+		{
+			epoch = ++player.Epoch;
+			player.Inputs.Reset();
+			player.Frozen = null;
+			player.Holding = false;
+		}
+		player.AppliedSeq = 0;
+		player.Resyncs++;
+		player.ResyncMs = now;
+		host.SendOwnMotion(clientId, PoseOf(character, 0, epoch, ids, player.Toggles), reliable: true);
+		GameLog.Instance.Info($"own motion: ClientId {clientId}: {why}; resync (epoch {epoch})");
+	}
+
+	/// <summary>The rig and logs: whether the server moves a player's character from their inputs, and how its inputs fared.</summary>
+	internal static (long Applied, long Guessed, long Merged, int Depth, bool Driven) StatsOf(ushort clientId)
+	{
+		if (!Players.TryGetValue(clientId, out var p)) return (0, 0, 0, 0, false);
+		lock (p.Gate) return (p.Inputs.Applied, p.Inputs.Guessed, p.Inputs.Merged, p.Inputs.Depth, p.Character != null && _drivenServer.Contains(p.Character.DEntity));
+	}
+
+	/// <summary>The server moves <paramref name="character"/> from inputs that carry its player's toggles.</summary>
+	internal static bool TogglesFromInputs(Entity character) => _togglesServer.Contains(character.DEntity);
+
+	/// <summary>Keen's ControlData from this player's game would overwrite the input this server applies for the tick.</summary>
+	internal static bool ReplacesClientData(Type data, Entity? target)
+		=> target != null && (data == typeof(ControlData) || data == typeof(AngularControlData)) && _drivenServer.Contains(target.DEntity);
+
+	// Keen's requests from the player's game arrive at their own time; the copy inside the inputs is applied in order.
+	private static bool KeenRequestPrefix(CharacterMovementServerComponent __instance) => _ourRequest || !_drivenServer.Contains(__instance.Entity.DEntity);
+
+	private static void SyncMotionPrefix(Entity entity, OptionalWritable<Teleported> teleported)
+	{
+		if (teleported.HasValue && teleported.Value.Value && _drivenServer.Contains(entity.DEntity)) TeleportedQueue.Enqueue(entity);
+	}
+}

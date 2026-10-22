@@ -384,7 +384,7 @@ internal sealed partial class NetSession
 					ResolveType = EngineCodec.ResolveType,
 					IsClientInput = EngineCodec.IsClientInput,
 					CheckSignal = CommandLayouts.Check,
-					Settings = new HostSettings(_o.Identities, _o.Grids, _o.Research, _o.WaterSync),
+					Settings = new HostSettings(_o.Identities, _o.Grids, _o.Research, _o.WaterSync, _o.ClientMovement, _o.OwnReplication && !MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "keen-replication")),
 					HostName = name,
 					LookTotals = _o.Predict,
 					MaxPlayers = _o.MaxPlayers,

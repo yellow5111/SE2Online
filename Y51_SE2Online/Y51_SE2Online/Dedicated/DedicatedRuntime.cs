@@ -147,6 +147,7 @@ internal static class DedicatedRuntime
             }
             catch (Exception ex) { GameLog.Instance.Warn("dedicated: could not time the game's jobs: " + ex); }
         }
+        if (Headless && Active) ServerPerf.Tick(app, frame);
         try { TickCore(app); }
         finally
         {
@@ -259,7 +260,7 @@ internal static class DedicatedRuntime
             {
                 var saves = new System.Collections.Generic.List<WorldPick.Save>();
                 await foreach (var container in SaveHelper.IterateAllSavesAsync())
-                    if (!container.IsExternal) saves.Add(new WorldPick.Save(container.Id.ToString(), container.Meta.DisplayName));
+                    if (!container.IsExternal && !WorldPick.IsTempAutosave(container.Id.ToString())) saves.Add(new WorldPick.Save(container.Id.ToString(), container.Meta.DisplayName));
                 string gameFolder = GameSavesFolder();
                 var pick = WorldPick.Resolve(Config.SaveId, Config.WorldName, saves, SavesFolder(), gameFolder == null ? null : FolderSaves(gameFolder), gameFolder);
                 if (pick.Error != null) throw new InvalidOperationException(pick.Error);
@@ -292,7 +293,14 @@ internal static class DedicatedRuntime
                 OverrideModList = mods
             };
             // SE2 4.0: Keen's own dedicated server session (Steam game server listener + network replication).
-            await app.LoadDedicatedServerAsync(load);
+            try { await app.LoadDedicatedServerAsync(load); }
+            catch (Exception ex) when (inProfile)
+            {
+                if (!await RestoreNewestAutosave(app, save.Value, ex)) throw;
+                // The windowed server's failure handler is still returning to the main menu.
+                for (int i = 0; i < 300 && app._isTransitioning.IsSet; i++) await Task.Delay(TimeSpan.FromMilliseconds(100));
+                await app.LoadDedicatedServerAsync(load);
+            }
             var world = app.Server.Entity.Get<WorldSessionComponent>();
             NativeSessionSettings.Finish();
             NativeDefinitionSettings.Finish();
@@ -320,6 +328,42 @@ internal static class DedicatedRuntime
             }
         }
         catch (Exception ex) { Fail("world load", !resumed && Config.StartWorkshopId != 0 ? DedicatedMods.ExplainStartFailure(ex, Config.StartWorkshopId) : ex); }
+    }
+
+    // SE2 commits a save in place (TransactionalFileSystem.ApplyChangesAsync copies each file over the old one, then rewrites
+    // .container-info), so a process killed mid-commit leaves files from two saves. Its autosave slots are separate copies under
+    // .autosaves; Keen lists only the intact ones. ponytail: one attempt; blobs are shared by name and are not kept aside.
+    private static async Task<bool> RestoreNewestAutosave(GameAppComponent app, ContainerId saveId, Exception error)
+    {
+        await Task.SetLifetime(app.Scene);
+        var slots = new System.Collections.Generic.List<(int Slot, DateTime SavedUtc)>();
+        var backups = new System.Collections.Generic.Dictionary<int, Backup<WorldSessionSaveGameMetaData>>();
+        if (await SaveHelper.TryGetSaveAsync(saveId) is { } container)
+        {
+            await foreach (var backup in AutosaveSlots.GetAutosavesAsync(container))
+            {
+                int slot = AutosaveSlots.TryGetSlotIndex(backup.Id);
+                if (slot < 0) continue;
+                backups[slot] = backup;
+                slots.Add((slot, new DateTime(backup.Meta.SaveGameCreationTimeInTicks, DateTimeKind.Utc)));
+            }
+        }
+        var (pick, message) = WorldPick.Recovery(saveId.ToString(), error.GetBaseException().Message, slots);
+        GameLog.Instance.Error("dedicated: " + message);
+        Status = pick is null ? "Failed: " + message : "Restoring autosave " + pick;
+        WriteStatus(true);
+        if (pick is not int chosen) return false;
+        string dir = Path.Combine(SavesFolder(), saveId.ToString());
+        string broken = Path.Combine(dir, ".broken-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss"));
+        Directory.CreateDirectory(broken);
+        foreach (string file in Directory.EnumerateFiles(dir)) File.Copy(file, Path.Combine(broken, Path.GetFileName(file)), true);
+        try { await backups[chosen].RestoreAsync(); }
+        // Restore copies the slot in and then updates the save list, but the save list's folder watcher drops the entry while
+        // the folder is emptied; the files are in place and the watcher adds the save back once .container-info is there again.
+        catch (System.Collections.Generic.KeyNotFoundException) when (File.Exists(Path.Combine(dir, ".container-info"))) { }
+        for (int i = 0; i < 100 && !(await SaveHelper.TryGetSaveAsync(saveId)).HasValue; i++) await Task.Delay(TimeSpan.FromMilliseconds(100));
+        GameLog.Instance.Info($"dedicated: autosave .autosaves/{chosen} restored over '{saveId}'; loading it");
+        return true;
     }
 
     private static string SavesFolder() => Path.GetFullPath(Singleton<Keen.VRage.Library.Filesystem.FileSystem>.Instance.GetAppDataFiles().GetAbsolutePath("SaveGames"));

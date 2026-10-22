@@ -154,9 +154,19 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		if (ruleFailures.Count > 0) throw new InvalidOperationException("server rules could not be installed for this game build: " + string.Join("; ", ruleFailures));
 		Optional("offline survival stats", () => OfflineStatsGuard.Install(_harmony));
 		Optional("shared discoveries", () => SharedDiscoveries.Install(_harmony));
-		Optional("motion playback", MotionSmoothing.Install);
+		Optional("motion playback", () => MotionSmoothing.Install(_harmony));
+		Optional("flora collider recovery", () => KeenNetcode.FloraPhysicsRecovery.Install(_harmony));
+		Optional("fresh grids kept from trash removal", () => KeenNetcode.FreshGridGuard.Install(_harmony));
+		Optional("turrets look past targets their own grid blocks", () => TurretRelations.InstallRetarget(_harmony));
+		Optional("missions and contracts for players", () => ClientWorld.InstallMissions(_harmony));
 		Optional("4.0 crash guards", () => KeenGuards.Install(_harmony));
+		Optional("projection block references", () => ProjectionRefs.Install(_harmony));
+		Optional("ghost block delete ownership", () => GhostBlocks.Install(_harmony));
 		Optional("resilient replication", () => ResilientReplication.Install(_harmony));
+		Optional("SE2 Online replication engine", () => Engine.Y51Replication.Install(_harmony));
+		Optional("death ragdolls follow the server", () => Engine.ClientRagdolls.Install(_harmony));
+		Optional("corpses follow the server", () => Engine.CorpseMotion.Install(_harmony));
+		Optional("server sync properties reach players", () => Engine.SyncProperties.Install(_harmony));
 		Optional("spawned ships for players who join later", () => StagedReplication.Install(_harmony));
 		Optional("suit colour and skin sync", () => SuitSync.Install(_harmony));
 		Optional("join and leave toasts", () => JoinLeaveToasts.Install(_harmony));
@@ -169,13 +179,18 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		Optional("control panel group names", () => NameSync.Install(_harmony));
 		Optional("join status", () => JoinStatusUi.Install(_harmony));
 		Optional("client clock", () => KeenNetcode.ClientClock.Install(_harmony));
+		Optional("own character movement", () => KeenNetcode.OwnMotion.Install(_harmony));
+		Optional("animation timing", () => KeenNetcode.AnimPlayout.Install(_harmony));
+		Optional("own character animation", () => KeenNetcode.OwnAnimation.Install(_harmony));
 #if !PULSAR
-		Optional("own motion probe", () => KeenNetcode.OwnMotionProbe.Install(_harmony));
+		Optional("animation timing probe", () => KeenNetcode.AnimSyncProbe.Install(_harmony));
+		Optional("projection probe", () => KeenNetcode.ProjectionProbe.Install(_harmony));
 #endif
 		Optional("block size names", () => BlockSizeFilter.Install(_harmony));
 		Optional("autosave blob fix", () => BackupBlobFix.Install(_harmony));
 		Optional("resource usage", () => ResourceMultiplierRules.Install(_harmony));
 		Optional("broken mods", () => BrokenMods.Install(_harmony));
+		Optional("custom rules", () => CustomRulesHost.Install(_harmony));
 		InstallExitGuards();
 		Optional("build previews", () => BuildGhosts.Install(_harmony));
 		Optional("paste once", () => PasteOnce.Install(_harmony));
@@ -301,12 +316,15 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		ClientWorld.Current?.MainTick(app);
 		HostWorld.Current?.MainTick(app);
 		KeenNet.ApplyLobby();
+#if !PULSAR
+		if (_steamReady || DedicatedRuntime.Requested) OwnMotionProbe.FakeLag();
+#endif
 		Instance?.AttachToKeenJoin(app);
 		Instance?.AutoJoin(app);
 #if !PULSAR
 		if (_steamReady) UiShots.Tick(app);
 		MotionProbe.Tick(app);
-		OwnMotionProbe.Tick(app);
+		KeenNetcode.BuildProbe.Client(GameLog.Instance, MpClock.NowMs());
 #endif
 	}
 

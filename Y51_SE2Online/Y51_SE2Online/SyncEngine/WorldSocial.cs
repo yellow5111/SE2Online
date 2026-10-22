@@ -21,6 +21,7 @@ using Keen.VRage.Core.Game.Components;
 using Keen.VRage.DCS.Components;
 using Keen.VRage.DCS.Builders;
 using Keen.VRage.Library.Definitions;
+using Keen.VRage.Library.Filesystem.StorageManagers;
 using Keen.VRage.Library.Utils;
 using Y51_SE2Online.Core;
 using Y51_SE2Online.Sync;
@@ -38,6 +39,7 @@ internal sealed class WorldSocial
     internal readonly object Sync = new();
     internal SocialState State = new();
     private bool _initialized;
+    private byte[] _unreadable;
     internal SocialSnapshot Local { get; private set; } = new();
     internal static WorldSocial For(WorldSessionComponent world) => Worlds.GetValue(world, _ => new());
 
@@ -66,16 +68,22 @@ internal sealed class WorldSocial
         {
             var world = Entity.Get<WorldSessionComponent>();
             var social = For(world);
-            byte[] data;
+            byte[] data, unreadable;
             lock (social.Sync)
             {
                 // Worlds that never had factions or players online stay free of the plugin's file.
-                if (social.State.Players.Count == 0 && social.State.Factions.Count == 0) return;
-                data = social.State.SerializeForSave();
+                data = social.State.Players.Count == 0 && social.State.Factions.Count == 0 ? null : social.State.SerializeForSave();
+                unreadable = social._unreadable;
             }
+            if (data == null && unreadable == null) return;
             var container = ((FileContainerAdapter<WorldSessionSaveGameMetaData>)serializer.Container).Container;
+            if (data != null) await Write(container, SaveFile, data);
+            if (unreadable != null) await Write(container, SaveFile + ".bad", unreadable);
+        }
+        private static async Keen.VRage.Library.Threading.Task Write(Container<WorldSessionSaveGameMetaData> container, string name, byte[] data)
+        {
             // Temp containers must finish cleanup before a save listener writes into them.
-            var file = await container.GetWritableFileHandleAsync(SaveFile);
+            var file = await container.GetWritableFileHandleAsync(name);
             file.CreateDirectories();
             using var stream = file.Open(FileMode.Create, FileAccess.Write, FileShare.None);
             stream.Write(data);
@@ -88,7 +96,18 @@ internal sealed class WorldSocial
             if (stream != null) stream.CopyTo(bytes);
             lock (social.Sync)
             {
-                social.State = stream == null ? new SocialState() : SocialState.Deserialize(bytes.ToArray());
+                social.State = new SocialState(); social._unreadable = null;
+                if (stream != null)
+                {
+                    try { social.State = SocialState.Deserialize(bytes.ToArray()); }
+                    catch (Exception ex)
+                    {
+                        // Keen awaits every save listener at the end of LoadWorldSession: one bad JSON would fail a world whose own
+                        // files are fine. The world loads without factions and the file is kept as .bad instead of being overwritten.
+                        social._unreadable = bytes.ToArray();
+                        GameLog.Instance.Error($"factions: {SaveFile} in this save is unreadable ({ex.GetType().Name}: {ex.Message}); the world loads with no factions and the file is kept beside the next save as {SaveFile}.bad");
+                    }
+                }
                 if (DedicatedRuntime.Requested) social.State.SettleHostSlot();
                 social._initialized = false;
                 social._tagged.Clear(); social._unmatched = null;
@@ -240,10 +259,22 @@ internal sealed class WorldSocial
     internal static void SetSharing(Entity grid, GridSharing sharing)
         => grid.Get<GridPermissionsComponent>().BuildPermissions = sharing switch { GridSharing.Faction => Faction, GridSharing.Everyone => Everyone, _ => Private };
 
+    // Ghost blocks (a projection: planned blocks not yet welded) have no grid of their own. Team grids let every player build
+    // wherever SE2 would let the owner, which on a ghost meant anyone could build on and delete another player's ghosts.
+    // Ghosts on a grid follow that grid's sharing; a ghost grid on its own is its owner's alone, as a new grid is.
+    private static bool? GhostAccess(Entity target, long actor)
+    {
+        if (target?.TryGet<Keen.Game2.Simulation.GameSystems.BlockPlacement.Projections.ProjectionSourceComponent>() == null) return null;
+        if (target.TryGet<AttachedToGridComponent>()?.AttachedGrid is { } attached && GridOf(attached) is { } grid) return Access(grid, actor);
+        long owner = TeamPermissions.OwnerOf(target);
+        if (!PlayerIdentities.IsHuman(owner)) return null;
+        return PlayerIdentities.IsHuman(actor) && owner == actor;
+    }
+
     internal static bool? Access(Entity target, long actor)
     {
         var grid = GridOf(target);
-        if (grid == null) return null;
+        if (grid == null) return GhostAccess(target, actor);
         long owner = TeamPermissions.OwnerOf(grid);
         // Unowned, NPC and "everyone may use" blocks keep the game's own rules (anyone can claim an unowned grid anyway).
         if (!PlayerIdentities.IsHuman(owner) || EveryoneMayUse(target)) return null;

@@ -64,6 +64,19 @@ internal static class LocalPeers
 
 	internal static void WriteFrame(Stream stream, ReadOnlySpan<byte> data, byte channel, MessageReliability reliability)
 	{
+#if !PULSAR
+		if (FramedSession.LagMs > 0)
+		{
+			var copy = data.ToArray();
+			FramedSession.Later(() => { try { Write(stream, copy, channel, reliability); } catch (Exception) { } });
+			return;
+		}
+#endif
+		Write(stream, data, channel, reliability);
+	}
+
+	private static void Write(Stream stream, ReadOnlySpan<byte> data, byte channel, MessageReliability reliability)
+	{
 		Span<byte> header = stackalloc byte[HeaderBytes];
 		BitConverter.TryWriteBytes(header, data.Length);
 		header[4] = channel;
@@ -280,12 +293,21 @@ internal sealed class LocalServerSession : LocalMessageSource, IPeerToPeerSessio
 	public void Pump()
 	{
 		RaiseChanges();
-		_direct?.Pump((user, connected) =>
-		{
-			if (connected) _requested?.Invoke(user);
-			else _failed?.Invoke(user, ConnectionFailureReason.ClosedByPeer);
-		}, Enqueue);
+		while (_directChanges.TryDequeue(out var change)) DirectChanged(change.User, change.Connected);
+		_direct?.Pump(DirectChanged, Enqueue);
 	}
+
+	private void DirectChanged(GameServiceUser user, bool connected)
+	{
+		if (connected) _requested?.Invoke(user);
+		else _failed?.Invoke(user, ConnectionFailureReason.ClosedByPeer);
+	}
+
+	private readonly ConcurrentQueue<(GameServiceUser User, bool Connected)> _directChanges = new();
+
+	/// <summary>Server thread, between the ticks of a catch-up: the direct-IP players' messages are read now instead of
+	/// at the next frame's network poll. Connection changes still reach the game from <see cref="Pump"/>.</summary>
+	public void PumpMessages() => _direct?.Pump((user, connected) => _directChanges.Enqueue((user, connected)), Enqueue);
 
 	public bool HasPeer(GameServiceUser user) => _peers.ContainsKey(user);
 

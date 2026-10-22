@@ -46,6 +46,8 @@ public static class HostSettingsChange
         if (!(before.RespawnShips ?? new()).SequenceEqual(after.RespawnShips ?? new(), System.StringComparer.OrdinalIgnoreCase) || before.RespawnShipCooldownMinutes != after.RespawnShipCooldownMinutes)
             live.Add("respawn ships " + (after.RespawnShips is { Count: > 0 } ships ? string.Join(", ", ships) : "all") + ", cooldown " + after.RespawnShipCooldownMinutes + " min");
         if (before.BuildGhosts != after.BuildGhosts) live.Add("build previews " + OnOff(after.BuildGhosts));
+        if (before.ClientMovement != after.ClientMovement) next.Add("predicted movement");
+        if (before.OwnReplication != after.OwnReplication) next.Add("replication engine");
         if (before.TeamGrids != after.TeamGrids) next.Add("grid sharing");
         if (before.SharedResearch != after.SharedResearch) next.Add("shared research");
         if (before.Nametags != after.Nametags || before.NametagRange != after.NametagRange) next.Add("name tags");

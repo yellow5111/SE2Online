@@ -284,7 +284,8 @@ internal static class SelfTest
 			try { var own = await inventories.Attach(me, populateMainEntity: true); log.Info("selftest: PASS client: own inventory opened"); inventories.Detach(own); }
 			catch (Exception ex) { failed++; log.Error($"selftest: FAIL client: own inventory: {ex.GetType().Name}: {ex.Message.Split('\n')[0]}"); }
 		}
-		if (me != null)
+		// The planet rig moves this character itself; a seat here would pull it off its script.
+		if (me != null && !PlanetProbe.On)
 		{
 			var players = session.SessionComponents.Get<Keen.Game2.Client.GameSystems.PlayerControl.ClientPlayersSessionComponent>();
 			var permissions = session.SessionComponents.TryGet<PermissionsSessionComponent>();
@@ -297,9 +298,10 @@ internal static class SelfTest
 				if (seat == null || seat.Pilot != null) continue;
 				try
 				{
+					// NPC and unowned vehicles are SE2's to take (encounters reward stealing them).
 					bool sat = await seat.TrySetPilotAsync(me);
-					if (sat) { failed++; log.Error($"selftest: FAIL client: sat in a seat on '{grid.Get<CubeGridComponent>().DisplayName}' (owner {owner}) without access"); await seat.TryClearPilotAsync(); }
-					else log.Info($"selftest: PASS client: refused a seat on '{grid.Get<CubeGridComponent>().DisplayName}' (owner {owner})");
+					if (sat) { log.Info($"selftest: PASS client: sat in a seat on '{grid.Get<CubeGridComponent>().DisplayName}' (owner {owner})"); await seat.TryClearPilotAsync(); }
+					else { failed++; log.Error($"selftest: FAIL client: refused a seat on '{grid.Get<CubeGridComponent>().DisplayName}' (owner {owner})"); }
 				}
 				catch (Exception ex) { failed++; log.Error($"selftest: FAIL client: seat request: {ex.GetType().Name}: {ex.Message.Split('\n')[0]}"); }
 				break;

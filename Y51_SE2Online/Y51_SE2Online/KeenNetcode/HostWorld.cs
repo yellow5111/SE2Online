@@ -80,6 +80,9 @@ internal sealed partial class HostWorld : IHostWorld
 
 	private readonly ConcurrentDictionary<ushort, Joiner> _joiners = new();
 
+	/// <summary>Server: the characters of the players joined now (test rigs).</summary>
+	internal List<Entity> JoinedCharacters => _joiners.Values.Select(j => j.Character).OfType<Entity>().ToList();
+
 	private KeenIds? _ids;
 
 	private Entity? _hostCharacterServer;
@@ -231,6 +234,8 @@ internal sealed partial class HostWorld : IHostWorld
 
 	public void Rejected(PeerId peer, string why) => KeenNet.Refuse(peer.Value, why);
 
+	public void OnOwnMotion(ushort clientId, byte[] inputs) => KeenNetcode.OwnMotion.Offer(clientId, inputs);
+
 	public void RegisterPlayer(PeerId client, ushort clientId, string identityKey, string name) => _unidentified[clientId] = (client.Value, name);
 
 	public string Stats() => $"Keen netcode, {_identityOf.Count} identified player(s)";
@@ -262,10 +267,37 @@ internal sealed partial class HostWorld : IHostWorld
 			while (ServerWork.TryDequeue(out var work)) work(__instance);
 		}
 		if (ReferenceEquals(__instance, MpPlugin.App?.ServerSession)) KeenNetcode.SuitSync.Flush();
-		if (ReferenceEquals(__instance, MpPlugin.App?.ClientSession)) ClientWorld.Current?.ClientSessionTick(__instance);
+		if (ReferenceEquals(__instance, MpPlugin.App?.ClientSession))
+		{
+			ClientWorld.Current?.ClientSessionTick(__instance);
+			KeenNetcode.MotionSmoothing.ClientTick(__instance);
+			KeenNetcode.FloraPhysicsRecovery.ClientTick(__instance);
+			try { KeenNetcode.OwnMotion.ClientTick(__instance); }
+			catch (Exception ex) { GameLog.Instance.WarnOnce("own-motion-client", "own motion: client tick failed: " + ex); }
+			KeenNetcode.OwnAnimation.ClientTick();
+			KeenNetcode.AnimPlayout.ClientTick(__instance);
+#if !PULSAR
+			KeenNetcode.OwnMotionProbe.ClientTick(__instance);
+			KeenNetcode.AnimSyncProbe.ClientTick(__instance);
+#endif
+		}
 #if !PULSAR
 		KeenNetcode.SelfTest.CountGrids(__instance);
+		KeenNetcode.NpcUseProbe.Tick(__instance);
+		KeenNetcode.TurretProbe.Tick(__instance);
+		KeenNetcode.ContractsProbe.Tick(__instance);
+		KeenNetcode.ProjectionProbe.Tick(__instance);
+		if (ReferenceEquals(__instance, MpPlugin.App?.ServerSession)) Engine.SyncProbe.Tick(__instance, server: true);
+		else if (ReferenceEquals(__instance, MpPlugin.App?.ClientSession) && MpPlugin.App?.ServerSession == null) Engine.SyncProbe.Tick(__instance, server: false);
+		if (ReferenceEquals(__instance, MpPlugin.App?.ServerSession)) Engine.StateProbe.Tick(__instance, server: true);
+		else if (ReferenceEquals(__instance, MpPlugin.App?.ClientSession) && MpPlugin.App?.ServerSession == null) Engine.StateProbe.Tick(__instance, server: false);
+		if (ReferenceEquals(__instance, MpPlugin.App?.ClientSession) && MpPlugin.App?.ServerSession == null && ClientWorld.Progress.Stage == JoinStage.Playing)
+		{
+			Engine.ActionProbe.Tick(__instance);
+			Engine.SystemsProbe.Tick(__instance);
+		}
 #endif
+		if (ReferenceEquals(__instance, MpPlugin.App?.ServerSession)) Engine.CorpseMotion.Tick(__instance);
 		var current = Current;
 		if (current == null || !ReferenceEquals(__instance, current.ServerSession)) return;
 		try { current.ServerTick(__instance); }
@@ -298,7 +330,7 @@ internal sealed partial class HostWorld : IHostWorld
 			_mods = WorkshopMods.From(session.ExternalServices?.TryGet<Keen.VRage.Core.Worlds.ModList>() ?? LoadedMods());
 			if (_mods.Count > 0) _log.Info("keen host: the world runs mods: " + WorldMods.Summary(_mods));
 		}
-		KeenMods.Publish(_mods, Y51_SE2Online.Dedicated.DedicatedRuntime.Requested);
+		KeenMods.Publish(_mods, Y51_SE2Online.Dedicated.DedicatedRuntime.Requested, session.SessionComponents.TryGet<Keen.Game2.Simulation.GameSystems.Missions.MissionSessionComponent>() != null);
 		long now = MpClock.NowMs();
 		if (now >= _nextCharacterScanMs)
 		{
@@ -307,6 +339,8 @@ internal sealed partial class HostWorld : IHostWorld
 			if (identities != null) ShareResearch(session, identities);
 		}
 		UpdateSpawns(session, host, identities);
+		try { KeenNetcode.OwnMotion.ServerTick(session, _joiners.Values.Where(j => !j.Local).Select(j => (j.ClientId, j.Character)), host, _ids!); }
+		catch (Exception ex) { _log.WarnOnce("own-motion-server", "own motion: server tick failed: " + ex); }
 		_hostIdentity = Y51_SE2Online.Dedicated.DedicatedRuntime.Requested ? 0 : identities != null ? (long)identities.LocalIdentity : 0;
 		if (host.HostIdentity != _hostIdentity) host.HostIdentity = _hostIdentity;
 		UpdateSocial(session);
@@ -314,6 +348,9 @@ internal sealed partial class HostWorld : IHostWorld
 		if (Social is { } selfTestSocial) KeenNetcode.SelfTest.Server(session, selfTestSocial, _log);
 		SelfTestBring(session);
 		KeenNetcode.MotionProbe.ServerTick(session, _hostIdentity);
+		KeenNetcode.BuildProbe.Server(session, _log);
+		KeenNetcode.OwnMotionProbe.ServerTick(session, _joiners.Values.Where(j => !j.Local).Select(j => (j.ClientId, j.Character)));
+		KeenNetcode.AnimSyncProbe.ServerTick(session);
 #endif
 		UpdateAdmin(session);
 		PublishPcu(session);

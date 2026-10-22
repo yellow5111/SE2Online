@@ -21,8 +21,32 @@ internal static class UiShots
 
 	private static string? Save => MpPlugin.LaunchArgs.FirstOrDefault(a => a.StartsWith(MpOptions.Prefix + "autohost:", StringComparison.OrdinalIgnoreCase))?[(MpOptions.Prefix + "autohost:").Length..];
 
+	private static int _rulesStep = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "uishot-rules") ? 0 : -1;
+
+	private static long _rulesAtMs;
+
+	// `-y51online:uishot-rules`: once a world runs, screenshots the Rules page, then a search for the jetpack.
+	private static void RulesTick(GameAppComponent app)
+	{
+		long now = MpClock.NowMs();
+		if (_rulesStep < 0 || app._isTransitioning.IsSet || !MpMenu.HasWorld) return;
+		if (_rulesAtMs == 0) { _rulesAtMs = now + 30000; return; }
+		if (now < _rulesAtMs) return;
+		switch (_rulesStep++)
+		{
+		case 0: MpMenu.Open(); _rulesAtMs = now + 3000; break;
+		case 1: Page(5); _rulesAtMs = now + 15000; break;
+		case 2: Shot("y51-rules"); _rulesAtMs = now + 3000; break;
+		case 3: Avalonia.Threading.Dispatcher.UIThread.Post(() => OnlineScreen.Last?.SearchRules("jetpack")); _rulesAtMs = now + 4000; break;
+		case 4: Shot("y51-rules-jetpack"); _rulesAtMs = now + 3000; break;
+		case 5: Avalonia.Threading.Dispatcher.UIThread.Post(() => OnlineScreen.Last?.SearchRules("inventory maxmass")); _rulesAtMs = now + 4000; break;
+		case 6: Shot("y51-rules-inventory"); GameLog.Instance.Info("uishot: rules done"); _rulesStep = -1; break;
+		}
+	}
+
 	public static void Tick(GameAppComponent app)
 	{
+		RulesTick(app);
 		if (_step < 0) return;
 		long now = MpClock.NowMs();
 		if (_atMs == 0) _atMs = now + 15000;

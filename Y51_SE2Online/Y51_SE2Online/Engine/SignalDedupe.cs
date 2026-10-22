@@ -1,0 +1,84 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using Keen.VRage.DCS.Components;
+using Keen.VRage.Multiplayer.Transport.OutOfProcess;
+using Y51_SE2Online.Core;
+
+namespace Y51_SE2Online.Engine;
+
+/// <summary>
+/// The server re-sends some state signals every frame with the same arguments (a standing character's ground material and
+/// physics state, a turret holding its aim, a container's mass). Each one sets state on the player's game, so a repeat of
+/// what this player last got for the same entity is not sent again. Only arguments that compare by value are trusted
+/// (numbers, structs, strings, entities, definitions); a signal carrying anything else always goes.
+/// -y51online:signals:all sends every repeat.
+/// </summary>
+internal sealed class SignalDedupe
+{
+	private static readonly HashSet<string> StateSignals = new(StringComparer.Ordinal)
+	{
+		"Replay_Keen_Game2_Simulation_WorldObjects_Characters_CharacterMovementComponent_SyncSupportingMaterialSignal_Trampoline",
+		"Replay_Keen_Game2_Simulation_WorldObjects_Characters_CharacterMovementComponent_OnCharacterPhysicsStateChangedSignal_Trampoline",
+		"Replay_Keen_Game2_Simulation_WorldObjects_Characters_Stats_StatCollectionComponent_UpdateStatSignal_Trampoline",
+		"Replay_Keen_Game2_Simulation_WorldObjects_CubeBlocks_Weapons_AutoTargetingComponent_SyncAzimuthElevationSignal_Trampoline",
+		"Replay_Keen_Game2_Simulation_WorldObjects_Weapons_ProjectileWeaponComponent_ProjectileTransformProperty_Trampoline",
+		"Replay_Keen_Game2_Simulation_WorldObjects_CubeBlocks_MechanicalBlocks_MechanicalBlockCounterpartDetectionComponent_DetectedCounterpartChangedSignal_Trampoline",
+		"Replay_Keen_VRage_Water_Components_WaterDomainComponent_DomainGravityUpdatedSignal_Trampoline",
+		"Replay_Keen_Game2_Simulation_WorldObjects_CubeBlocks_Lcd_LcdMultiPanelComponent_SurfaceStatesProperty_Trampoline",
+		"Replay_Keen_Game2_Simulation_WorldObjects_CubeBlocks_ResourceDistribution_Resources_ResourceContainerComponent_NotifyContainerMassChangedSignal_Trampoline",
+	};
+
+	private static readonly bool Off = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "signals:all");
+
+	private readonly Dictionary<(string Signal, object Target), object?[]> _last = new();
+
+	public long Skipped;
+
+	/// <summary>An entity this player no longer has, or got again: its signals go again.</summary>
+	public void Forget(Entity entity)
+	{
+		if (_last.Count == 0) return;
+		List<(string, object)>? gone = null;
+		foreach (var key in _last.Keys) if (ReferenceEquals(key.Target, entity)) (gone ??= new()).Add(key);
+		if (gone != null) foreach (var key in gone) _last.Remove(key);
+	}
+
+	public bool IsRepeat(in RecordedSignal signal, Func<Entity, bool> exact)
+	{
+		if (Off || signal.Arguments is not { Count: > 0 } args) return false;
+		string name = signal.Signal.String;
+		if (!StateSignals.Contains(name)) return false;
+		var values = new object?[args.Count];
+		for (int i = 0; i < values.Length; i++)
+		{
+			object? value = args[i].Value is PayloadArg payload ? payload.Payload : args[i].Value;
+			if (!ByValue(value)) return false;
+			values[i] = value;
+		}
+		// The first argument is the entity the signal is raised on; anything else and the repeat cannot be told apart.
+		if (values[0] is not Entity target || exact(target)) return false;
+		var key = (name, (object)target);
+		if (_last.TryGetValue(key, out var last) && last.AsSpan().SequenceEqual(values, Comparer.Instance))
+		{
+			Skipped++;
+			return true;
+		}
+		// ponytail: one entry per entity and signal for the peer's life, cleared wholesale past 20000 (removed entities
+		// are never pruned one by one).
+		if (_last.Count > 20000) _last.Clear();
+		_last[key] = values;
+		return false;
+	}
+
+	private static bool ByValue(object? value) => value is null or string or Entity
+		|| value.GetType().IsValueType
+		|| value.GetType().Name.EndsWith("Definition", StringComparison.Ordinal);
+
+	private sealed class Comparer : IEqualityComparer<object?>
+	{
+		public static readonly Comparer Instance = new();
+		public new bool Equals(object? a, object? b) => object.Equals(a, b);
+		public int GetHashCode(object? o) => o?.GetHashCode() ?? 0;
+	}
+}

@@ -101,11 +101,20 @@ internal static class ClientDataGuard
 	private static Action<object, Sender> Filter(string method, Type data)
 		=> AccessTools.Method(typeof(ClientDataGuard), method).MakeGenericMethod(data).CreateDelegate<Action<object, Sender>>();
 
+	// A character the server moves from its player's own inputs (OwnMotion) takes Keen's copy of them from nobody.
 	private static void FilterPending<T>(object list, Sender sender) where T : unmanaged
-		=> sender.Drop(typeof(T).Name, ((Transport.PendingList<T>)list).Data.RemoveAll(d => !sender.Allows(d.Target)));
+	{
+		var data = ((Transport.PendingList<T>)list).Data;
+		sender.Drop(typeof(T).Name, data.RemoveAll(d => !sender.Allows(d.Target)));
+		data.RemoveAll(d => OwnMotion.ReplacesClientData(typeof(T), d.Target));
+	}
 
 	private static void FilterSampled<T>(object list, Sender sender) where T : unmanaged
-		=> sender.Drop(typeof(T).Name, ((Transport.SampledList<T>)list).Entries.RemoveAll(e => !sender.Allows(sender.Resolve(e.Id))));
+	{
+		var entries = ((Transport.SampledList<T>)list).Entries;
+		sender.Drop(typeof(T).Name, entries.RemoveAll(e => !sender.Allows(sender.Resolve(e.Id))));
+		entries.RemoveAll(e => OwnMotion.ReplacesClientData(typeof(T), sender.Resolve(e.Id)));
+	}
 
 	private static Sender? SenderFor(Transport transport)
 	{
