@@ -104,6 +104,8 @@ internal static class DedicatedRuntime
             Status = "Waiting for engine";
             GameLog.Instance.Info("dedicated: configuration loaded from " + Config.ConfigPath + (Headless ? "; headless simulation" : "; unattended server retains native client/renderer"));
             if (OnlineSettings.Unstable(Config.Network.MaxPlayers)) GameLog.Instance.Warn($"dedicated: Network.MaxPlayers is {Config.Network.MaxPlayers}. {OnlineSettings.UnstablePlayersWarning}");
+            // Up before the world loads, so status and the log are there to watch a long load.
+            DedicatedRcon.Start(Config);
             WriteStatus(true);
         }
         catch (Exception ex) { Fail("configuration", ex); }
@@ -211,6 +213,7 @@ internal static class DedicatedRuntime
     {
         if (Requested) WriteStatus();
         if (Requested && Config == null && Error != null) { app.ExitGame(); return; }
+        if (Requested && Config != null) DedicatedRcon.Pump(app);
         if (Requested && Config != null && !_exiting)
         {
             long commandStarted = MpClock.NowMs();
@@ -522,10 +525,26 @@ internal static class DedicatedRuntime
         finally { System.Threading.Volatile.Write(ref _commandPolling, 0); }
     }, null, 250, 250);
 
+    /// <summary>A save or the world load is running: console commands wait (the command file) or are refused (RCON).</summary>
+    internal static bool Busy => _saving || (_loading && !_loaded && Error == null);
+    internal static bool Exiting => _exiting;
+
+    internal sealed record Snapshot(string Status, string Error, bool WorldLoaded, bool Saving, bool Exiting, string SaveId,
+        DateTime? LastSaveUtc, DateTime? NextRestartUtc, DateTime StartedUtc, bool RestartRequested, bool LastSaveFailed);
+
+    internal static Snapshot State() => new(Status, Error, _loaded, _saving, _exiting, _savedId, _lastSaveUtc, _restartAt?.ToUniversalTime(),
+        StartedLocal.ToUniversalTime(), _restartRequested, _lastSaveFailed);
+
     private static void CheckCommand(GameAppComponent app)
     {
         StartCommandPoll();
-        if (_saving || (_loading && !_loaded && Error == null) || !Commands.TryDequeue(out string command)) return;
+        if (Busy || !Commands.TryDequeue(out string command)) return;
+        RunCommand(app, command);
+    }
+
+    /// <summary>One console command, on the game thread: from the command file (the runner, scripts) or RCON. Results are logged.</summary>
+    internal static void RunCommand(GameAppComponent app, string command)
+    {
         if (command.Equals("stop", StringComparison.OrdinalIgnoreCase))
         {
             _restartRequested = false;

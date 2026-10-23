@@ -24,9 +24,14 @@ internal sealed class GameLog : IMpLog
 		Write(LogSeverity.Error, message);
 	}
 
+	/// <summary>Set on the game thread while an RCON command runs: the lines it logs become the reply.</summary>
+	[ThreadStatic] internal static System.Text.StringBuilder Capture;
+
 	public static void Write(LogSeverity severity, string message)
 	{
 		Dedicated.DedicatedConsoleLog.Write(severity.ToString(), message);
+		if (Dedicated.DedicatedRuntime.Requested) LogRing.Server.Add(severity.ToString(), message);
+		Capture?.Append(message.StartsWith("console: ", StringComparison.Ordinal) ? message.Substring(9) : message).Append('\n');
 		try
 		{
 			string text = LogFormat.Line(LogFormat.Level(severity.ToString()), message);

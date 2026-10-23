@@ -62,6 +62,18 @@ public sealed class DedicatedConfig
     public string LoopPriority { get; set; } = "AboveNormal";
     /// <summary>Opt-in JSONL server frame and network profile (relative to this file's folder); empty is off.</summary>
     public string ProfileFile { get; set; } = "";
+    /// <summary>Remote console (Source RCON over TCP): off until the host turns it on and gives it a way in.</summary>
+    public bool RconEnabled { get; set; }
+    /// <summary>TCP port; not the game port or its query port (game + 1), never 7742 (co-op hosting).</summary>
+    public int RconPort { get; set; } = 27020;
+    /// <summary>Address the remote console listens on; empty uses Network.BindAddress.</summary>
+    public string RconBindAddress { get; set; } = "";
+    /// <summary>Signs in as Owner (every command); empty allows Steam sign-in only.</summary>
+    public string RconPassword { get; set; } = "";
+    /// <summary>Steam sign-in: the RCON tool sends a Steam auth ticket, and the account's place on the admin list gives its role.</summary>
+    public bool RconSteamAuth { get; set; } = true;
+    /// <summary>Commands a Steam sign-in may run over RCON by role (Admin, Player): command words, "*" for all. The password is Owner: every command.</summary>
+    public Dictionary<string, List<string>> RconRoles { get; set; } = Core.RconAccess.DefaultRoles();
     [JsonIgnore] public string ConfigPath { get; private set; }
     [JsonIgnore] public string Directory => Path.GetDirectoryName(ConfigPath);
     [JsonIgnore] public string DumpPath => Path.GetFullPath(Path.Combine(Directory, SettingsDumpFile));
@@ -85,7 +97,7 @@ public sealed class DedicatedConfig
             ? JsonDefaults.UnknownKeys(file, (System.Text.Json.Nodes.JsonObject)JsonSerializer.SerializeToNode(new DedicatedConfig(), Json)!, FreeForm)
             : new List<string>();
 
-    private static readonly HashSet<string> FreeForm = new(StringComparer.OrdinalIgnoreCase) { "SessionSettings", "DefinitionSettings" };
+    private static readonly HashSet<string> FreeForm = new(StringComparer.OrdinalIgnoreCase) { "SessionSettings", "DefinitionSettings", "RconRoles" };
 
     private static readonly HashSet<string> NotAdded = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -96,7 +108,9 @@ public sealed class DedicatedConfig
         // Read-only, worked out from BindAddress and ListenPort.
         "Network.BindEndpoint",
         // The client's own record of the Host screen; a server.json states its hacking options outright.
-        "Network.HackingChosen"
+        "Network.HackingChosen",
+        // A host's own role lists: added whole when missing, never given a role the host left out.
+        "RconRoles.Admin", "RconRoles.Player"
     };
 
     /// <summary>Writes options this version added into the host's server.json with their defaults; returns their paths.</summary>
@@ -161,6 +175,7 @@ public sealed class DedicatedConfig
         if (config.DefinitionSettings == null) throw new ArgumentException("DefinitionSettings cannot be null.");
         if (string.IsNullOrWhiteSpace(config.SettingsDumpFile)) throw new ArgumentException("SettingsDumpFile cannot be empty.");
         if (string.IsNullOrWhiteSpace(config.DefinitionDumpFile)) throw new ArgumentException("DefinitionDumpFile cannot be empty.");
+        ValidateRcon(config);
         if (string.IsNullOrWhiteSpace(config.ResumeFile) || string.IsNullOrWhiteSpace(config.CommandFile))
             throw new ArgumentException("ResumeFile and CommandFile cannot be empty.");
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -181,6 +196,31 @@ public sealed class DedicatedConfig
         NativeSessionSettings.Validate(config.SessionSettings);
         NativeDefinitionSettings.Validate(config.DefinitionSettings);
         return config;
+    }
+
+    private static void ValidateRcon(DedicatedConfig config)
+    {
+        config.RconBindAddress = config.RconBindAddress?.Trim() ?? "";
+        config.RconPassword ??= "";
+        config.RconRoles ??= Core.RconAccess.DefaultRoles();
+        if (config.RconPort is < 1 or > 65535) throw new ArgumentException("RconPort must be between 1 and 65535.");
+        if (config.RconBindAddress.Length > 0 && !System.Net.IPAddress.TryParse(config.RconBindAddress, out _))
+            throw new ArgumentException($"RconBindAddress: '{config.RconBindAddress}' is not an IP address (empty uses Network.BindAddress).");
+        if (config.RconPassword.Length > 128 || config.RconPassword.Any(char.IsControl)) throw new ArgumentException("RconPassword is one line of at most 128 characters.");
+        foreach (var (role, commands) in config.RconRoles)
+        {
+            if (!role.Equals(Core.RconCaller.Admin, StringComparison.OrdinalIgnoreCase) && !role.Equals(Core.RconCaller.Player, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException($"RconRoles: '{role}' is not a role; use Admin or Player (the password signs in as Owner, with every command).");
+            foreach (string command in commands ?? new())
+                if (command != "*" && !Core.RconAccess.Commands.Contains(Core.RconAccess.Verb(command)))
+                    throw new ArgumentException($"RconRoles.{role}: '{command}' is not an RCON command; use {string.Join(", ", Core.RconAccess.Commands)} or *.");
+        }
+        if (!config.RconEnabled) return;
+        int game = config.Network?.ListenPort ?? 0;
+        // RCON is TCP and the game UDP, but one number per service keeps firewall rules and port forwards unambiguous.
+        if (config.RconPort == game || config.RconPort == game + 1)
+            throw new ArgumentException($"RconPort {config.RconPort} is the game port or its Steam query port (Network.ListenPort {game} and {game + 1}); pick another, e.g. 27020.");
+        if (config.RconPort == 7742) throw new ArgumentException("RconPort 7742 is SE2 Online's co-op hosting port; pick another, e.g. 27020.");
     }
 }
 

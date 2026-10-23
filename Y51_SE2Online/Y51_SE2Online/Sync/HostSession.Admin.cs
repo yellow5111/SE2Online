@@ -164,7 +164,10 @@ public sealed partial class HostSession
 	}
 
 	/// <summary>Admin action by the hosting player or the dedicated console (actorId 0).</summary>
-	public string LocalAdmin(AdminRequest request) => Act(0, _o.Dedicated ? "Server" : _o.HostName, OnlineRole.Host, request, null, SyncProtocol.HostClientId);
+	/// <summary>Set on the game thread while a remote console command runs: the ban list and chat name the RCON admin.</summary>
+	[ThreadStatic] public static string LocalActor;
+
+	public string LocalAdmin(AdminRequest request) => Act(0, LocalActor ?? (_o.Dedicated ? "Server" : _o.HostName), OnlineRole.Host, request, null, SyncProtocol.HostClientId);
 
 	private string Act(ulong actorId, string actorName, OnlineRole actorRole, AdminRequest r, PeerId? actorPeer, ushort actorClientId)
 	{
