@@ -28,6 +28,18 @@ internal static class CustomRulesHost
 	private static string _markerPath;
 	private static string _worldLabel;
 	private static List<AppliedRule> _received;
+	// The join the received rules belong to (SE2 Online's connection), and whether some of them still wait for the world's
+	// definitions: SE2 Online's own join gets the rules before the game loads the world (and the server's mods).
+	private static object _receivedFor;
+	private static int _deferred;
+	// The received rules came with a join (before the server's accept): once the world's definitions are in, every value
+	// must fit, or the player's world would run out of step with the server.
+	private static bool _joinCheck;
+	private static string _refusal;
+	private static object _refusalFor;
+
+	/// <summary>Why this game stopped loading the server's world over its custom rules (null: it did not).</summary>
+	public static string Refusal { get { lock (Gate) return _refusal != null && ReferenceEquals(_refusalFor, NetHost.NetSession.Current?.Client) ? _refusal : null; } }
 	private static List<AppliedRule> _hostApplied = new();
 	private static bool _unsaved;
 	private static long _nextSaveCheckMs;
@@ -57,6 +69,31 @@ internal static class CustomRulesHost
 		harmony.Patch(AccessTools.Method(typeof(GameAppComponent), "NotifySessionLoadFinished"), prefix: new HarmonyMethod(typeof(CustomRulesHost), nameof(LoadFinishedPrefix)));
 		harmony.Patch(AccessTools.Method(typeof(GameAppComponent), nameof(GameAppComponent.LoadNetworkClientAsync)), prefix: new HarmonyMethod(typeof(CustomRulesHost), nameof(JoiningPrefix)));
 		ClientRules.Apply = ApplyReceived;
+		try
+		{
+			if (Keen.VRage.Library.Utils.Singleton<Keen.VRage.Library.Definitions.DefinitionManager>.Instance is { } definitions) definitions.DefinitionSetPushed += OnDefinitionSetPushed;
+			else GameLog.Instance.Warn("custom rules: no definition manager yet; a joining player's rules are applied when its world's session builds");
+		}
+		catch (Exception ex) { GameLog.Instance.Warn("custom rules: " + ex.Message); }
+	}
+
+	// The world's definitions (with the server's mods) were just pushed, before anything of the world is built from them:
+	// the values that waited apply now. Problems are only logged here (the push is done); InjectPrefix refuses the load.
+	private static void OnDefinitionSetPushed(Keen.VRage.Library.Definitions.IDefinitionSet set)
+	{
+		try
+		{
+			if (set?.Name != "World") return;
+			OwnStatePrediction.ForgetDefinitions();
+			lock (Gate)
+			{
+				if (_received == null || !_joinCheck || !ReferenceEquals(_receivedFor, NetHost.NetSession.Current?.Client)) return;
+				var problems = CustomRulesEngine.ApplyExact(_received, revertFirst: false);
+				if (problems.Count == 0) GameLog.Instance.Info($"custom rules: the world's definitions are in; the server's {_received.Count} value(s) are applied: " + CustomRulesEngine.Probe(_received));
+				else foreach (var problem in problems.Take(20)) GameLog.Instance.Warn("custom rules: " + problem);
+			}
+		}
+		catch (Exception ex) { GameLog.Instance.Error("custom rules: applying the server's values to the world's definitions failed: " + ex); }
 	}
 
 	private static void WorldInitPrefix(WorldSessionComponentObjectBuilder ob)
@@ -73,6 +110,8 @@ internal static class CustomRulesHost
 		lock (Gate)
 		{
 			_received = null;
+			_receivedFor = null;
+			_joinCheck = false;
 			_current = null;
 			_markerPath = null;
 			_worldLabel = worldId;
@@ -135,6 +174,26 @@ internal static class CustomRulesHost
 	// The session builders are read from the save by now: write the session settings, once per builder.
 	private static void InjectPrefix(SessionBuilder sessionBuilder)
 	{
+		string refusal = null;
+		InjectRules(sessionBuilder, ref refusal);
+		if (refusal == null) return;
+		GameLog.Instance.Error("custom rules: " + refusal);
+		lock (Gate)
+		{
+			CustomRulesEngine.Revert();
+			_received = null;
+			_receivedFor = null;
+			_deferred = 0;
+			_joinCheck = false;
+			_refusal = refusal;
+			_refusalFor = NetHost.NetSession.Current?.Client;
+		}
+		// The world does not load: the player goes back to the menu with the reason (as the server's refusal would).
+		throw new InvalidOperationException(refusal);
+	}
+
+	private static void InjectRules(SessionBuilder sessionBuilder, ref string refusal)
+	{
 #if !PULSAR
 		// Test rig: a world that fails to load while it has custom rules (the fallback's proof).
 		if (sessionBuilder.IsServer && Current != null && MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "selftest-rules-fail"))
@@ -145,13 +204,24 @@ internal static class CustomRulesHost
 			if (!sessionBuilder.IsServer)
 			{
 				List<AppliedRule> received;
-				lock (Gate) received = _received;
-				// Again here, in case the game swapped definitions while the player's world was loading.
+				int deferred;
+				bool joinCheck;
+				lock (Gate) (received, deferred, joinCheck) = (_received, _deferred, _joinCheck);
+				// Again here, in case the game swapped definitions while the player's world was loading; and here first for
+				// values whose definitions were not loaded when the rules came: the world's definitions (with the server's
+				// mods) are in now, so what does not fit now never will, and this world would run out of step.
 				if (received != null)
 				{
-					foreach (var problem in CustomRulesEngine.ApplyExact(received, revertFirst: false))
-						GameLog.Instance.Warn("custom rules: " + problem);
-					GameLog.Instance.Info("custom rules: live in this player's world: " + CustomRulesEngine.Probe(received));
+					var problems = CustomRulesEngine.ApplyExact(received, revertFirst: false);
+					foreach (var problem in problems) GameLog.Instance.Warn("custom rules: " + problem);
+					if (joinCheck && problems.Count > 0)
+						refusal = $"Your game could not apply this server's custom rules, so joining would put you out of step with the server: {problems.Count} of the server's {received.Count} custom values do not fit this game: {problems[0]}";
+					else
+					{
+						lock (Gate) (_deferred, _joinCheck) = (0, false);
+						if (deferred > 0) GameLog.Instance.Info($"custom rules: the {deferred} value(s) that waited for the world's definitions are applied");
+						GameLog.Instance.Info("custom rules: live in this player's world: " + CustomRulesEngine.Probe(received));
+					}
 				}
 #if !PULSAR
 				// Test rig: the session settings this player's world got from the server's snapshot.
@@ -303,32 +373,59 @@ internal static class CustomRulesHost
 		lock (Gate)
 		{
 			_current = null;
-			_received = null;
 			_markerPath = null;
 			HostRules.Offer = null;
+			_refusal = null;
+			// SE2 Online's own join: the server's rules came on this connection before the game started loading the world.
+			if (_received != null && _receivedFor != null && ReferenceEquals(_receivedFor, NetHost.NetSession.Current?.Client))
+			{
+				GameLog.Instance.Info($"custom rules: keeping the server's {_received.Count} definition value(s) for this join");
+				return;
+			}
+			_received = null;
+			_receivedFor = null;
+			_deferred = 0;
+			_joinCheck = false;
+			_refusal = null;
 			int restored = CustomRulesEngine.Revert();
 			if (restored > 0) GameLog.Instance.Info($"custom rules: put {restored} definition value(s) back to the game's own before joining");
 		}
 	}
 
-	// Net thread, before the game asks the host for the world (the host waits for this answer).
+	// Main thread (ClientSession.ApplyRulesOffers): before the host sends the world (it waits for this answer), or live.
 	private static string ApplyReceived(string hash, List<AppliedRule> rules)
 	{
 		lock (Gate)
 		{
-			var problems = CustomRulesEngine.ApplyExact(rules, revertFirst: true);
+			// Before the world loads (SE2 Online's join gets the rules first), the world's and the mods' definitions are not
+			// in the game yet: values for them wait and are checked when the world loads (InjectPrefix). In a world, every
+			// definition the server's values name must be here.
+			var absent = JoinOffer() ? new List<AppliedRule>() : null;
+			var problems = CustomRulesEngine.ApplyExact(rules, revertFirst: true, absent);
 			_received = rules;
+			_receivedFor = NetHost.NetSession.Current?.Client;
+			_deferred = absent?.Count ?? 0;
+			_joinCheck = absent != null;
+			_refusal = null;
 			if (problems.Count == 0)
 			{
-				GameLog.Instance.Info($"custom rules: applied the server's {rules.Count} definition value(s) ({hash}): " + CustomRulesEngine.Probe(rules));
+				GameLog.Instance.Info($"custom rules: applied the server's {rules.Count - _deferred} definition value(s) ({hash}): " + CustomRulesEngine.Probe(rules)
+					+ (_deferred > 0 ? $"; {_deferred} more wait for the world's definitions (they load with the world)" : ""));
 				return "";
 			}
 			CustomRulesEngine.Revert();
 			_received = null;
+			_receivedFor = null;
+			_deferred = 0;
+			_joinCheck = false;
 			foreach (var p in problems.Take(20)) GameLog.Instance.Warn("custom rules: " + p);
 			return $"{problems.Count} of the server's {rules.Count} custom values do not fit this game: {problems[0]}" + (problems.Count > 1 ? $" (and {problems.Count - 1} more, see the log)" : "");
 		}
 	}
+
+	// Rules that come with a join (the server has not accepted this player yet, so no world of its is loading or loaded);
+	// rules changed while the player is in come after the accept.
+	private static bool JoinOffer() => NetHost.NetSession.Current?.Client is { } client && client.CurrentPhase < ClientSession.Phase.Accepted;
 
 	/// <summary>Dedicated: the world is up; clear the load check and write the dumps the runner's editor reads.</summary>
 	public static void WriteDumps(string settingsPath, string definitionsPath, bool writeDefinitions)

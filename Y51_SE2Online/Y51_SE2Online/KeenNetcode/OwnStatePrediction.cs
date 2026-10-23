@@ -228,6 +228,9 @@ internal static class OwnStatePrediction
 	private static ServerJetpackBoostComponentDefinition? _boostDef;
 	private static float _boostSpeed;
 
+	/// <summary>Definitions were pushed (a world, maybe with other mods or rules): the cached ones may be stale.</summary>
+	internal static void ForgetDefinitions() => (_jetpack, _boostDef) = (null, null);
+
 	private static bool Definitions()
 	{
 		if (_jetpack != null && _boostDef != null) return true;

@@ -203,8 +203,13 @@ internal static class CustomRulesEngine
 		}
 	}
 
-	/// <summary>Player side: the exact values the host applied. Returns the problems (empty: all applied).</summary>
-	public static List<string> ApplyExact(IReadOnlyList<AppliedRule> rules, bool revertFirst)
+	/// <summary>
+	/// Player side: the exact values the host applied. Returns the problems (empty: all applied). With
+	/// <paramref name="absent"/>, a value whose definition this game does not have (yet) is put there instead of being a
+	/// problem: before the world loads, the game has only its core definitions (the world's, and the server's mods',
+	/// are pushed when the world loads).
+	/// </summary>
+	public static List<string> ApplyExact(IReadOnlyList<AppliedRule> rules, bool revertFirst, List<AppliedRule> absent = null)
 	{
 		var problems = new List<string>();
 		lock (Gate)
@@ -217,7 +222,8 @@ internal static class CustomRulesEngine
 			{
 				if (!byId.TryGetValue(rule.Id, out var definition) || definition.GetType().FullName != rule.Type)
 				{
-					problems.Add($"this game has no {rule.Type.Split('.').Last()} {rule.Id} (a mod the server has?)");
+					if (absent != null) absent.Add(rule);
+					else problems.Add(Missing(rule));
 					continue;
 				}
 				if (!TryMember(definition, rule.Path, out var member, out string error)) { problems.Add(error); continue; }
@@ -232,6 +238,8 @@ internal static class CustomRulesEngine
 		}
 		return problems;
 	}
+
+	public static string Missing(AppliedRule rule) => $"this game has no {rule.Type.Split('.').Last()} {rule.Id} (a mod the server has?)";
 
 	/// <summary>Reads back a few of the applied values from the live definitions (proof in the log that they are in force).</summary>
 	public static string Probe(IReadOnlyList<AppliedRule> rules, int max = 6)

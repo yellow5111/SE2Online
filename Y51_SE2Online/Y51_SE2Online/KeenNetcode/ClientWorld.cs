@@ -471,7 +471,7 @@ internal sealed class ClientWorld
 	private bool RejoinsByItself => _o.Rejoin && !_o.KeenAttached;
 
 	// The server's own reason when it refused this player (a refusal or kick never rejoins by itself).
-	private string? Refusal() => _session?.RejectReason;
+	private string? Refusal() => _session?.RejectReason ?? CustomRulesHost.Refusal;
 
 	/// <summary>Main thread: applies <see cref="RejoinPolicy.Decide"/> for one event. Lost schedules the next automatic rejoin
 	/// (waiting longer each time, up to the cap); Failed waits for the player.</summary>
