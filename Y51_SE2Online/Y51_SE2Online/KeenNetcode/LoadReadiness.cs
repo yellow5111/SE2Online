@@ -53,6 +53,9 @@ internal static class LoadReadiness
 	private static bool _preloadDone;
 	private static Vector3D _preloadAt;
 	private static bool _resourcesStarted, _resourcesDone;
+	// When everything near the player (world, character, grids, terrain, flora) was first ready, -1 while it is not.
+	private static long _nearbyMs = -1;
+	private static bool _texturesLeft;
 	private static Vector3D? _frozenAt;
 	private static long _frozenTicks;
 
@@ -84,7 +87,9 @@ internal static class LoadReadiness
 				var at = body.Data.GetWorldTransform().Position;
 				probes[(int)WorldReadiness.Part.Grids] = Grids(session, at);
 				probes[(int)WorldReadiness.Part.Terrain] = Terrain(session, controller!, at);
-				probes[(int)WorldReadiness.Part.Details] = Details(session, controller!, at);
+				bool nearby = probes[(int)WorldReadiness.Part.World].Ready && probes[(int)WorldReadiness.Part.Character].Ready
+					&& probes[(int)WorldReadiness.Part.Grids].Ready && probes[(int)WorldReadiness.Part.Terrain].Ready;
+				probes[(int)WorldReadiness.Part.Details] = Details(session, controller!, at, nearby, now);
 				// Held only while what it could stand on may be missing; terrain detail and textures do not need it.
 				if (probes[(int)WorldReadiness.Part.World].Ready && probes[(int)WorldReadiness.Part.Grids].Ready && probes[(int)WorldReadiness.Part.Terrain].Ready) _frozenAt = null;
 				else Hold(body);
@@ -111,7 +116,8 @@ internal static class LoadReadiness
 			_preloaded = null;
 		}
 		_preloading = false;
-		_preloadDone = _resourcesStarted = _resourcesDone = false;
+		_preloadDone = _resourcesStarted = _resourcesDone = _texturesLeft = false;
+		_nearbyMs = -1;
 		_frozenAt = null;
 		_frozenTicks = 0;
 	}
@@ -252,9 +258,12 @@ internal static class LoadReadiness
 		if (!kept) space?.Dispose();
 	}
 
-	private static Probe Details(Session session, PlayerControllerComponent controller, Vector3D at)
+	private static Probe Details(Session session, PlayerControllerComponent controller, Vector3D at, bool nearby, long now)
 	{
 		int flora = FloraPhysicsRecovery.PendingNear(at, FloraMeters);
+		nearby &= flora == 0;
+		if (!nearby) _nearbyMs = -1;
+		else if (_nearbyMs < 0) _nearbyMs = now;
 		if (!_resourcesStarted)
 		{
 			_resourcesStarted = true;
@@ -262,6 +271,14 @@ internal static class LoadReadiness
 			else _resourcesDone = true;
 		}
 		if (_resourcesDone && flora == 0) return Probe.Done;
+		// The game's resource wait also holds for optional distant textures (up to a minute; 21.6 s for two far terrain
+		// textures on record): once everything near the player is ready it gets only WorldReadiness.TextureWaitMs more.
+		if (nearby && !WorldReadiness.TexturesHeld(now - _nearbyMs))
+		{
+			if (!_texturesLeft) GameLog.Instance.Info($"loading screen: everything near the player is ready; not waiting longer than {WorldReadiness.TextureWaitMs / 1000} s for the game's textures (they finish loading in the world)");
+			_texturesLeft = true;
+			return Probe.Done;
+		}
 		return new Probe(false, _resourcesDone ? 0.75 : 0.25, flora > 0 ? $"{flora} flora sector{(flora == 1 ? "" : "s")} nearby" : "terrain detail and textures");
 	}
 

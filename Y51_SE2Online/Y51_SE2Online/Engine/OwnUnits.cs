@@ -80,6 +80,19 @@ internal static class OwnArchive
 	// bounded ratio (SE2 Online writes its values uncompressed; the game's writer may pack its type table).
 	private const long MaxInflated = 32L << 20;
 
+	// Archives from the server this game joined (read on the joined player's inbound job, FromServer): a big world's initial
+	// object batch is one archive (52 MiB for 136k entities), which the players' cap refused after the whole download. As
+	// large as a bulk message from the host may be (TransportOptions.MaxBulkMessageBytes); every entry check stays.
+	internal const long MaxInflatedFromServer = 256L << 20;
+
+	[ThreadStatic] private static bool _fromServer;
+
+	internal static void BeginFromServer() => _fromServer = true;
+
+	internal static void EndFromServer() => _fromServer = false;
+
+	internal static long ArchiveCap(bool fromServer) => fromServer ? MaxInflatedFromServer : MaxInflated;
+
 	// What the players' frames of one inbound job may make the game's reader allocate (its tables come from the thread's
 	// bump allocator, freed once per job). A transport stops taking frames once it is spent and leaves the rest for the
 	// next job; one frame already taken may overrun it by at most one more budget. Outside a budget nothing is counted.
@@ -106,7 +119,7 @@ internal static class OwnArchive
 	{
 		using var probe = new MemoryStream(bytes, writable: false);
 		var header = BinaryArchiveParser.TryReadHeader(probe, out var validation) ?? throw new InvalidDataException("values: " + validation);
-		long limit = Math.Min(MaxInflated, bytes.Length * 16L + 4096), total = 0;
+		long limit = Math.Min(ArchiveCap(_fromServer && !_budgeted), bytes.Length * 16L + 4096), total = 0;
 		// Tables may be packed (the game's writer packs its type table) but inflate at most 16:1; chunks are written unpacked.
 		void Entry(long offset, long size, long inflated, CompressionType compression, bool chunk)
 		{

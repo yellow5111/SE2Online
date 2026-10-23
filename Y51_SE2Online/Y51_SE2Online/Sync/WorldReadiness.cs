@@ -33,6 +33,13 @@ public sealed class WorldReadiness
 	/// <summary>Everything ready this long in a row: a batch arriving just after the last one was built would otherwise drop the screen early.</summary>
 	public const long SettleMs = 1_000;
 
+	/// <summary>How long the game's texture and resource wait may still hold the screen once everything near the player is ready.</summary>
+	public const long TextureWaitMs = 5_000;
+
+	/// <summary>Whether the planet details part still waits for the game's resources, <paramref name="nearbyReadyForMs"/>
+	/// after everything near the player was ready.</summary>
+	public static bool TexturesHeld(long nearbyReadyForMs) => nearbyReadyForMs < TextureWaitMs;
+
 	private readonly long[] _waitedMs = new long[Parts];
 	private readonly bool[] _skipped = new bool[Parts];
 	private readonly List<string> _notes = new();

@@ -69,7 +69,9 @@ internal sealed partial class NetSession
 				id => (id != 0 && id == _localIdentity) || ((_o.Allow.Count == 0 || _o.Allow.Contains(id)) && (!_o.FriendsOnly || SteamFriends.GetFriendRelationship(new CSteamID(id)) == EFriendRelationship.k_EFriendRelationshipFriend)),
 				// A co-op host without Direct IP still listens on this PC's loopback: another game on the same Steam account joins
 				// through it (Steam will not connect an account to itself).
-				_o.SteamListenIp ?? (_o.Host && !_o.Dedicated ? new IPEndPoint(IPAddress.Loopback, MpMenu.Settings?.ListenPort ?? MpOptions.DefaultIpPort) : null), _o.Dedicated);
+				_o.SteamListenIp ?? (_o.Host && !_o.Dedicated ? new IPEndPoint(IPAddress.Loopback, MpMenu.Settings?.ListenPort ?? MpOptions.DefaultIpPort) : null), _o.Dedicated,
+				// A host sends the world: each player's send rate floor starts at 4 MiB/s and backs off (SendRatePolicy).
+				adaptiveRate: _o.Host);
 			steamLink.Start(_o.Host);
 			link = steamLink;
 			SteamJoinStart(localId, name);
@@ -162,7 +164,9 @@ internal sealed partial class NetSession
 		string lastRelayStatus = "";
 		uint conn = 0u;
 		if (steam == null) _joinTarget = 0uL;
-		long nextAttemptMs = MpClock.NowMs() + (steam != null ? 2000 : 500);
+		// Steam's first attempt waits only for the relay or network config (checked below, with a 20 s fallback); TCP's
+		// keeps half a second for a server started on this PC alongside.
+		long nextAttemptMs = MpClock.NowMs() + (steam != null ? 0 : 500);
 		int attempts = 0;
 		int maxAttempts = steam != null ? SteamAttempts : TcpAttempts;
 		int retryMs = steam != null ? SteamRetryMs : TcpRetryMs;

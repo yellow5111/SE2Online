@@ -25,6 +25,11 @@ internal sealed class SteamLink : IPacketLink, IDisposable
 		public bool LanesOk;
 
 		public long LastInboundMs;
+
+		/// <summary>A host's adaptive send rate floor for this player (incoming connections only).</summary>
+		public Y51_SE2Online.Net.SendRatePolicy? Rate;
+
+		public long NextRateLookMs;
 	}
 
 	private readonly IMpLog _log;
@@ -61,6 +66,8 @@ internal sealed class SteamLink : IPacketLink, IDisposable
 
 	private readonly bool _gameServer;
 
+	private readonly bool _adaptiveRate;
+
 	private readonly IPEndPoint _listenAddress;
 
 	private HSteamNetPollGroup _pollGroup = HSteamNetPollGroup.Invalid;
@@ -77,8 +84,9 @@ internal sealed class SteamLink : IPacketLink, IDisposable
 
 	public bool AuthenticatesPeers => true;
 
-	public SteamLink(IMpLog log, int virtualPort, int sendRateMin, int sendRateMax, Func<ulong, bool> accept, IPEndPoint listenAddress = null, bool gameServer = false)
+	public SteamLink(IMpLog log, int virtualPort, int sendRateMin, int sendRateMax, Func<ulong, bool> accept, IPEndPoint listenAddress = null, bool gameServer = false, bool adaptiveRate = false)
 	{
+		_adaptiveRate = adaptiveRate;
 		_api = new SteamSocketApi(gameServer);
 		_gameServer = gameServer;
 		_listenAddress = listenAddress;
@@ -178,7 +186,7 @@ internal sealed class SteamLink : IPacketLink, IDisposable
 		}
 		_api.SetConnectionPollGroup(connection, _pollGroup);
 		_conns[connection.m_HSteamNetConnection] = new Conn { Handle = connection };
-		ApplyRates(connection);
+		ApplyRates(connection, _sendRateMin);
 		_log.Info("Connecting with Steam Networking Sockets to " + endpoint);
 		return connection.m_HSteamNetConnection;
 	}
@@ -219,14 +227,16 @@ internal sealed class SteamLink : IPacketLink, IDisposable
 		// An IP connection's identity comes with authentication (MarkConnected); superseding on 0 would close
 		// whatever else is still connecting by IP.
 		if (remote != 0) Supersede(id, remote, incoming, now, _pendingEvents);
-		_conns[id] = new Conn
+		var conn = new Conn
 		{
 			Handle = h,
 			Remote = remote,
 			Incoming = incoming,
-			LastInboundMs = now
+			LastInboundMs = now,
+			Rate = _adaptiveRate && incoming ? new Y51_SE2Online.Net.SendRatePolicy(_sendRateMin, _sendRateMax) : null
 		};
-		ApplyRates(h);
+		_conns[id] = conn;
+		ApplyRates(h, conn.Rate?.Current ?? _sendRateMin);
 	}
 
 	// Another live game instance on the same Steam account is a separate player (an alias peer id). A slot whose
@@ -262,11 +272,11 @@ internal sealed class SteamLink : IPacketLink, IDisposable
 		}
 	}
 
-	private void ApplyRates(HSteamNetConnection h)
+	private void ApplyRates(HSteamNetConnection h, int min)
 	{
 		try
 		{
-			bool minOk = SetConnInt(h, ESteamNetworkingConfigValue.k_ESteamNetworkingConfig_SendRateMin, _sendRateMin);
+			bool minOk = SetConnInt(h, ESteamNetworkingConfigValue.k_ESteamNetworkingConfig_SendRateMin, min);
 			bool maxOk = SetConnInt(h, ESteamNetworkingConfigValue.k_ESteamNetworkingConfig_SendRateMax, _sendRateMax);
 			if (!minOk || !maxOk)
 			{
@@ -364,6 +374,28 @@ internal sealed class SteamLink : IPacketLink, IDisposable
 			if (count < _recv.Length)
 			{
 				break;
+			}
+		}
+		if (_adaptiveRate) LookRates();
+	}
+
+	// Once a second per player: the send rate floor follows what the player's link carries (SendRatePolicy).
+	private void LookRates()
+	{
+		long now = MpClock.NowMs();
+		foreach (var pair in _conns)
+		{
+			var c = pair.Value;
+			if (c.Rate == null || !c.Connected || now < c.NextRateLookMs) continue;
+			c.NextRateLookMs = now + Y51_SE2Online.Net.SendRatePolicy.LookEveryMs;
+			var status = new SteamNetConnectionRealTimeStatus_t { reserved = new uint[16] };
+			var lanes = new SteamNetConnectionRealTimeLaneStatus_t { reserved = new uint[10] };
+			if (_api.GetConnectionRealTimeStatus(c.Handle, ref status, 0, ref lanes) != EResult.k_EResultOK) continue;
+			int before = c.Rate.Current;
+			if (c.Rate.Look(status.m_flConnectionQualityRemote, status.m_nPing))
+			{
+				bool ok = SetConnInt(c.Handle, ESteamNetworkingConfigValue.k_ESteamNetworkingConfig_SendRateMin, c.Rate.Current);
+				_log.Info($"steam: conn {PopId(pair.Key)} send rate floor {before / 1024} -> {c.Rate.Current / 1024} KiB/s (quality {status.m_flConnectionQualityRemote:0.00}, ping {status.m_nPing} ms){(ok ? "" : "; Steam refused the setting")}");
 			}
 		}
 	}

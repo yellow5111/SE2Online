@@ -330,8 +330,9 @@ internal static class Y51Replication
 			else if (_client is { } client && ReferenceEquals(client.Owner.Session, session))
 			{
 				KeenNetcode.AnimPlayout.BeginInbound();
+				OwnArchive.BeginFromServer();
 				try { client.ProcessInbound(); }
-				finally { KeenNetcode.AnimPlayout.EndInbound(); }
+				finally { OwnArchive.EndFromServer(); KeenNetcode.AnimPlayout.EndInbound(); }
 			}
 		}
 		catch (Exception ex) { GameLog.Instance.WarnOnce("engine-inbound", "engine: applying inbound replication failed: " + ex); }

@@ -22,6 +22,9 @@ internal static class BulkCompression
 
 	public const int MinBytes = 8192;
 
+	/// <summary>Messages from this size on are deflated when the network thread sends them (MpTransport.Dispatch), not when queued.</summary>
+	public const int PackLaterBytes = 1 << 20;
+
 	/// <summary>
 	/// Inflated size may be at most this many times the envelope. Real bulk data deflates about 3-9 times (world parts
 	/// 8.4x at most in the logs); deflated zeros reach 1000x, which is what a bomb uses.
@@ -29,7 +32,8 @@ internal static class BulkCompression
 	public const int MaxRatio = 64;
 
 	/// <summary>The envelope, or null when the message is small, over <paramref name="maxBytes"/> (the receiver's
-	/// inflate cap; such a message goes as it is), or deflating saves under a fifth or more than <see cref="MaxRatio"/>.</summary>
+	/// inflate cap; such a message goes as it is), or deflating saves under a fifth or more than <see cref="MaxRatio"/>.
+	/// Deflates as a stream: besides the message, it holds only the envelope, which stays under four fifths of it.</summary>
 	public static byte[]? Pack(ReadOnlySpan<byte> message, int maxBytes = int.MaxValue)
 	{
 		if (message.Length < MinBytes || message.Length > maxBytes) return null;

@@ -193,7 +193,7 @@ public sealed class MpTransport : ITransport, IDisposable
 			type = payload.Span[1 + 4];
 			length = BulkCompression.DeclaredLength(payload.Span);
 		}
-		else if (channel == Channel.Bulk && BulkCompression.Pack(payload.Span, _o.Role == 0 ? _o.MaxInflatedFromHostBytes : _o.MaxInflatedFromClientBytes) is { } packed)
+		else if (channel == Channel.Bulk && payload.Length < BulkCompression.PackLaterBytes && BulkCompression.Pack(payload.Span, MaxInflatedOut) is { } packed)
 		{
 			payload = packed;
 		}
@@ -428,13 +428,16 @@ public sealed class MpTransport : ITransport, IDisposable
 			Core.LatencyTrace.Mark(Core.LatencyTrace.Sent, req.Payload.Span, (int)Channel.State, p.Id.Value);
 			break;
 		case Channel.Bulk:
+			var data = req.Payload;
+			// A big message (a world's initial batch) is deflated here, on the network thread, not on the sender's frame.
+			if (data.Length >= BulkCompression.PackLaterBytes && !BulkCompression.IsEnvelope(data.Span) && BulkCompression.Pack(data.Span, MaxInflatedOut) is { } packed) data = packed;
 			p.Bulk.Enqueue(new BulkOut
 			{
 				TransferId = p.NextTransferId++,
-				Data = req.Payload,
-				Count = Fragmenter.CountFor((uint)req.Payload.Length, (uint)_o.FragmentPayload)
+				Data = data,
+				Count = Fragmenter.CountFor((uint)data.Length, (uint)_o.FragmentPayload)
 			});
-			p.BulkQueuedBytes += req.Payload.Length;
+			p.BulkQueuedBytes += data.Length;
 			Core.LatencyTrace.Mark(Core.LatencyTrace.BulkQueued, req.Payload.Span, (int)Channel.Bulk, p.Id.Value);
 			break;
 		}

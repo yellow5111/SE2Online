@@ -22,8 +22,14 @@ public sealed class TransportOptions
 	/// </summary>
 	public int MaxInflatedFromClientBytes = 4194304;
 
-	/// <summary>The same for envelopes from the host: world parts and snapshots run to a few MiB.</summary>
-	public int MaxInflatedFromHostBytes = 33554432;
+	/// <summary>
+	/// The same for envelopes from the host, and the largest one a host deflates: as large as any bulk message from the host
+	/// may be (<see cref="MaxBulkMessageBytes"/>), so a big world's initial batch (52 MiB for 136k entities) is deflated
+	/// like a small one instead of going raw, and compression lets nothing through that a raw message could not. The host
+	/// is the player's chosen server (the world's content is its anyway); <see cref="BulkCompression.MaxRatio"/> still makes
+	/// a lying envelope cost its sender a 64th of what it claims, and the buffer grows only as data inflates.
+	/// </summary>
+	public int MaxInflatedFromHostBytes = 268435456;
 
 	public int PingIntervalMs = 1000;
 
