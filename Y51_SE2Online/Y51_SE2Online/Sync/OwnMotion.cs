@@ -388,6 +388,12 @@ public sealed class OwnCorrection
 {
 	public const double SnapMeters = 3, DeadbandMeters = 0.02, BlendSeconds = 0.1, MaxStep = 0.05, SpeedShare = 0.2;
 	public const double FacingDeadbandDegrees = 0.5, MaxTurnStepDegrees = 0.5;
+
+	// Standing still, each side's physics settles the body on its own ground, a centimetre or two and a fraction of a
+	// degree apart: correcting that every few ticks fought this game's physics, and the camera shook with the body. Below
+	// these, a standing / not turning player's error waits for the next input; a bigger one (the server moving the
+	// player) is followed down to the moving deadband, so it never stops short and leaves up to 10 cm behind.
+	public const double StandingDeadbandMeters = 0.1, SteadyFacingDeadbandDegrees = 2;
 	public const int Ring = 512, MismatchLimit = 30;
 
 	private struct Predicted
@@ -445,8 +451,10 @@ public sealed class OwnCorrection
 		_ring[seq % Ring] = new Predicted { Seq = seq, Parent = parent, Gen = _gen, Position = position, Applied = _applied, Velocity = velocity, AppliedVelocity = _appliedVelocity, Rotation = rotation, AppliedTurn = _appliedTurn };
 	}
 
-	/// <summary>The server's pose after input <paramref name="ack"/>. Rebase: frames disagree for too long, jump to the server's pose.</summary>
-	public Outcome Measure(uint ack, uint parent, Vec3D position, Vector3 velocity, Quaternion rotation = default)
+	/// <summary>The server's pose after input <paramref name="ack"/>. Rebase: frames disagree for too long, jump to the server's pose.
+	/// <paramref name="standing"/>: no movement input and at rest (<see cref="StandingDeadbandMeters"/>);
+	/// <paramref name="steady"/>: no turn input (<see cref="SteadyFacingDeadbandDegrees"/>).</summary>
+	public Outcome Measure(uint ack, uint parent, Vec3D position, Vector3 velocity, Quaternion rotation = default, bool standing = false, bool steady = false)
 	{
 		if (ack == 0 || (_newestAck != 0 && !Seq.Newer(ack, _newestAck))) return Outcome.None;
 		ref var p = ref _ring[ack % Ring];
@@ -477,9 +485,10 @@ public sealed class OwnCorrection
 			double turn = Degrees(off);
 			TurnErrorSum += turn;
 			TurnErrorMax = Math.Max(TurnErrorMax, turn);
-			_pendingTurn = turn < FacingDeadbandDegrees ? Quaternion.Identity : off;
+			bool turning = Degrees(_pendingTurn) >= 1e-3;
+			_pendingTurn = turn < (steady && !turning ? SteadyFacingDeadbandDegrees : FacingDeadbandDegrees) ? Quaternion.Identity : off;
 		}
-		_pending = size < DeadbandMeters ? default : error;
+		_pending = size < (standing && _pending == default ? StandingDeadbandMeters : DeadbandMeters) ? default : error;
 		_pendingVelocity = velocityError.Length() < 0.05f ? default : velocityError;
 		if (size <= SnapMeters) return _pending == default && _pendingVelocity == default ? Outcome.None : Outcome.Blend;
 		_snapNow = true;

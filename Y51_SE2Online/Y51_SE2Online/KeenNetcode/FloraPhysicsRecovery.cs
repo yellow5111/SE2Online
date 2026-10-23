@@ -198,6 +198,16 @@ internal static class FloraPhysicsRecovery
 
 	internal static string Stats => $"{_recovered} flora sectors built without the server's signal ({_unmatched} tries before this game had generated the sector, {_duplicates} late signals not built twice, {_pruned} trees cut after the build removed from the physics)";
 
+	/// <summary>Client session thread: flora sector physics entities near <paramref name="at"/> whose colliders are not built yet.</summary>
+	internal static int PendingNear(Vector3D at, double meters)
+	{
+		int count = 0;
+		lock (Pending)
+			foreach (var physics in Pending.Keys)
+				if (physics.Entity is { } e && !EngineCodec.IsDead(e) && !Initialized(physics) && Vector3D.Distance(e.Data.GetWorldTransform().Position, at) <= meters) count++;
+		return count;
+	}
+
 	/// <summary>Flora sector physics entities in <paramref name="session"/> whose colliders are built.</summary>
 	internal static int Built(Session session)
 		=> session.GetEntitiesOfType<PlanetFloraSectorPhysicsComponent>().Count(e => e.TryGet<PlanetFloraSectorPhysicsComponent>() is { } c && Initialized(c));

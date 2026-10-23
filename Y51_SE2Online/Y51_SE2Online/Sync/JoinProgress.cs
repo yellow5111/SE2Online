@@ -403,48 +403,64 @@ public sealed class JoinProgress
 		{
 			if (_stage < JoinStage.Receiving || _stage > JoinStage.WaitingForCharacter) return null;
 			string world = _world == null ? Cut(_host, 40) : Cut(_world, 40);
-			string what;
-			double percent;
-			switch (_stage)
-			{
-			case JoinStage.Receiving:
-			{
-				double seconds = Math.Max(0.5, (now - _receivingSinceMs) / 1000.0);
-				double rate = _received / seconds;
-				// SE2 4.0 does not say how big the world is: without a size the bar eases towards 40% as data comes in.
-				double got = _expected > 0 ? Math.Min(1.0, (double)_received / _expected) : 1 - Math.Exp(-_received / (16.0 * 1024 * 1024));
-				percent = got * 40;
-				string eta = _expected > 0 && rate > 1024 && _received < _expected ? "  /  " + Clock((long)((_expected - _received) / rate * 1000)) + " left" : "";
-				what = _expected > 0
-					? $"{Mib(Math.Min(_received, Math.Max(_expected, _received)))} of {Mib(_expected)} MiB from {Cut(_host, 32)}  /  {Mib((long)rate)} MiB/s{eta}"
-					: $"{Mib(_received)} MiB from {Cut(_host, 32)}  /  {Mib((long)rate)} MiB/s";
-				if (_mods != null) what += "\n" + _mods;
-				break;
-			}
-			case JoinStage.Loading:
-				percent = 40 + 55 * (1 - Math.Exp(-(now - _loadingSinceMs) / 15000.0));
-				what = _mods ?? (_received > 0 ? $"Building the world, {Mib(_received)} MiB received  /  {Clock(now - _loadingSinceMs)}" : $"Terrain, planets and physics  /  {Clock(now - _loadingSinceMs)}");
-				break;
-			case JoinStage.Building:
-			{
-				int parts = Math.Max(_partsTotal, 1);
-				double built = _entitiesTotal > 0 ? Math.Min(1.0, (double)_entitiesBuilt / _entitiesTotal) : Math.Min(1.0, (double)_partsBuilt / parts);
-				percent = 60 + built * 35;
-				string entities = _entitiesTotal > 0 ? $"{_entitiesBuilt:N0} of {_entitiesTotal:N0} grids, characters and objects" : $"{_entitiesBuilt:N0} objects";
-				what = entities;
-				break;
-			}
-			default:
-				percent = 97;
-				what = "World ready";
-				break;
-			}
+			var (percent, what) = MeasureLocked(now);
 			int filled = (int)Math.Round(Math.Clamp(percent, 0, 100) / 5);
 			string tip = Tips[(int)(Math.Max(0, now) / 6000 % Tips.Length)];
 			string flavour = LoadingFlavour.Line(_stage, _flavourSeed, now);
 			string detail = $"{flavour}...\n[{new string('|', filled)}{new string('.', 20 - filled)}]   {(int)percent}%\n{what}\n\nTip: {tip}";
 			return (world, detail, $"{(int)percent}%");
 		}
+	}
+
+	/// <summary>SE2 Online's own loading screen: the server, the world, how far the game's load is (0..100) and its line.</summary>
+	public (string Server, string World, double Percent, string What, int Seed) LoadInfo(long now)
+	{
+		lock (_sync)
+		{
+			var (percent, what) = _stage is >= JoinStage.Receiving and <= JoinStage.WaitingForCharacter ? MeasureLocked(now) : (100.0, "");
+			return (Cut(_host, 48), _world == null ? "" : Cut(_world, 48), percent, what, _flavourSeed);
+		}
+	}
+
+	private (double Percent, string What) MeasureLocked(long now)
+	{
+		string what;
+		double percent;
+		switch (_stage)
+		{
+		case JoinStage.Receiving:
+		{
+			double seconds = Math.Max(0.5, (now - _receivingSinceMs) / 1000.0);
+			double rate = _received / seconds;
+			// SE2 4.0 does not say how big the world is: without a size the bar eases towards 40% as data comes in.
+			double got = _expected > 0 ? Math.Min(1.0, (double)_received / _expected) : 1 - Math.Exp(-_received / (16.0 * 1024 * 1024));
+			percent = got * 40;
+			string eta = _expected > 0 && rate > 1024 && _received < _expected ? "  /  " + Clock((long)((_expected - _received) / rate * 1000)) + " left" : "";
+			what = _expected > 0
+				? $"{Mib(Math.Min(_received, Math.Max(_expected, _received)))} of {Mib(_expected)} MiB from {Cut(_host, 32)}  /  {Mib((long)rate)} MiB/s{eta}"
+				: $"{Mib(_received)} MiB from {Cut(_host, 32)}  /  {Mib((long)rate)} MiB/s";
+			if (_mods != null) what += "\n" + _mods;
+			break;
+		}
+		case JoinStage.Loading:
+			percent = 40 + 55 * (1 - Math.Exp(-(now - _loadingSinceMs) / 15000.0));
+			what = _mods ?? (_received > 0 ? $"Building the world, {Mib(_received)} MiB received  /  {Clock(now - _loadingSinceMs)}" : $"Terrain, planets and physics  /  {Clock(now - _loadingSinceMs)}");
+			break;
+		case JoinStage.Building:
+		{
+			int parts = Math.Max(_partsTotal, 1);
+			double built = _entitiesTotal > 0 ? Math.Min(1.0, (double)_entitiesBuilt / _entitiesTotal) : Math.Min(1.0, (double)_partsBuilt / parts);
+			percent = 60 + built * 35;
+			string entities = _entitiesTotal > 0 ? $"{_entitiesBuilt:N0} of {_entitiesTotal:N0} grids, characters and objects" : $"{_entitiesBuilt:N0} objects";
+			what = entities;
+			break;
+		}
+		default:
+			percent = 97;
+			what = "World ready";
+			break;
+		}
+		return (percent, what);
 	}
 
 	public enum DialogKind { None, Progress, Notice, Retry, Download }

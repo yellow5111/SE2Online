@@ -192,6 +192,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		Optional("seat guard (sitting while seated)", () => SeatGuard.Install(_harmony));
 		Optional("control panel group names", () => NameSync.Install(_harmony));
 		Optional("join status", () => JoinStatusUi.Install(_harmony));
+		Optional("SE2 Online loading screen", () => LoadScreenOverlay.Install(_harmony));
 		Optional("client clock", () => KeenNetcode.ClientClock.Install(_harmony));
 		Optional("own character movement", () => KeenNetcode.OwnMotion.Install(_harmony));
 		Optional("animation timing", () => KeenNetcode.AnimPlayout.Install(_harmony));

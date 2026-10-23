@@ -326,6 +326,8 @@ internal sealed partial class HostWorld : IHostWorld
 			KeenNetcode.FloraPhysicsRecovery.ClientTick(__instance);
 			try { KeenNetcode.OwnMotion.ClientTick(__instance); }
 			catch (Exception ex) { GameLog.Instance.WarnOnce("own-motion-client", "own motion: client tick failed: " + ex); }
+			try { KeenNetcode.LoadReadiness.ClientTick(__instance); }
+			catch (Exception ex) { GameLog.Instance.WarnOnce("load-readiness-tick", "loading screen: client tick failed: " + ex); }
 			KeenNetcode.OwnAnimation.ClientTick();
 			KeenNetcode.AnimPlayout.ClientTick(__instance);
 #if !PULSAR

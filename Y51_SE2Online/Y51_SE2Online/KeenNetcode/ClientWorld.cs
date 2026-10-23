@@ -58,6 +58,9 @@ internal sealed class ClientWorld
 
 	public static ClientWorld? Current { get; private set; }
 
+	/// <summary>Joins started in this game run (a rejoin counts): what the loading screen's once-per-join wait keys on.</summary>
+	internal static int Joins;
+
 	public static JoinProgress Progress { get; } = new JoinProgress();
 
 	public static event Action<string>? RejoinRequested;
@@ -82,6 +85,7 @@ internal sealed class ClientWorld
 			s_rejoin.JoinStarting();
 			s_orphanJoinEnded = false;
 			Progress.SetRejoin(o.Rejoin && !o.KeenAttached, o.Rejoin && !o.KeenAttached);
+			Joins++;
 			s_ui = new JoinStatusUi(log);
 			Current = new ClientWorld(log, o);
 		}
@@ -91,6 +95,8 @@ internal sealed class ClientWorld
 	public static void Reset()
 	{
 		s_orphanJoinEnded = false;
+		// Never keep pinning a character or probing a world the player is leaving (a hold not let go yet ends with it).
+		KeenNetcode.LoadReadiness.Active = false;
 		if (Current != null)
 		{
 			Current._retired = true;
@@ -107,6 +113,7 @@ internal sealed class ClientWorld
 					("client clock", ClientClock.Reset), ("animation timing", AnimPlayout.Reset), ("motion smoothing", MotionSmoothing.Reset),
 					("own motion", KeenNetcode.OwnMotion.ResetClient), ("replication transport", Y51_SE2Online.Engine.Y51Replication.ResetClient),
 					("flora colliders", FloraPhysicsRecovery.Reset),
+					("loading screen wait", KeenNetcode.LoadReadiness.Reset),
 				})
 				{
 					try { reset(); }

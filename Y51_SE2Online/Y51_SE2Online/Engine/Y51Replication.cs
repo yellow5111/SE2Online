@@ -37,7 +37,10 @@ internal static class Y51Replication
 
 	internal static ICollection<Y51ServerTransport> ServerTransports => Servers.Values;
 	private static readonly object ClientGate = new();
-	private static Y51ClientTransport? _client;
+	private static volatile Y51ClientTransport? _client;
+
+	/// <summary>The joined world's transport to the server, if any.</summary>
+	internal static Y51ClientTransport? Client => _client;
 	private static ClientSession? _clientSession;
 	private static readonly List<byte[]> ClientEarly = new();
 	private static long _logMs;

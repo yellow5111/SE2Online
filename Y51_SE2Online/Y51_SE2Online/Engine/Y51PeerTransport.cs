@@ -86,6 +86,12 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 
 	public bool Disposed => _disposed;
 
+	/// <summary>Frames still waiting right after the last inbound job took what it could (a gap, or a spent budget): a
+	/// backlog, unlike frames that merely arrived since.</summary>
+	protected int FramesLeftAfterTake => System.Threading.Volatile.Read(ref _leftAfterTake);
+
+	private int _leftAfterTake;
+
 	protected Y51PeerTransport(OwnHost host, ClientId peer, string name)
 	{
 		Host = host;
@@ -702,6 +708,7 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 	{
 		if (_disposed) return;
 		TakeFrames();
+		System.Threading.Volatile.Write(ref _leftAfterTake, _frames.Ready + _frames.Buffered);
 		ApplyParked();
 		while (_state.TryDequeue(out byte[] message))
 		{

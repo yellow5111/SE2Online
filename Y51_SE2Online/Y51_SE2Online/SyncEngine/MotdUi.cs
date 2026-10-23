@@ -11,7 +11,7 @@ internal static class MotdUi
     internal static void Tick()
     {
         var client = AdminAccess.Client;
-        if (client?.Motd is not { } motd || ClientWorld.Progress.Stage != JoinStage.Playing || client.SpawnMenu != null) return;
+        if (client?.Motd is not { } motd || ClientWorld.Progress.Stage != JoinStage.Playing || JoinStatusUi.ScreenHeld || client.SpawnMenu != null) return;
         var shared = JoinStatusUi.FindShared(MpPlugin.App);
         if (shared == null) return;
         client.Motd = null;

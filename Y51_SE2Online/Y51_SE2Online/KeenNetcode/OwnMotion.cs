@@ -347,7 +347,11 @@ internal static class OwnMotion
 		_driving = true;
 		Frames++;
 		if (ack is { } a)
-			switch (Correction.Measure(a.Seq, a.Parent, a.Position, a.Velocity, a.Rotation))
+		{
+			own.Data.TryGet<ControlData>(out var ownControl);
+			own.Data.TryGet<RigidBodyData>(out var ownBody);
+			bool atRest = ownControl.Movement == Vector3.Zero && !_jumpPending && RelativeSpeed(own, ownBody) < 0.3f;
+			switch (Correction.Measure(a.Seq, a.Parent, a.Position, a.Velocity, a.Rotation, standing: atRest, steady: ownControl.Rotation == Vector3.Zero))
 			{
 			case OwnCorrection.Outcome.Rebase:
 				Correction.Reset();
@@ -357,6 +361,7 @@ internal static class OwnMotion
 				GameLog.Instance.Info($"own motion: the server's character is over {OwnCorrection.SnapMeters} m off this game's prediction for input {a.Seq}; applied at once ({Correction.Snaps} so far)");
 				break;
 			}
+		}
 		if (ack is { } measured && Correction.LastError.Length > ErrorLogMeters && now - _errorLogMs > 1000)
 		{
 			_errorLogMs = now;
@@ -377,7 +382,7 @@ internal static class OwnMotion
 		}
 		// Still on the loading screen: this game sends no inputs yet, so silence is not an unanswered server. Timing it
 		// gave up on prediction for the first 10 s of play after every join that loaded for over 5 s.
-		else if (ClientWorld.Progress.Stage != Sync.JoinStage.Playing)
+		else if (ClientWorld.Progress.Stage != Sync.JoinStage.Playing || JoinStatusUi.ScreenHeld)
 			_ackedMs = now;
 		// The first answer also waits for the join to finish loading on both sides.
 		else if (now - _ackedMs > (_answered ? NoAckMs : NoFirstAckMs))

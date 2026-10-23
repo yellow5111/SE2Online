@@ -9,6 +9,7 @@ using Keen.VRage.DCS.Components;
 using Keen.VRage.Library.Localization;
 using Keen.VRage.Library.Utils;
 using Y51_SE2Online.Core;
+using Y51_SE2Online.KeenNetcode;
 using Y51_SE2Online.Sync;
 
 namespace Y51_SE2Online.SyncEngine;
@@ -64,20 +65,62 @@ internal sealed class JoinStatusUi
 
 	public void Update(GameAppComponent app, JoinProgress progress, long now)
 	{
-		if (!_failed && now >= _nextMs)
+		if (now >= _nextMs)
 		{
 			_nextMs = now + RefreshMs;
-			SharedUIComponent shared = Shared(app, now);
+			// The held screen is let go even after the on-screen progress failed: a hold that is never released is a stuck join.
+			SharedUIComponent shared = _failed ? _shared ?? SafeFind(app) : Shared(app, now);
 			if (shared != null)
 			{
-				Apply(shared, progress, now);
+				if (_failed) ReleaseSafely(shared, progress, now);
+				else Apply(shared, progress, now);
 			}
+		}
+	}
+
+	private static SharedUIComponent? SafeFind(GameAppComponent app)
+	{
+		try { return FindShared(app); }
+		catch (Exception) { return null; }
+	}
+
+	private static void ReleaseSafely(SharedUIComponent shared, JoinProgress progress, long now)
+	{
+		try { ReleaseHold(shared, progress, now); }
+		catch (Exception ex)
+		{
+			GameLog.Instance.WarnOnce("client-loading-release", $"client: waiting for the world failed ({ex.GetType().Name}: {ex.Message}); the loading screen goes now");
+			ForceRelease(shared, now, "the wait failed");
 		}
 	}
 
 	private static long _holdSinceMs = -1;
 
+	// The join the screen is held for: a hold left from an earlier join (its world reset before the hold was let go) goes at once.
+	private static int _holdJoin;
+
 	private static bool _releasing;
+
+	/// <summary>The join's loading screen is being held up by SE2 Online (popups and chat lines wait for it to go).</summary>
+	internal static bool ScreenHeld => _holdSinceMs >= 0;
+
+	// The wait for the world around the player once the game's own load ended (Playing), and the join it finished for:
+	// the screen is held once per join (a rejoin is a new ClientWorld).
+	private static WorldReadiness? _readiness;
+
+	private static int _doneFor = -1;
+
+	// Bisect switch: -y51online:loadwait:off lets the screen go when the game's own load ends, as 0.17.2 did.
+	private static readonly bool WaitOff = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "loadwait:off");
+
+	private static readonly WorldReadiness.Probe[] NotLookedAt = MakeNotLookedAt();
+
+	private static WorldReadiness.Probe[] MakeNotLookedAt()
+	{
+		var probes = new WorldReadiness.Probe[WorldReadiness.Parts];
+		for (int i = 0; i < probes.Length; i++) probes[i] = new WorldReadiness.Probe(false, 0, "waiting for the world to start");
+		return probes;
+	}
 
 	/// <summary>
 	/// Keeps SE2's loading screen up after its own load ends, until the player is in their character: SE2 4.0 downloads
@@ -96,22 +139,87 @@ internal sealed class JoinStatusUi
 		if (_holdSinceMs < 0)
 		{
 			_holdSinceMs = MpClock.NowMs();
+			_holdJoin = ClientWorld.Joins;
+			_readiness = null;
 			GameLog.Instance.Info($"client: loading screen kept up while the world arrives ({ClientWorld.Progress.Stage})");
 		}
 		return false;
 	}
 
-	private static bool Holding(JoinStage stage) => MpPlugin.Controller?.Current?.Join == true && stage is >= JoinStage.Receiving and < JoinStage.Playing;
+	/// <summary>Whether the loading screen stays up: while the world arrives and the game builds it, then (Playing) until the
+	/// world around the player is ready (<see cref="WorldReadiness"/>), once per join.</summary>
+	private static bool Holding(JoinStage stage) => MpPlugin.Controller?.Current?.Join == true
+		&& (stage is >= JoinStage.Receiving and < JoinStage.Playing || stage == JoinStage.Playing && !WaitOff && ClientWorld.Current != null && ClientWorld.Joins != _doneFor);
 
 	private static void ReleaseHold(SharedUIComponent shared, JoinProgress progress, long now)
 	{
 		if (_holdSinceMs < 0) return;
-		if (Holding(progress.Stage) && now - _holdSinceMs < 180_000 && ClientWorld.Current?.BoundSession?.SpawnMenu == null) return;
-		GameLog.Instance.Info($"client: loading screen released after {(now - _holdSinceMs) / 1000.0:0.0} s ({progress.Stage})");
-		_holdSinceMs = -1;
+		JoinStage stage = progress.Stage;
+		string why;
+		if (_holdJoin != ClientWorld.Joins) why = "held for an earlier join";
+		else if (!Holding(stage)) why = stage == JoinStage.Playing ? "the game's load ended" : stage.ToString();
+		else if (KeenRespawn.Menu != null) why = "the spawn menu is up";
+		else if (stage < JoinStage.Playing)
+		{
+			if (now - _holdSinceMs < 180_000) return;
+			why = "the game's own load took over 3 min";
+		}
+		else
+		{
+			if (_readiness == null)
+			{
+				_readiness = new WorldReadiness();
+				LoadReadiness.Active = true;
+				GameLog.Instance.Info($"client: the game's load ended after {(now - _holdSinceMs) / 1000.0:0.0} s; the loading screen waits for the world around the player");
+			}
+			if (!_readiness.Step(now, LoadReadiness.Probes ?? NotLookedAt)) return;
+			why = $"{_readiness.Outcome}; waited {_readiness.WaitedMs(now) / 1000.0:0.0} s after the game's load";
+		}
+		ForceRelease(shared, now, $"{stage}: {why}");
+	}
+
+	private static void ForceRelease(SharedUIComponent shared, long now, string why)
+	{
+		if (_holdSinceMs < 0) return;
 		_releasing = true;
 		try { shared.CloseLoadingTransitionScreenIfNeeded(); }
+		catch (Exception ex)
+		{
+			GameLog.Instance.WarnOnce("client-loading-close", $"client: closing the loading screen failed ({ex.GetType().Name}: {ex.Message})");
+			// Still up: tried again on the next refresh (the game's own close was already swallowed). Gone: released.
+			if (shared._loadingTransitionScreen != null) return;
+		}
 		finally { _releasing = false; }
+		GameLog.Instance.Info($"client: loading screen released after {(now - _holdSinceMs) / 1000.0:0.0} s ({why})");
+		_holdSinceMs = -1;
+		_readiness = null;
+		LoadReadiness.Active = false;
+		// Once per join: a later close in this join (released early by a cap or the spawn menu) is not held again.
+		if (ClientWorld.Current != null && _holdJoin == ClientWorld.Joins) _doneFor = ClientWorld.Joins;
+	}
+
+	/// <summary>What SE2 Online's loading screen shows now (the game's own screen gets the same as text).</summary>
+	private static LoadScreenLayout.View? Overlay(JoinProgress progress, long now)
+	{
+		JoinStage stage = progress.Stage;
+		if (stage is < JoinStage.Receiving or > JoinStage.Playing) return null;
+		var info = progress.LoadInfo(now);
+		string line, detail;
+		double readiness = 0;
+		if (stage == JoinStage.Playing)
+		{
+			if (_readiness is not { } wait) return null;
+			line = wait.Title;
+			detail = wait.Detail ?? "";
+			readiness = wait.Fraction;
+		}
+		else
+		{
+			line = LoadScreenLayout.StageLine(stage);
+			detail = info.What;
+		}
+		var tip = LoadScreenLayout.Tip(info.Seed, now);
+		return new LoadScreenLayout.View(info.Server, info.World, line, detail, LoadScreenLayout.Percent(stage, info.Percent, readiness), tip.Key, tip.Title + ": " + tip.Text);
 	}
 
 	internal void Apply(SharedUIComponent shared, JoinProgress progress, long now)
@@ -122,8 +230,18 @@ internal sealed class JoinStatusUi
 		}
 		try
 		{
-			ReleaseHold(shared, progress, now);
-			bool loading = UpdateLoading(shared, progress.LoadingScreen(now));
+			ReleaseSafely(shared, progress, now);
+			var overlay = Overlay(progress, now);
+			if (overlay is { } shown) LoadScreenOverlay.Update(shown);
+			var native = progress.LoadingScreen(now);
+			// Held past the game's own load: its screen (behind SE2 Online's, or alone if that could not be made) says what is awaited.
+			if (native == null && overlay is { } waiting && progress.Stage == JoinStage.Playing)
+			{
+				int filled = (int)Math.Round(Math.Clamp(waiting.Percent, 0, 100) / 5);
+				native = (string.IsNullOrEmpty(waiting.World) ? waiting.Server : waiting.World,
+					$"{waiting.Stage}\n[{new string('|', filled)}{new string('.', 20 - filled)}]   {(int)waiting.Percent}%\n{waiting.Detail}\n\nTip: {waiting.TipKey} {waiting.TipText}", $"{(int)waiting.Percent}%");
+			}
+			bool loading = UpdateLoading(shared, native);
 			// Cancelling leaves the join; never reopen a dialog for a session that is going away.
 			bool joining = MpPlugin.Controller?.Current?.Join == true;
 			if (joining && WorkshopMods.Pending is { Answer.Task.IsCompleted: false } ask)

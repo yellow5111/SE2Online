@@ -25,6 +25,26 @@ internal sealed class Y51ClientTransport : Y51PeerTransport, IClientPeerTranspor
 
 	public long Creations, Destructions, Acks, SendFailures, BatchesUnreadable;
 
+	// What a join's loading screen waits for (KeenNetcode/LoadReadiness.cs): batches still being built, entity batches built,
+	// frames left waiting after an inbound job, and built entities the server still holds staged.
+	private int _building;
+	public long EntityBatchesBuilt;
+	private readonly HashSet<Entity> _staged = new();
+
+	public int Building => System.Threading.Volatile.Read(ref _building);
+
+	public int FramesWaiting => FramesLeftAfterTake;
+
+	/// <summary>Built entities still held staged by the server (StagingTag), after dropping the ones it released or removed.</summary>
+	public int StagedWaiting()
+	{
+		lock (_staged)
+		{
+			_staged.RemoveWhere(e => SyncEngine.EngineCodec.IsDead(e) || !e.Data.Has<Keen.VRage.DCS.CoreData.StagingTag>());
+			return _staged.Count;
+		}
+	}
+
 	public event IClientPeerTransport.ReplicationCallback? AfterObjectsReplicated;
 
 	public event IClientPeerTransport.ReplicationCallback? AfterObjectsDestroyed;
@@ -116,8 +136,11 @@ internal sealed class Y51ClientTransport : Y51PeerTransport, IClientPeerTranspor
 			return;
 		}
 		Creations++;
-		var operation = _client.GetHandler<TObject, TPayload>().InitializeObjectsAsync(objects, (TPayload)payload!);
-		Confirm(operation, batch).SkipWait();
+		System.Threading.Interlocked.Increment(ref _building);
+		KTask operation;
+		try { operation = _client.GetHandler<TObject, TPayload>().InitializeObjectsAsync(objects, (TPayload)payload!); }
+		catch { System.Threading.Interlocked.Decrement(ref _building); throw; }
+		Confirm(operation, batch, objects as Entity[]).SkipWait();
 	}
 
 	private object AllocateStub(OwnUnits.Stub stub)
@@ -157,10 +180,17 @@ internal sealed class Y51ClientTransport : Y51PeerTransport, IClientPeerTranspor
 		}
 		Destructions++;
 		var operation = objects.Count > 0 ? _client.GetHandler<TObject>().DestroyObjectsAsync(objects.ToArray()) : default;
-		Confirm(operation, batch).SkipWait();
+		System.Threading.Interlocked.Increment(ref _building);
+		Confirm(operation, batch, null).SkipWait();
 	}
 
-	private async KTask Confirm(KTask operation, ulong batch)
+	private async KTask Confirm(KTask operation, ulong batch, Entity[]? entities)
+	{
+		try { await ConfirmCore(operation, batch, entities); }
+		finally { System.Threading.Interlocked.Decrement(ref _building); }
+	}
+
+	private async KTask ConfirmCore(KTask operation, ulong batch, Entity[]? entities)
 	{
 		await KTask.SetLifetime(_client);
 		// Confirmed even when building it failed: the server holds staged spawns (world areas, a fast travel destination)
@@ -169,6 +199,13 @@ internal sealed class Y51ClientTransport : Y51PeerTransport, IClientPeerTranspor
 		catch (Exception ex) when (Keen.VRage.Library.Utils.ExceptionUnrollHelper.CanHandle(ex))
 		{
 			GameLog.Instance.Warn($"engine {Name}: building object batch #{batch} failed ({ex.GetType().Name}: {ex.Message}); confirmed anyway so the server does not wait for it; those objects are missing in this game until it rejoins");
+		}
+		if (entities != null)
+		{
+			EntityBatchesBuilt++;
+			lock (_staged)
+				foreach (var e in entities)
+					if (e != null && !SyncEngine.EngineCodec.IsDead(e) && e.Data.Has<Keen.VRage.DCS.CoreData.StagingTag>()) _staged.Add(e);
 		}
 		// The batch's entities are in the scene now: their motion that came while they were built applies in this frame.
 		ApplyParked();

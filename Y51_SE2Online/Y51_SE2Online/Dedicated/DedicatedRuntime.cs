@@ -455,11 +455,23 @@ internal static class DedicatedRuntime
         try
         {
             SaveResults result = SaveResults.FailureSaveInProgress;
-            // The game's own autosave can start between the wait and our save; wait for it and try again.
+            // The game's own autosave can start between the wait and our save; wait for it and try again. The game ends a save
+            // by completing its saving task before it clears the guard (WorldSessionComponent.RunGuardedSaveAsync), and Keen
+            // tasks run their continuations inline: right after WaitForSavingToFinish the guard is still set, and every retry
+            // came back FailureSaveInProgress within that same call. A delay lets the game's save finish first.
             for (int attempt = 0; attempt < 20 && result == SaveResults.FailureSaveInProgress; attempt++)
             {
                 await world.WaitForSavingToFinish();
+                if (world.IsSaving) await Task.Delay(TimeSpan.FromMilliseconds(100));
                 result = await world.TrySaveWorldSession(WorldPick.SaveName(world.SaveContainerId.HasValue ? _savedId : null, world.SaveContainerId.HasValue, Config.WorldName), variant: null);
+            }
+            if (result == SaveResults.FailureSaveInProgress && !exiting && _loaded)
+            {
+                // The game kept saving the world itself (its autosave writes a slot under .autosaves, not the save the
+                // resume state names, so it does not count as this save): not a failure, try again soon.
+                _nextSave = MpClock.NowMs() + SaveRetry.After(busy: true, _lastSaveFailed).RetryMs;
+                GameLog.Instance.Info($"dedicated: the game is saving the world itself; saving again in {SaveRetry.BusyRetryMs / 1000} s");
+                return false;
             }
             if (result != SaveResults.Success) throw new InvalidOperationException("Native world save returned " + result);
             var state = new ResumeState(world.SaveContainerId.Value.ToString(), Config.SaveId, Config.StartContent, Config.WorldName, Config.StartWorkshop);
@@ -492,10 +504,11 @@ internal static class DedicatedRuntime
             else if (_loaded)
             {
                 // A failed periodic save must not stop the server's tick (and every later save) like a load failure does.
-                _nextSave = MpClock.NowMs() + 60_000;
+                var retry = SaveRetry.After(busy: false, _lastSaveFailed);
+                _nextSave = MpClock.NowMs() + retry.RetryMs;
                 // Error would stop the server (Active); players are told once per run of failures instead.
-                if (!_lastSaveFailed) Say("The server could not save the world and keeps retrying. Admins: check the server log before restarting.");
-                _lastSaveFailed = true;
+                if (retry.Warn) Say("The server could not save the world and keeps retrying. Admins: check the server log before restarting.");
+                _lastSaveFailed = retry.Failure;
                 GameLog.Instance.Error("dedicated: periodic save failed, retrying in 60 s: " + ex);
             }
             else Fail("saving", ex);

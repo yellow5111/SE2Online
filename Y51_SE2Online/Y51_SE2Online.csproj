@@ -26,7 +26,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Reference Include="Avalonia.Base;Avalonia.Controls;Avalonia.Markup;Avalonia.Markup.Xaml;Game2.Client;Game2.Game;Game2.Simulation;SpaceEngineers2;Steamworks.NET;VRage.Animation.Client;VRage.Audio;VRage.Core;VRage.Core.Game;VRage.DCS;VRage.Game;VRage.Game.Client;VRage.Input;VRage.Library;VRage.Multiplayer;VRage.Physics;VRage.Steam;VRage.Render;VRage.UI;VRage.UI.Shared;VRage.Voxels;VRage.Water;VRage.Water.Client">
+    <Reference Include="Avalonia.Base;Avalonia.Controls;Avalonia.Markup;Avalonia.Markup.Xaml;Game2.Client;Game2.Game;Game2.Simulation;SpaceEngineers2;Steamworks.NET;VRage.Animation.Client;VRage.Audio;VRage.Core;VRage.Core.Game;VRage.DCS;VRage.Game;VRage.Game.Client;VRage.Input;VRage.Library;VRage.Multiplayer;VRage.Physics;VRage.Steam;VRage.Render;VRage.UI;VRage.UI.Shared;VRage.Voxels;VRage.Water;VRage.Water.Client;SixLabors.ImageSharp">
       <HintPath>$(SE2Bin)\%(Identity).dll</HintPath>
       <Private>False</Private>
     </Reference>
