@@ -11,7 +11,6 @@ using Keen.VRage.DCS.Components;
 using Keen.VRage.Game.Multiplayer;
 using Keen.VRage.Multiplayer.Replications;
 using Y51_SE2Online.Core;
-using Transport = Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport;
 
 namespace Y51_SE2Online.KeenNetcode;
 
@@ -77,7 +76,6 @@ internal static class MotionSmoothing
 			if (!_buffer) HoldFrames = 1;
 			harmony.Patch(AccessTools.Method(AccessTools.TypeByName("Keen.VRage.Game.Multiplayer.MotionStateApplicationSystem"), "EvaluateMotionState"),
 				prefix: new HarmonyMethod(typeof(MotionSmoothing), nameof(EvaluatePrefix)) { priority = Priority.First });
-			if (_buffer) harmony.Patch(AccessTools.Method(typeof(Transport), "ProcessIncomingSampledData"), prefix: new HarmonyMethod(typeof(MotionSmoothing), nameof(SampledPrefix)));
 		}
 		if (on && !MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "blendcap:off"))
 		{
@@ -141,31 +139,8 @@ internal static class MotionSmoothing
 		history.Cadence += interpolation.FrameStep * (Buffered.ContainsKey(entity) ? HoldFrames : 1);
 	}
 
-	// Network path (client): another character's motion samples go to the buffer instead of straight into its data.
-	private static void SampledPrefix(Transport __instance, Transport.SampledDataBatch batch)
-	{
-		var characters = _characters;
-		var scene = __instance.SessionComponent.Entity.Scene;
-		if (characters.Count == 0 || !ReferenceEquals(scene, _scene)) return;
-		foreach (var list in batch.Lists)
-		{
-			if (list is not Transport.SampledList<EntityMotionState> motion) continue;
-			lock (Gate)
-				motion.Entries.RemoveAll(e =>
-				{
-					var target = __instance.ResolveSampledTarget(e.Id, scene);
-					if (target == null || !characters.Contains(target.DEntity) || !target.Data.Has<MotionHistory>()) return false;
-					if (!Held.TryGetValue(target, out var queue)) Held[target] = queue = new Sync.SampleBuffer<EntityMotionState>();
-					Buffered[target.DEntity] = true;
-					queue.Add(e.Value.ServerTime.Ticks, (e.Value.Flags & MotionStateFlags.Teleported) != 0, e.Value);
-					HeldSamples++;
-					return true;
-				});
-		}
-	}
-
-	/// <summary>SE2 Online's engine transport (client): another character's motion sample goes to the buffer instead of
-	/// straight into its data, as on Keen's transport above. True when it was held.</summary>
+	/// <summary>SE2 Online's transport (client): another character's motion sample goes to the buffer instead of straight
+	/// into its data. True when it was held.</summary>
 	internal static bool TryHold(Entity target, in EntityMotionState state)
 	{
 		var characters = _characters;

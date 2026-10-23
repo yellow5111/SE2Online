@@ -4,7 +4,7 @@ namespace Y51_SE2Online.Core;
 
 public static class HookTargets
 {
-	public const string GameBuild = "4.0.0.3159";
+	public const string GameBuild = "4.0.0.3165";
 
 	private const string Mp = "VRage.Multiplayer";
 
@@ -31,16 +31,6 @@ public static class HookTargets
 	public static readonly EngineMember SteamShutdown = new EngineMember("steam-shutdown", "Steamworks.NET", "Steamworks.SteamAPI", MemberKind.Method, "Shutdown", Array.Empty<string>(), "net: close connections before SteamAPI shuts down");
 
 	public static readonly EngineMember GameUpdate = new EngineMember("game-update", "SpaceEngineers2", "Keen.Game2.GameAppComponent", MemberKind.Method, "GameUpdate", Array.Empty<string>(), "client: main-thread pump that starts the client-only game");
-
-	public static readonly EngineMember NetClientConfigure = new EngineMember("netclient-configure", "SpaceEngineers2", "Keen.Game2.OutOfProcess.NetworkGameClientCoreComponent", MemberKind.Method, "ConfigureSession", new string[1] { "Keen.VRage.Core.Game.Systems.SessionBuilder" }, "client: replication services for the client-only session")
-	{
-		InterfaceDispatchOnly = true
-	};
-
-	public static readonly EngineMember NetClientPull = new EngineMember("netclient-pull", "SpaceEngineers2", "Keen.Game2.OutOfProcess.NetworkGameClientComponent", MemberKind.Method, "PullDataFromServerAsync", new string[1] { "Keen.VRage.Core.Game.Systems.SessionBuilder" }, "client: session components from the host's snapshot")
-	{
-		InterfaceDispatchOnly = true
-	};
 
 	public static readonly EngineMember SessionUpdate = new EngineMember("session-update", "VRage.Core.Game", "Keen.VRage.Core.Game.Systems.Session", MemberKind.Method, "Update", new string[1] { "System.Boolean" }, "client: keep dead entities out of the session's close queue");
 
@@ -183,9 +173,9 @@ public static class HookTargets
 		InterfaceDispatchOnly = true
 	};
 
-	public static readonly EngineMember[] Patches = new EngineMember[38]
+	public static readonly EngineMember[] Patches = new EngineMember[36]
 	{
-		CommitFrame, BuildAndReset, WorldInit, SteamInit, SteamShutdown, GameUpdate, NetClientConfigure, NetClientPull, SessionUpdate, PerPlayerInit,
+		CommitFrame, BuildAndReset, WorldInit, SteamInit, SteamShutdown, GameUpdate, SessionUpdate, PerPlayerInit,
 		NarratorMoveToClient, PermIsOwner, PermCanPlace, PermCanUse, PermCanLink, PermCanMerge, AwaitReplication, RenderTextureDestroy, NextCharacter, EntityTypeToPossess,
 		CharacterEntityRemoved, NextCharacterFocus, ToolShadowSpawn, ToolShadowDespawn, ToolsUnregister, AudioPlay2D, PcuHas, PcuGet, ServerTrySetEntity, SpawnTop,
 		RenderDestroyEntity, CockpitTogglePower, CockpitToggleDampeners, CockpitToggleLights, CockpitToggleBrakes, CockpitBoost, GpsDrawHud, PaintToolAdded

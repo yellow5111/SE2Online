@@ -13,8 +13,6 @@ using Keen.VRage.Multiplayer.Replications;
 using Keen.VRage.Multiplayer.Replications.InProcess;
 using Keen.VRage.Multiplayer.Sessions;
 using Keen.VRage.Multiplayer.Transport;
-using Keen.VRage.Multiplayer.Transport.OutOfProcess;
-using Keen.VRage.Multiplayer.Transport.OutOfProcess.Server;
 using Y51_SE2Online.Core;
 
 namespace Y51_SE2Online.Engine;
@@ -95,10 +93,6 @@ internal static class SyncProperties
 		var postProcess = typeof(HandlerConstructor).GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
 			.Single(m => m.Name.EndsWith("PostProcess", StringComparison.Ordinal));
 		harmony.Patch(postProcess, prefix: new HarmonyMethod(typeof(SyncProperties), nameof(PostProcessPrefix)));
-		harmony.Patch(AccessTools.Method(typeof(OutOfProcessServerPeerTransport), nameof(OutOfProcessServerPeerTransport.ReplicateObjectBatchAsync)),
-			prefix: new HarmonyMethod(typeof(SyncProperties), nameof(KeenReplicatePrefix)));
-		harmony.Patch(AccessTools.Method(typeof(OutOfProcessServerPeerTransport), "NotifyBatchCompleted"),
-			postfix: new HarmonyMethod(typeof(SyncProperties), nameof(KeenCompletedPostfix)));
 	}
 
 	private static void PostProcessPrefix(HandlerConstructor __instance)
@@ -116,10 +110,10 @@ internal static class SyncProperties
 	}
 
 	/// <summary>Scene thread: the signals that set every sync property of the roots and everything under them to the
-	/// server's current value, as this peer's pipeline would send them.</summary>
-	public static List<RecordedSignal> Current(Session session, ReplicationCoreComponent core, OutOfProcessSignalPipeline pipeline, IEnumerable<Entity> roots, long sinceMs, bool notSavedOnly = false)
+	/// server's current value, as this peer's recorder would send them.</summary>
+	public static List<OwnSignal> Current(Session session, ReplicationCoreComponent core, OwnSignals recorder, IEnumerable<Entity> roots, long sinceMs, bool notSavedOnly = false)
 	{
-		var signals = new List<RecordedSignal>();
+		var signals = new List<OwnSignal>();
 		if (Off) return signals;
 		var commands = session.SessionComponents.Get<ReplicationCommandBufferSessionComponent>();
 		Singleton<PoolManager>.Instance.Borrow<ReplicationCommandBuffer>(out var refresh);
@@ -130,7 +124,7 @@ internal static class SyncProperties
 		{
 			commands.Buffer = live;
 		}
-		try { signals.AddRange(pipeline.GetOutboundFrame(refresh).Signals); }
+		try { signals.AddRange(recorder.Record(refresh)); }
 		finally
 		{
 			refresh.Clear();
@@ -146,6 +140,7 @@ internal static class SyncProperties
 	public static int WriteValues(ReplicationCoreComponent core, IEnumerable<Entity> roots, long sinceMs, bool notSavedOnly = false)
 	{
 		int written = 0;
+		List<string>? failed = null;
 		{
 			using var subtree = new Buffer<Entity>(Allocator.Pool, "Y51 sync property refresh");
 			var args = new object?[2];
@@ -169,13 +164,21 @@ internal static class SyncProperties
 						// A block's unsaved value still at its type's default is what the player's game starts from too.
 						if (unchangedBlock && IsDefault(args[1])) continue;
 						try { writer.Info.Invoke(null, args); written++; }
-						catch (Exception ex) { GameLog.Instance.WarnOnce("syncprop-" + property.PropertyType.Name, $"sync properties: {property.PropertyType} could not be refreshed ({ex.GetType().Name}: {ex.InnerException?.Message ?? ex.Message})"); }
+						catch (Exception ex)
+						{
+							lock (RefreshFailed)
+								if (RefreshFailed.Add(property.PropertyType)) (failed ??= new()).Add($"{property.PropertyType.Name} ({ex.GetType().Name}: {ex.InnerException?.Message ?? ex.Message})");
+						}
 					}
 				}
 			}
 		}
+		// One line for the property types that failed for the first time in this pass (it was one line each).
+		if (failed != null) GameLog.Instance.Warn($"sync properties: {failed.Count} property type(s) could not be refreshed (each listed once): {string.Join("; ", failed)}");
 		return written;
 	}
+
+	private static readonly HashSet<Type> RefreshFailed = new();
 
 	private static readonly System.Collections.Concurrent.ConcurrentDictionary<Type, object?> Defaults = new();
 
@@ -234,30 +237,5 @@ internal static class SyncProperties
 		return written;
 	}
 
-	// --- Keen's own transport (a co-op host or dedicated server running it): the same refresh when a player acknowledges a batch,
-	// into the session buffer every player's frame comes from (a player that has the value already applies it again).
 
-	private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, Dictionary<ulong, (Entity[] Roots, long AtMs)>> KeenBatches = new();
-
-	private static void KeenReplicatePrefix(OutOfProcessServerPeerTransport __instance, ISerializedReplicationBatch batch)
-	{
-		if (batch is not OutOfProcessPeerTransport.SerializedReplicationObjectBatch serialized) return;
-		var roots = serialized.Objects.ToArray().OfType<Entity>().ToArray();
-		if (roots.Length == 0) return;
-		lock (KeenBatches) KeenBatches.GetOrCreateValue(__instance)[serialized.BatchId] = (roots, MpClock.NowMs());
-	}
-
-	private static void KeenCompletedPostfix(OutOfProcessServerPeerTransport __instance, ulong batchId)
-	{
-		(Entity[] Roots, long AtMs) batch;
-		lock (KeenBatches)
-			if (!KeenBatches.TryGetValue(__instance, out var batches) || !batches.Remove(batchId, out batch)) return;
-		try
-		{
-			var core = __instance.Server._replicationCore;
-			Track(core);
-			WriteValues(core, batch.Roots, batch.AtMs);
-		}
-		catch (Exception ex) { GameLog.Instance.WarnOnce("syncprop-keen", $"sync properties: refresh after a batch failed ({ex.GetType().Name}: {ex.Message})"); }
-	}
 }

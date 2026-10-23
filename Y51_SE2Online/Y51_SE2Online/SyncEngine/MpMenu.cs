@@ -487,17 +487,14 @@ internal static class MpMenu
     /// <summary>Steam's invite window for the game's session lobby.</summary>
     public static void InviteFriends() => Queue(() =>
     {
-        if (KeenNetcode.KeenNet.LobbyId is not { } lobby) { Message = "Open your world first; invites go to its Steam session."; return; }
-        SteamFriends.ActivateGameOverlayInviteDialog(lobby);
+        // No game lobby: Steam invites carry SE2 Online's join line (the host's rich presence).
+        SteamFriends.ActivateGameOverlay("Friends");
+        Message = "Right-click a friend in Steam and choose Invite to Game.";
     });
 
     public static void Invite(ulong id) => Queue(() =>
     {
-        if (KeenNetcode.KeenNet.LobbyId is { } lobby)
-        {
-            Message = SteamMatchmaking.InviteUserToLobby(lobby, new CSteamID(id)) ? "Invitation sent." : "Steam could not send the invitation.";
-            return;
-        }
+        // The game's lobby is private and its invites join nothing; the invite carries SE2 Online's connect line.
         if (NetSession.Current?.IsHost != true || MpPlugin.Controller.Current?.HostIp != null) return;
         var hostId = NetSession.Current.LocalIdentity;
         bool sent = SteamFriends.InviteUserToGame(new CSteamID(id), ConnectString.Build(hostId, MpPlugin.Controller.Current.VirtualPort));

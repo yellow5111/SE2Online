@@ -25,6 +25,11 @@ internal static class EngineWire
 		Sampled = 5,
 		SampledRemove = 6,
 		SequenceArchive = 7,
+		// [i64 story id][u8 flags: 1 from server, 2 completion][i32 length][archive]: one story per archive, so a story the
+		// receiver cannot read (it names an object that side does not have) is still answered by its id.
+		StoryArchive = 8,
+		// [i32 length][a desync check (server) or the report answering it (player)]: last in its frame (OwnDesync).
+		Desync = 9,
 	}
 
 	// [kind][u32 seq][flags]; flag 1: the units are deflated on their own; flag 2: [u32 length] then the units deflated as
@@ -153,6 +158,16 @@ internal static class EngineWire
 			_w.Write(bytes);
 		}
 
+		public void Story(long id, bool fromServer, bool completion, byte[] bytes)
+		{
+			Units++;
+			_w.Write((byte)Unit.StoryArchive);
+			_w.Write(id);
+			_w.Write((byte)((fromServer ? 1 : 0) | (completion ? 2 : 0)));
+			_w.Write(bytes.Length);
+			_w.Write(bytes);
+		}
+
 		public void TypeDef(ushort key, string name)
 		{
 			Units++;
@@ -226,6 +241,7 @@ internal static class EngineWire
 		void OnDataRemove(uint netId, ushort key);
 		void OnSampled(long stamp, bool reliable, uint netId, ushort key, ReadOnlySpan<byte> bytes);
 		void OnSampledRemove(long stamp, uint netId, ushort key);
+		void OnStory(long id, bool fromServer, bool completion, byte[] bytes);
 	}
 
 	public static void Read(byte[] frame, IUnitSink sink)
@@ -255,6 +271,7 @@ internal static class EngineWire
 			{
 			case Unit.ReplicationArchive:
 			case Unit.SequenceArchive:
+			case Unit.Desync:
 				sink.OnArchive(unit, Bytes(r, r.ReadInt32()));
 				break;
 			case Unit.TypeDef:
@@ -281,6 +298,13 @@ internal static class EngineWire
 			case Unit.SampledRemove:
 				sink.OnSampledRemove(r.ReadInt64(), r.ReadUInt32(), r.ReadUInt16());
 				break;
+			case Unit.StoryArchive:
+			{
+				long id = r.ReadInt64();
+				byte flags = r.ReadByte();
+				sink.OnStory(id, (flags & 1) != 0, (flags & 2) != 0, Bytes(r, r.ReadInt32()));
+				break;
+			}
 			default:
 				throw new InvalidDataException($"unknown engine unit {(byte)unit}");
 			}

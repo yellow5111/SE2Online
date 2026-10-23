@@ -65,8 +65,6 @@ internal static class KeenGuards
 			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(CameraSyncFinalizer))));
 		Guard("thrust unsubscribe", () => harmony.Patch(AccessTools.Method(AccessTools.TypeByName("Keen.Game2.Client.WorldObjects.Shared.Movement.Effects.GridThrustEffectsComponent"), "UnsubscribeBlock"),
 			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(ThrustUnsubscribePrefix))));
-		Guard("unsubscribe networking", () => harmony.Patch(AccessTools.Method(typeof(Keen.Game2.ReconnectComponent), "UnsubscribeFromNetworking"),
-			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(UnsubscribeNetworkingPrefix))));
 		Guard("refused request", () => harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Core.Platform.CrashReporting.CrashHandler), "HandleUnobservedException"),
 			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(RefusedRequestPrefix))));
 		Guard("entity id", () => harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Multiplayer.Replications.OutOfProcess.ReplicationEntitySerializationContext), "GetEntityId"),
@@ -299,18 +297,6 @@ internal static class KeenGuards
 		if (__exception is not (NullReferenceException or EntryPointNotFoundException)) return __exception;
 		GameLog.Instance.WarnOnce("render-entity-gone", $"keen guards: render command {__originalMethod.Name} for an entity whose world was already unloaded; skipped");
 		return null;
-	}
-
-	private static readonly AccessTools.FieldRef<Keen.Game2.ReconnectComponent, Keen.Game2.OutOfProcess.GameClientNetworkingComponent?> SubscribedNetworking =
-		AccessTools.FieldRefAccess<Keen.Game2.ReconnectComponent, Keen.Game2.OutOfProcess.GameClientNetworkingComponent?>("_subscribedNetworkingComponent");
-
-	// Keen's reconnect helper keeps the last session's network component until the next join, then unsubscribes from it;
-	// by then that session is destroyed, the unsubscribe threw, and every second join in one game run failed (and the
-	// failed load then crashed). A component whose entity is gone has nothing left to unsubscribe from.
-	private static void UnsubscribeNetworkingPrefix(Keen.Game2.ReconnectComponent __instance)
-	{
-		var old = SubscribedNetworking(__instance);
-		if (old != null && !Keen.VRage.DCS.Signals.EntityInternalSignalsApi.Constructed(old.Entity)) SubscribedNetworking(__instance) = null;
 	}
 
 	// A body handed over by the host and then seated by it switches the camera from the character to the cockpit within a

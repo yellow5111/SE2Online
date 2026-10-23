@@ -265,6 +265,20 @@ public sealed class ClientSession
 		}
 	}
 
+	/// <summary>The game user the server registered this player under (sent with the snapshot); empty if it did not say.</summary>
+	public Guid SnapshotUser { get; private set; }
+
+	private int _snapshotRequested;
+
+	/// <summary>Asks the server for its world's session snapshot, once per session (it admits this player's game then).</summary>
+	public bool RequestSnapshot()
+	{
+		if (!Host.HasValue || CurrentPhase != Phase.Accepted || Interlocked.Exchange(ref _snapshotRequested, 1) != 0) return false;
+		_t.Send(Host.Value, Channel.Control, SnapshotMessage.Request());
+		_log.Info("sync(client): asked the server for the world");
+		return true;
+	}
+
 	public byte[]? TryTakeSnapshot()
 	{
 		byte[] snapshot = Volatile.Read(in _snapshot);
@@ -479,8 +493,9 @@ public sealed class ClientSession
 		}
 		case SyncMsg.Snapshot:
 		{
-			byte[] snapshot = SnapshotMessage.Decode(data, out List<Guid> requiredBlobs);
+			byte[] snapshot = SnapshotMessage.Decode(data, out List<Guid> requiredBlobs, out Guid user);
 			SnapshotBlobs = requiredBlobs;
+			SnapshotUser = user;
 			Volatile.Write(ref _snapshot, snapshot);
 			Blobs.Check(requiredBlobs, now, out var absent);
 			_log.Info($"sync(client): session snapshot received ({MpLogExtensions.Bytes(snapshot.Length)}; references {requiredBlobs.Count} offloaded blobs, {absent} not here; blobs so far: {Blobs.Describe()})");

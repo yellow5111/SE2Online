@@ -44,9 +44,7 @@ internal static class StateProbe
 		if (server && Hurt) HurtTick(session);
 		if (server && GoTo != null) GoToTick(session);
 		if (!Requested && !PropProbe.Requested && !ObProbe.Requested) return;
-		var mapper = server
-			? session.SessionComponents.TryGet<Keen.VRage.Multiplayer.Transport.OutOfProcess.Server.OutOfProcessServerPeerTransportSessionComponent>()?.NetworkIdMapper
-			: session.SessionComponents.TryGet<Keen.VRage.Multiplayer.Transport.OutOfProcess.Client.OutOfProcessClientPeerTransportSessionComponent>()?.NetworkIdMapper;
+		var mapper = OwnHost.Existing(session)?.Ids;
 		if (mapper == null) return;
 		long now = MpClock.NowMs();
 		ref long next = ref server ? ref _serverNextMs : ref _clientNextMs;

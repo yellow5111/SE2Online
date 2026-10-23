@@ -1,39 +1,39 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Reflection;
-using System.Runtime.CompilerServices;
+using Keen.VRage.DCS.Components;
 using Keen.VRage.Library.Threading;
+using Keen.VRage.Library.UI;
+using Keen.VRage.Library.Utils;
 using Keen.VRage.Multiplayer;
 using Keen.VRage.Multiplayer.NetworkStories;
+using Keen.VRage.Multiplayer.Replications;
 using Keen.VRage.Multiplayer.Transport;
-using Keen.VRage.Multiplayer.Transport.OutOfProcess;
-using Keen.VRage.Multiplayer.Transport.OutOfProcess.Client;
 using Y51_SE2Online.Core;
 using Y51_SE2Online.Sync;
 using KTask = Keen.VRage.Library.Threading.Task;
-using OopTransport = Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport;
 
 namespace Y51_SE2Online.Engine;
 
-/// <summary>A joined player's side: replaces Keen's OutOfProcessClientPeerTransport.</summary>
+/// <summary>A joined player's side: SE2 Online's transport to the server in the game's replication.</summary>
 [WithLifetimeAdapter(typeof(DefaultLifetimeAdapter))]
 internal sealed class Y51ClientTransport : Y51PeerTransport, IClientPeerTransport
 {
-	private readonly OutOfProcessClientPeerTransportSessionComponent _client;
+	private readonly ReplicationClientSessionComponent _client;
 	private readonly Func<byte[], bool> _send;
 
-	public long Creations, Destructions, Acks, SendFailures;
+	public long Creations, Destructions, Acks, SendFailures, BatchesUnreadable;
 
 	public event IClientPeerTransport.ReplicationCallback? AfterObjectsReplicated;
 
 	public event IClientPeerTransport.ReplicationCallback? AfterObjectsDestroyed;
 
-	public Y51ClientTransport(OutOfProcessClientPeerTransportSessionComponent client, Func<byte[], bool> send)
-		: base(client, ClientId.Server, "client")
+	public Y51ClientTransport(OwnHost host, Func<byte[], bool> send)
+		: base(host, ClientId.Server, "client")
 	{
-		_client = client;
+		_client = (ReplicationClientSessionComponent)host.Replication;
 		_send = send;
-		Context = new OutOfProcessClientPeerTransport.ReplicationContext(client);
 	}
 
 	protected override SyncMsg UpstreamKind => SyncMsg.EngineUp;
@@ -45,47 +45,119 @@ internal sealed class Y51ClientTransport : Y51PeerTransport, IClientPeerTranspor
 		if (!_send(message)) SendFailures++;
 	}
 
-	private static readonly ConcurrentDictionary<Type, MethodInfo> Creators = new(), Destroyers = new();
+	private static readonly ConcurrentDictionary<(Type, Type), MethodInfo> Creators = new();
+	private static readonly ConcurrentDictionary<Type, MethodInfo> Destroyers = new();
 
 	private static readonly MethodInfo CreateDef = typeof(Y51ClientTransport).GetMethod(nameof(Create), BindingFlags.Instance | BindingFlags.NonPublic)!;
 	private static readonly MethodInfo DestroyDef = typeof(Y51ClientTransport).GetMethod(nameof(Destroy), BindingFlags.Instance | BindingFlags.NonPublic)!;
 
-	protected override void HandleReplication(object message)
+	protected override void HandleReplication(byte[] unit)
 	{
-		Type type = message.GetType();
-		if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(OopTransport.ReplicateOperationData<,>))
+		switch (OwnUnits.OpOf(unit))
 		{
-			Creators.GetOrAdd(type, t => CreateDef.MakeGenericMethod(t.GetGenericArguments())).Invoke(this, new[] { message });
-			return;
-		}
-		if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(OopTransport.DestroyOperationData<>))
+		case OwnUnits.Op.Batch:
 		{
-			Destroyers.GetOrAdd(type, t => DestroyDef.MakeGenericMethod(t.GetGenericArguments())).Invoke(this, new[] { message });
-			return;
+			var header = OwnUnits.ReadBatchHeader(unit);
+			var create = Creators.GetOrAdd((header.Object, header.Payload), k => CreateDef.MakeGenericMethod(k.Item1, k.Item2));
+			try { create.Invoke(this, new object[] { header.Batch, header.Stubs, unit, header.ArchiveAt }); }
+			catch (TargetInvocationException ex) when (ex.InnerException != null) { throw ex.InnerException; }
+			break;
 		}
-		GameLog.Instance.WarnOnce("engine-client-msg-" + type.Name, $"engine {Name}: the server sent {type.Name}, which this side does not handle; ignored");
+		case OwnUnits.Op.Destroy:
+		{
+			var (batch, objectType, ids) = OwnUnits.ReadDestroy(unit);
+			try { Destroyers.GetOrAdd(objectType, t => DestroyDef.MakeGenericMethod(t)).Invoke(this, new object[] { batch, ids }); }
+			catch (TargetInvocationException ex) when (ex.InnerException != null) { throw ex.InnerException; }
+			break;
+		}
+		default:
+			GameLog.Instance.WarnOnce("engine-client-msg-" + Name, $"engine {Name}: the server sent an acknowledgement, which only players send; ignored");
+			break;
+		}
 	}
 
-	private void Create<TObject, TPayload>(OopTransport.ReplicateOperationData<TObject, TPayload> message) where TObject : class
+	private void Create<TObject, TPayload>(ulong batch, OwnUnits.Stub[] stubs, byte[] unit, int archiveAt) where TObject : class
 	{
-		var objects = new TObject[message.ObjectsToReplicate.Length];
-		for (int i = 0; i < objects.Length; i++) objects[i] = (TObject)message.ObjectsToReplicate[i].Instance;
+		var objects = new TObject[stubs.Length];
+		var fresh = new List<(object Instance, NetworkId Id)>();
+		for (int i = 0; i < stubs.Length; i++)
+		{
+			var id = new NetworkId(stubs[i].Id);
+			if (Host.Ids.TryGetObject(id) is { } known)
+			{
+				objects[i] = known as TObject ?? throw new InvalidOperationException($"object #{id.Value} is a {known.GetType().Name} here, not a {typeof(TObject).Name}");
+				continue;
+			}
+			object stub = AllocateStub(stubs[i]);
+			objects[i] = (TObject)stub;
+			Host.Ids.Add(stub, id);
+			Host.MapToReplay(stub);
+			fresh.Add((stub, id));
+		}
+		object? payload;
+		try
+		{
+			payload = OwnUnits.ReadPayload(unit, archiveAt, Contexts());
+			if (payload is not TPayload) throw new InvalidOperationException($"the payload read as {payload?.GetType().Name ?? "nothing"}, not {typeof(TPayload).Name}");
+		}
+		catch (Exception ex) when (ex.CanHandle())
+		{
+			// Nothing of the batch is built: its objects stay unknown here (references to them fail cleanly instead of
+			// landing on empty stubs), and the server is told so it does not hold staged spawns for this player.
+			foreach (var (instance, id) in fresh)
+			{
+				Host.Ids.Remove(id);
+				Host.UnmapFromReplay(instance);
+			}
+			BatchesUnreadable++;
+			KeenNetcode.UnitFailureLog.NoteError("object batch unreadable", typeof(TObject).Name + " batch", ex);
+			GameLog.Instance.Warn($"engine {Name}: object batch #{batch} ({stubs.Length} {typeof(TObject).Name}) could not be read ({OwnArchive.Innermost(ex)}); those objects are missing in this game until it rejoins");
+			Acknowledge(batch);
+			return;
+		}
 		Creations++;
-		var operation = _client.GetHandler<TObject, TPayload>().InitializeObjectsAsync(objects, message.Payload);
-		Confirm(operation, message.BatchId).SkipWait();
+		var operation = _client.GetHandler<TObject, TPayload>().InitializeObjectsAsync(objects, (TPayload)payload!);
+		Confirm(operation, batch).SkipWait();
 	}
 
-	private void Destroy<TObject>(OopTransport.DestroyOperationData<TObject> message) where TObject : class
+	private object AllocateStub(OwnUnits.Stub stub)
 	{
-		var objects = new TObject[message.ObjectsToDestroy.Length];
-		for (int i = 0; i < objects.Length; i++)
+		switch (stub.Kind)
 		{
-			objects[i] = _client.NetworkIdMapper.GetObject<TObject>(message.ObjectsToDestroy[i]);
-			_client.NetworkIdMapper.Remove(objects[i]);
+		case OwnUnits.StubKind.Entity:
+			return _client.GetHandler<Entity>().AllocateStub(typeof(Entity));
+		case OwnUnits.StubKind.Observable:
+		{
+			Type? type = stub.ObservableType == null ? null : OwnUnits.Find(stub.ObservableType);
+			if (type == null || !typeof(ObservableObject).IsAssignableFrom(type) || type.IsAbstract)
+				throw new InvalidOperationException($"observable model {stub.ObservableType} is not known here");
+			return _client.GetHandler<ObservableObject>().AllocateStub(type);
+		}
+		case OwnUnits.StubKind.Collection:
+			return _client.GetHandler<IObservedCollection>().AllocateStub(typeof(IObservedCollection));
+		default:
+			throw new InvalidOperationException("unknown object kind " + stub.Kind);
+		}
+	}
+
+	private void Destroy<TObject>(ulong batch, ulong[] ids) where TObject : class
+	{
+		var objects = new List<TObject>(ids.Length);
+		foreach (ulong raw in ids)
+		{
+			// 0 is the session itself; an id this side never had (its batch could not be read) has nothing to destroy.
+			if (raw == 0) continue;
+			var id = new NetworkId(raw);
+			if (Host.Ids.TryGetObject(id) is TObject instance)
+			{
+				Host.Ids.Remove(id);
+				objects.Add(instance);
+			}
+			ForgetHeld(raw);
 		}
 		Destructions++;
-		var operation = _client.GetHandler<TObject>().DestroyObjectsAsync(objects);
-		Confirm(operation, message.BatchNumber).SkipWait();
+		var operation = objects.Count > 0 ? _client.GetHandler<TObject>().DestroyObjectsAsync(objects.ToArray()) : default;
+		Confirm(operation, batch).SkipWait();
 	}
 
 	private async KTask Confirm(KTask operation, ulong batch)
@@ -100,15 +172,21 @@ internal sealed class Y51ClientTransport : Y51PeerTransport, IClientPeerTranspor
 		}
 		// The batch's entities are in the scene now: their motion that came while they were built applies in this frame.
 		ApplyParked();
-		Acks++;
-		EnqueueReplicationPacket(OopTransport.SerializeForNetwork(default, new OopTransport.BatchAck(batch)));
+		Acknowledge(batch);
 	}
 
-	// This player's own predicted character keeps its own sprint/jump/boost flags (KeenNetcode/OwnMotion.cs): the server's
-	// copy comes back a round trip late and would undo a key let go of since.
-	protected override bool AcceptData(int typeId, Keen.VRage.DCS.Components.Entity target, bool removal)
-		=> !(KeenNetcode.OwnMotion.Driving is { } own && ReferenceEquals(own, target) && typeId == Keen.VRage.DCS.Internal.RuntimeDataInfo.Of(typeof(Keen.Game2.Simulation.WorldObjects.Characters.AdvancedCharacterControlData)).TypeId);
+	private void Acknowledge(ulong batch)
+	{
+		Acks++;
+		EnqueueReplicationPacket(OwnUnits.WriteAck(batch));
+	}
 
-	protected override IAsyncStateMachine RestoreStoryStateMachine(ClientId sender, StoryId storyId, StateMachineEnvelope envelope)
-		=> OopTransport.PlanFor(envelope).Restore(envelope, storyId, _client.ReplicationComponent);
+	// This player's own predicted character keeps its own control flags, physics state and predicted states
+	// (KeenNetcode/OwnMotion.cs): the server's copy comes back a round trip late and would undo a key let go of since.
+	protected override bool AcceptData(int typeId, Entity target, bool removal) => !KeenNetcode.OwnMotion.KeepsOwn(typeId, target, removal);
+
+	protected override void OnDesync(byte[] bytes)
+	{
+		if (OwnDesync.Answer(bytes, Host.Ids) is { } report) EnqueueDesync(report);
+	}
 }

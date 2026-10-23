@@ -227,7 +227,7 @@ public sealed partial class OnlineScreen : ScreenView
         _message.IsVisible = !string.IsNullOrWhiteSpace(_message.Text);
         RefreshHostPage(busy, hosting);
         _host.IsEnabled = !busy && !hosting && MpPlugin.SteamAvailable;
-        _joinByCode.IsEnabled = !busy && MpPlugin.SteamAvailable && Keen.VRage.Core.Services.GameSessions.SessionJoinCode.TryParse(_joinCode.Text?.Trim(), out _);
+        _joinByCode.IsEnabled = false;
         _load.IsEnabled = _create.IsEnabled = !busy && !MpMenu.HasWorld && hosting;
         _joinAddress.IsEnabled = !busy && !string.IsNullOrWhiteSpace(_address.Text);
         _joinId.IsEnabled = !busy && MpPlugin.SteamAvailable && ulong.TryParse(_steamId.Text, out var id) && id != 0;

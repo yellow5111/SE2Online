@@ -9,7 +9,6 @@ using Keen.Game2.Simulation.WorldObjects.CubeGrids;
 using Keen.Game2.Simulation.WorldObjects.Movement;
 using Keen.VRage.Core.Game.Data;
 using Keen.VRage.DCS.Components;
-using Keen.VRage.Multiplayer.Transport.OutOfProcess;
 using Y51_SE2Online.Core;
 using Y51_SE2Online.SyncEngine;
 
@@ -33,39 +32,6 @@ internal static class OnePilot
 	private static readonly ConditionalWeakTable<SeatComponent, StrongBox<(Entity? Pilot, long Since)>> Seated = new();
 
 	public static long Dropped;
-
-	public static void Install(Harmony harmony)
-	{
-		// Whether a client may send flight input at all is checked first; this only picks which seated player flies.
-		try { ClientDataGuard.Install(harmony); }
-		catch (Exception ex) { GameLog.Instance.Warn($"client data guard not installed ({ex.GetType().Name}: {ex.Message})"); }
-		harmony.Patch(AccessTools.Method(typeof(OutOfProcessPeerTransport), "ProcessIncomingData"), prefix: new HarmonyMethod(typeof(OnePilot), nameof(IncomingPrefix)));
-	}
-
-	private static void IncomingPrefix(OutOfProcessPeerTransport __instance, object dataBatch)
-	{
-		if (!Enabled || __instance is not Keen.VRage.Multiplayer.Transport.OutOfProcess.Server.OutOfProcessServerPeerTransport) return;
-		if (dataBatch.GetType().GetField("DataLists")?.GetValue(dataBatch) is not IList lists) return;
-		long sender = 0;
-		Dictionary<Entity, long>? pilots = null;
-		foreach (object? list in lists)
-		{
-			var type = list?.GetType();
-			if (type is not { IsGenericType: true } || !ControlTypes.Contains(type.GetGenericArguments()[0]) || type.GetField("Data")?.GetValue(list) is not IList entries) continue;
-			for (int i = entries.Count - 1; i >= 0; i--)
-			{
-				if (entries[i]?.GetType().GetField("Target")?.GetValue(entries[i]) is not Entity target) continue;
-				var root = target.GetTopLevelParent();
-				if (root.TryGet<CubeGridComponent>() == null) continue;
-				if (sender == 0 && (sender = (long)ServerAccess.IdentityOf(__instance.PeerClientId)) == 0) return;
-				pilots ??= new Dictionary<Entity, long>(ReferenceEqualityComparer.Instance);
-				if (!pilots.TryGetValue(root, out long pilot)) pilots[root] = pilot = PilotOf(root);
-				if (pilot == 0 || pilot == sender) continue;
-				entries.RemoveAt(i);
-				NoteDropped(sender, pilot);
-			}
-		}
-	}
 
 	/// <summary>The host's one-pilot setting is on in this hosted world.</summary>
 	internal static bool Enabled => AdminAccess.Hosting && (HostWorld.Current?.OnePilot ?? true);

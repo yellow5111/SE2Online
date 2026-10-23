@@ -50,6 +50,20 @@ public sealed class UnitFailures
 		}
 	}
 
+	/// <summary>The minute's summary when due, without a new failure (call it on a timer).</summary>
+	public string? Flush(long now)
+	{
+		lock (_seen)
+		{
+			if (_session == null || now - _summaryMs < SummaryMs) return null;
+			_summaryMs = now;
+			if (_counts.Count == 0) return null;
+			string summary = string.Join("; ", _counts.OrderByDescending(kv => kv.Value).Select(kv => kv.Key + " x" + kv.Value));
+			_counts.Clear();
+			return summary;
+		}
+	}
+
 	private static readonly Regex Frames = new(@"\bat (?:[\w`.]+[.+])?(?<type>[\w`]+)\+Serializer\.|<(?<story>\w+)>d__\d+", RegexOptions.Compiled);
 
 	/// <summary>

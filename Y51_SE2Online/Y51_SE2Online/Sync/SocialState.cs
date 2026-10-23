@@ -297,7 +297,22 @@ public sealed class SocialState
     }
 
     /// <summary>
-    /// Dedicated, at load: nobody plays as the host's identity there. Saves from before 0.15.4 kept it for whoever hosted;
+    /// Dedicated: <see cref="PlayerIdentities.HotfixIdentity"/> is a SE2 4.0 player's own identity and that player's
+    /// <paramref name="derived"/> identity is the saved <see cref="HostIdentity"/>: their faction place comes back to it.
+    /// </summary>
+    public bool CanReclaim(long derived) => derived != 0 && HostIdentity == derived;
+
+    /// <summary>Last step, after the grids moved: the faction place follows and the saved host slot is cleared.</summary>
+    public bool ReclaimHostSlot(long derived)
+    {
+        if (!CanReclaim(derived)) return false;
+        Merge(derived, PlayerIdentities.HotfixIdentity);
+        HostIdentity = 0;
+        return true;
+    }
+
+    /// <summary>
+    /// Dedicated, at the world's first tick, while no SE2 4.0 player owns the host's identity: nobody plays as it there. Saves from before 0.15.4 kept it for whoever hosted;
     /// it goes to the one other saved player of the same name, or leaves its faction unless it is the faction's only member.
     /// Its grids do not follow a name match (names are chosen at join): without a saved <see cref="HostIdentity"/> they are
     /// left for anyone to claim.

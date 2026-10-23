@@ -9,6 +9,7 @@ using Keen.Game2.Game.GameComponents;
 using Keen.Game2.Simulation.RuntimeSystems.Saves;
 using Keen.Game2.Simulation.RuntimeSystems.Serialization;
 using Keen.Game2.Simulation.GameSystems.Antennas;
+using Keen.Game2.Simulation.GameSystems.Identities;
 using Keen.Game2.Simulation.GameSystems.Ownership;
 using Keen.Game2.Simulation.GameSystems.Permissions;
 using Keen.Game2.Simulation.WorldObjects.CubeBlocks;
@@ -26,6 +27,7 @@ using Keen.VRage.Library.Utils;
 using Y51_SE2Online.Core;
 using Y51_SE2Online.Sync;
 using Y51_SE2Online.Dedicated;
+using Y51_SE2Online.Net;
 
 namespace Y51_SE2Online.SyncEngine;
 
@@ -108,7 +110,6 @@ internal sealed class WorldSocial
                         GameLog.Instance.Error($"factions: {SaveFile} in this save is unreadable ({ex.GetType().Name}: {ex.Message}); the world loads with no factions and the file is kept beside the next save as {SaveFile}.bad");
                     }
                 }
-                if (DedicatedRuntime.Requested) social.State.SettleHostSlot();
                 social._initialized = false;
                 social._tagged.Clear(); social._unmatched = null;
             }
@@ -122,14 +123,23 @@ internal sealed class WorldSocial
         bool shared = MpPlugin.Controller?.Current?.Grids == GridPermissionMode.Team
             || (MpPlugin.Controller?.Current == null && MpMenu.Settings.TeamGrids);
         const long host = PlayerIdentities.HotfixIdentity;
-        long heir = DedicatedRuntime.Requested ? State.HostHeir : 0;
+        // SE2 4.0 gives this identity to whoever created the world and keeps it bound to their Steam user: then it is that
+        // player's own identity, not SE2 2.4's host slot, and settling the slot took their grids and faction at every restart.
+        bool legacySlot = DedicatedRuntime.Requested && world.OwnedSession?.SessionComponents?.TryGet<IdentitiesSessionComponent>()?.TryGetUserOf(new IdentityId(host)) == null;
+        if (legacySlot) State.SettleHostSlot();
+        // The creator's own Steam id, when this game has seen it already (it usually has not at load): their saved place and
+        // grids come back before anyone joins. Otherwise that happens when they join (HostWorld).
+        else if (DedicatedRuntime.Requested && world.OwnedSession?.SessionComponents?.TryGet<IdentitiesSessionComponent>()?.TryGetUserOf(new IdentityId(host)) is { } creator
+                 && Y51_SE2Online.KeenNetcode.SteamUsers.SteamIdOf(creator) is ulong creatorSteam)
+            ReclaimHostSlot(world.OwnedSession, creatorSteam);
+        long heir = legacySlot ? State.HostHeir : 0;
         foreach (var entity in world.OwnedSession.Entities)
         {
             var grid = entity.TryGet<CubeGridComponent>(); var permissions = entity.TryGet<GridPermissionsComponent>();
             if (grid == null || permissions == null || !PlayerIdentities.IsHuman(TeamPermissions.OwnerOf(entity))) continue;
             // Nobody plays as the host's identity on a dedicated server: its grids go to that host's own identity when the
             // save names it, else they are left for anyone to claim.
-            if (DedicatedRuntime.Requested && TeamPermissions.OwnerOf(entity) == host)
+            if (legacySlot && TeamPermissions.OwnerOf(entity) == host)
             {
                 SetOwner(entity, heir);
                 if (heir == 0)
@@ -164,6 +174,32 @@ internal sealed class WorldSocial
             State.AclOwners = true;
         }
         _initialized = true;
+    }
+
+    /// <summary>
+    /// Dedicated, server thread: the player SE2 4.0 binds to <see cref="PlayerIdentities.HotfixIdentity"/> joined. A save from
+    /// their co-op hosting names them by their derived identity, and a restart before 0.16.8 moved their grids there: their
+    /// faction place, grids and block lists come back to the game's identity.
+    /// </summary>
+    internal void ReclaimHostSlot(Session session, ulong steamId)
+    {
+        const long host = PlayerIdentities.HotfixIdentity;
+        long derived = PlayerIdentities.Derive(PlayerIdentities.KeyFor(new PeerId(steamId), "?"));
+        if (!State.CanReclaim(derived)) return;
+        int grids = 0;
+        foreach (var entity in session.Entities)
+            if (entity.TryGet<CubeGridComponent>() != null && TeamPermissions.OwnerOf(entity) == derived) { SetOwner(entity, host); grids++; }
+        string from = derived.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        foreach (var block in session.GetEntitiesOfType<BlockPermissionsComponent>())
+        {
+            var permissions = block.Get<BlockPermissionsComponent>();
+            string text = permissions.AccessGroup.String;
+            if (BlockAcl.IsAcl(text) && text.Contains(from, StringComparison.Ordinal))
+                permissions.AccessGroup = StringId.Get(BlockAcl.Parse(text).Renamed(derived, host).ToString());
+        }
+        // Last: a failure above leaves the saved slot, and the next join (or load) tries again.
+        State.ReclaimHostSlot(derived);
+        GameLog.Instance.Info($"factions: Steam user {steamId} plays as the world's first identity {host}; their faction place and {grids} grid(s) saved under {derived} came back to it");
     }
 
     private static bool IsExplicit(StringId key) => key == Private || key == Faction || key == Everyone;

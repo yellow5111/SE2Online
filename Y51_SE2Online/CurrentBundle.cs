@@ -2,5 +2,5 @@ internal static class CurrentBundle
 {
 	internal const string Name = "Y51_SE2Online";
 
-	internal const string Version = "0.16.7.0";
+	internal const string Version = "0.17.0.0";
 }

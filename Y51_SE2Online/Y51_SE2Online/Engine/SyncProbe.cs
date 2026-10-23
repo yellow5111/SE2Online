@@ -9,7 +9,6 @@ using Keen.VRage.Core.Game.Data;
 using Keen.VRage.Core.Game.Systems;
 using Keen.VRage.DCS.Components;
 using Keen.VRage.Game.Components.Animations;
-using Keen.VRage.Multiplayer.Transport.OutOfProcess;
 using Keen.VRage.Physics.Data;
 using Y51_SE2Online.Core;
 using Y51_SE2Online.SyncEngine;
@@ -69,9 +68,7 @@ internal static class SyncProbe
 		ref long next = ref server ? ref _serverNextMs : ref _clientNextMs;
 		if (now < next) return;
 		next = now + 250;
-		var mapper = server
-			? session.SessionComponents.TryGet<Keen.VRage.Multiplayer.Transport.OutOfProcess.Server.OutOfProcessServerPeerTransportSessionComponent>()?.NetworkIdMapper
-			: session.SessionComponents.TryGet<Keen.VRage.Multiplayer.Transport.OutOfProcess.Client.OutOfProcessClientPeerTransportSessionComponent>()?.NetworkIdMapper;
+		var mapper = OwnHost.Existing(session)?.Ids;
 		if (mapper == null) return;
 		var sb = new StringBuilder();
 		int n = 0;
@@ -90,7 +87,7 @@ internal static class SyncProbe
 		if (sb.Length > 0) GameLog.Instance.Info(sb.ToString().TrimEnd('\n'));
 	}
 
-	private static void Line(StringBuilder sb, bool server, long now, Entity e, NetworkIdMapper mapper, string kind)
+	private static void Line(StringBuilder sb, bool server, long now, Entity e, OwnIds mapper, string kind)
 	{
 		if (EngineCodec.IsDead(e) || mapper.TryGetId(e) is not { } id) return;
 		var at = e.Data.GetWorldTransform();

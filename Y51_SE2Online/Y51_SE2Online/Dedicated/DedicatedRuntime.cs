@@ -86,7 +86,6 @@ internal static class DedicatedRuntime
                 if (added.Count > 0) GameLog.Instance.Info($"dedicated: added {added.Count} new option(s) to {Path.GetFileName(Config.ConfigPath)} with their defaults, your settings untouched (previous file kept as {Path.GetFileName(Config.ConfigPath)}.bak): {string.Join(", ", added)}");
             }
             catch (Exception ex) { GameLog.Instance.Warn($"dedicated: could not add new options to {Path.GetFileName(Config.ConfigPath)} ({ex.GetType().Name}: {ex.Message}); the server runs on it as it is"); }
-            KeenNet.DedicatedListen = (new System.Net.IPEndPoint(System.Net.IPAddress.TryParse(Config.Network.BindAddress, out var bind) ? bind : System.Net.IPAddress.Any, Config.Network.ListenPort), Config.Network.SessionName);
             // Steam runs as a game server on every 4.0 dedicated server, so the Workshop is fetched through it either way.
             DedicatedMods.Install(harmony);
             if (Headless) HeadlessEngine.Install(harmony);
@@ -120,6 +119,9 @@ internal static class DedicatedRuntime
 
     private static long _lastSlowLogMs, _statusCostMs;
     private static int _slowFramesLoaded;
+
+    // Job timing switched on because a whole window ran behind (not for slow frames): switched off when it keeps up again.
+    private static bool _jobsForBehind;
     private static Harmony _harmony;
     private static readonly object StatusFileLock = new();
 
@@ -172,8 +174,21 @@ internal static class DedicatedRuntime
             _lastSlowLogMs = MpClock.NowMs();
             GameLog.Instance.Warn($"dedicated: slow server frame {frame!.Describe()}; last status write {_statusCostMs} ms, command {_commandCostMs} ms, save start {_saveStartCostMs} ms{(jobs.Length > 0 ? "; slowest game jobs (ms): " + jobs : "")}");
         }
-        if (slow && !JobProfiler.Installed && ++_slowFramesLoaded >= 3)
+        if (JobProfiler.Installed && _jobsForBehind && !ServerPerf.Behind)
         {
+            try
+            {
+                JobProfiler.Uninstall(_harmony);
+                _jobsForBehind = false;
+                GameLog.Instance.Info("dedicated: the world keeps up again; no longer timing the game's jobs");
+            }
+            catch (Exception ex) { GameLog.Instance.WarnOnce("job-profiler-off", "dedicated: could not stop timing the game's jobs: " + ex.Message); _jobsForBehind = false; }
+        }
+        bool slowInstall = slow && !JobProfiler.Installed && ++_slowFramesLoaded >= 3;
+        if (slow && JobProfiler.Installed && _jobsForBehind && ++_slowFramesLoaded >= 3) _jobsForBehind = false;
+        if (!JobProfiler.Installed && (slowInstall || ServerPerf.Behind))
+        {
+            _jobsForBehind = !slowInstall;
             try
             {
                 JobProfiler.Install(_harmony);
@@ -253,7 +268,7 @@ internal static class DedicatedRuntime
             ticks.Tick = true;
             var world = app.Server.Entity.Get<WorldSessionComponent>();
             // Set by SaveSessionComponent.OnSavePerformed after any completed save, the game's autosave included.
-            var gameSave = world.OwnedSession?.SessionComponents.TryGet<SaveSessionComponent>()?._lastEntryAutosaveTime;
+            var gameSave = world.OwnedSession?.SessionComponents?.TryGet<SaveSessionComponent>()?._lastEntryAutosaveTime;
             if (gameSave != _seenGameSave)
             {
                 _seenGameSave = gameSave;
@@ -475,6 +490,8 @@ internal static class DedicatedRuntime
             {
                 // A failed periodic save must not stop the server's tick (and every later save) like a load failure does.
                 _nextSave = MpClock.NowMs() + 60_000;
+                // Error would stop the server (Active); players are told once per run of failures instead.
+                if (!_lastSaveFailed) Say("The server could not save the world and keeps retrying. Admins: check the server log before restarting.");
                 _lastSaveFailed = true;
                 GameLog.Instance.Error("dedicated: periodic save failed, retrying in 60 s: " + ex);
             }
@@ -791,7 +808,7 @@ internal static class DedicatedRuntime
                     SteamId = p.Peer.Value.Value, p.Name, State = p.CharacterNetId > 0 ? "Playing" : "Joining"
                 }).ToArray() ?? [],
                 Headless, NativeClientPresent = MpPlugin.App?.Client != null,
-                NativePlayerClientIds = _loaded ? MpPlugin.App?.Server?.Entity.Get<WorldSessionComponent>()?.OwnedSession.SessionComponents
+                NativePlayerClientIds = _loaded ? MpPlugin.App?.Server?.Entity.Get<WorldSessionComponent>()?.OwnedSession?.SessionComponents?
                     .Get<Keen.Game2.Simulation.GameSystems.Identities.IdentitiesSessionComponent>().GetClientIds().Select(id => id.Id).ToArray() : null,
                 PresentationComponents = Headless ? MpPlugin.App?.Scene.Engine?.Components
                     .Where(c => HeadlessEngine.IsGraphical(c.GetType())).Select(c => c.GetType().FullName).ToArray() : null,

@@ -17,8 +17,14 @@ public interface IHostWorld
 	/// <summary>Where a player's character is for proximity voice, from a server-thread snapshot; false if unknown.</summary>
 	bool TryVoicePosition(ushort clientId, out Vec3D position) { position = default; return false; }
 	ServerInfoRow[] ServerInfo() => System.Array.Empty<ServerInfoRow>();
-	/// <summary>The mods the running world loaded; joiners load the same set.</summary>
+	/// <summary>The mods the running world loaded; players load the same set.</summary>
 	IReadOnlyList<WorldMod> Mods => System.Array.Empty<WorldMod>();
+	/// <summary>The world runs missions and contracts (a player's game builds its mission parts then).</summary>
+	bool HostMissions => false;
+	/// <summary>Network thread: an accepted player's game builds the world and asks for its session snapshot (once per connection).</summary>
+	void SnapshotRequested(PeerId peer, ushort clientId) { }
+	/// <summary>Network thread: a player's connection closed (left, kicked, lost); its game's place on the server goes.</summary>
+	void PeerLeft(PeerId peer) { }
 	bool WorldReady { get; }
 
 	string WorldName { get; }

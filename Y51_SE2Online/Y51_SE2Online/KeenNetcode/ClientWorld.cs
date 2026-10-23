@@ -124,7 +124,7 @@ internal sealed class ClientWorld
 
 	public void Bind(ClientSession session) => _session = session;
 
-	private KeenIds? _ids;
+	private SessionIds? _ids;
 
 	private Keen.VRage.Core.Game.Systems.Session? _idsFor;
 
@@ -133,13 +133,13 @@ internal sealed class ClientWorld
 
 	internal Keen.VRage.DCS.Components.Entity? EntityOf(uint netId) => Ids?.TryGet(netId, out var entity) == true ? entity : null;
 
-	private KeenIds? Ids
+	private SessionIds? Ids
 	{
 		get
 		{
 			var session = MpPlugin.App?.ClientSession;
 			if (session == null) return null;
-			if (!ReferenceEquals(session, _idsFor)) (_ids, _idsFor) = (new KeenIds(session, server: false), session);
+			if (!ReferenceEquals(session, _idsFor)) (_ids, _idsFor) = (new SessionIds(session, server: false), session);
 			return _ids;
 		}
 	}
@@ -153,7 +153,7 @@ internal sealed class ClientWorld
 	/// <summary>Join this Keen session (a Steam lobby or a dedicated server's address); called from any thread.</summary>
 	public void Join(GameSessionID session)
 	{
-		_log.Info($"client: joining {session} with the game's own netcode");
+		_log.Info(session is OwnSessionID ? $"client: building the world of server {session}" : $"client: joining {session} with the game's own netcode");
 		_lostReason = null;
 		System.Threading.Volatile.Write(ref _lossReported, null);
 		System.Threading.Volatile.Write(ref _joinEnded, null);
@@ -162,7 +162,6 @@ internal sealed class ClientWorld
 		_leftAfterReject = false;
 		_pendingJoin = session;
 		Progress.Set(JoinStage.Connecting, MpClock.NowMs());
-		_joinBytesAtStart = System.Threading.Interlocked.Read(ref JoinBytes.Received);
 	}
 
 	/// <summary>The join never reached a host (net thread).</summary>
@@ -206,9 +205,17 @@ internal sealed class ClientWorld
 
 	private const long ConnectTimeoutMs = 60000;
 
+	private bool _ownJoinStarted;
+
 	public void MainTick(Keen.Game2.GameAppComponent app)
 	{
 		long now = MpClock.NowMs();
+		// SE2 Online's own netcode: the server accepted this player on SE2 Online's link; the game builds its world now.
+		if (!_ownJoinStarted && !_left && _session is { CurrentPhase: ClientSession.Phase.Accepted, Accept: not null, Host: { } host })
+		{
+			_ownJoinStarted = true;
+			Join(new OwnSessionID(host.Value, _o.JoinIp?.ToString() ?? host.Value.ToString()));
+		}
 		if (_pendingJoin is { } join && _preparing == null)
 		{
 			_preparedFor = join;
@@ -373,7 +380,6 @@ internal sealed class ClientWorld
 		if (_session?.Accept != null && Progress.Stage is JoinStage.Connecting or JoinStage.Receiving or JoinStage.Loading)
 		{
 			if (Progress.Stage == JoinStage.Connecting) Progress.Set(JoinStage.Receiving, now);
-			Progress.ReceivedSinceJoin(System.Threading.Interlocked.Read(ref JoinBytes.Received) - _joinBytesAtStart);
 			if (app.Client != null && Progress.Stage == JoinStage.Receiving) Progress.Set(JoinStage.Loading, now);
 		}
 		// Keen's session is loaded: the player is in, with a body or at Keen's own respawn screen (a new survival player),
@@ -457,22 +463,15 @@ internal sealed class ClientWorld
 	/// so the player's next join counts from zero.</summary>
 	internal static void PlayerLeft() => s_rejoin.RejoinFailed();
 
-	/// <summary>SE2 Online's automatic rejoin handles this player's lost connection (Keen's reconnect prompt must not too).</summary>
-	internal static bool OwnsLoss => MpPlugin.Online && Current is { RejoinsByItself: true, _retired: false };
+	/// <summary>A loss of this player's connection is reported and not handled yet (an exit to the menu then is not a leave).</summary>
+	internal bool LossPending => System.Threading.Volatile.Read(ref _lossReported) != null;
 
 	// A join the game started by itself (Steam invite, Join Game) that SE2 Online rides along with cannot be dialled again by
 	// SE2 Online (its session never issues a join of its own), so the game's own reconnect prompt handles its losses.
 	private bool RejoinsByItself => _o.Rejoin && !_o.KeenAttached;
 
-	/// <summary>Keen saw this player's connection drop (its reconnect prompt is skipped): the loss counts at once instead of
-	/// after SE2 Online's own ping timeout. Any thread; the first reported loss wins.</summary>
-	internal static void KeenLost(string reason)
-	{
-		if (Current is { } current) System.Threading.Interlocked.CompareExchange(ref current._lossReported, reason, null);
-	}
-
 	// The server's own reason when it refused this player (a refusal or kick never rejoins by itself).
-	private string? Refusal() => _session?.RejectReason ?? (KeenNet.ClientRejectReason is { } keen ? "The server refused the connection (" + keen + ")." : null);
+	private string? Refusal() => _session?.RejectReason;
 
 	/// <summary>Main thread: applies <see cref="RejoinPolicy.Decide"/> for one event. Lost schedules the next automatic rejoin
 	/// (waiting longer each time, up to the cap); Failed waits for the player.</summary>
@@ -567,8 +566,12 @@ internal sealed class ClientWorld
 
 	private async System.Threading.Tasks.Task<(string? Error, List<WorldMod>? Mods)> PrepareModsCore(GameSessionID session)
 	{
-		var mods = await KeenMods.QueryAsync(session, _stop.Token);
-		JoinMissions = mods != null && KeenMods.LastMissions;
+		// The server's accept carries its mod list and missions flag.
+		var accept = _session?.Accept;
+		if (accept == null) return ("The connection to the server closed before joining.", null);
+		if (accept.ModsError != null) return ("Could not read the server's mod list (" + accept.ModsError + ").", null);
+		List<WorldMod>? mods = accept.Mods;
+		JoinMissions = accept.HostMissions;
 		if (JoinMissions) _log.Info("client: the server's world runs missions and contracts");
 		if (mods == null)
 		{
@@ -578,7 +581,7 @@ internal sealed class ClientWorld
 		if (mods.Count == 0) return (null, mods);
 		_log.Info("client: the host's world runs mods: " + WorldMods.Summary(mods));
 		int maxGiB = MpMenu.Settings?.MaxModDownloadGiB ?? ModDownloads.DefaultMaxGiB;
-		string error = await WorkshopMods.PrepareAsync(mods, KeenMods.Label(session), maxGiB, _log, Progress.SetMods, _stop.Token);
+		string error = await WorkshopMods.PrepareAsync(mods, session.ToString() ?? "the server", maxGiB, _log, Progress.SetMods, _stop.Token);
 		return (error, mods);
 	}
 

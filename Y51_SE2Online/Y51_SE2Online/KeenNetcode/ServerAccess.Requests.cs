@@ -21,7 +21,6 @@ using Keen.VRage.Library.Mathematics;
 using Keen.VRage.Library.Utils;
 using Keen.VRage.Multiplayer;
 using Keen.VRage.Multiplayer.Replications.FailureStrategies;
-using Keen.VRage.Multiplayer.Transport.OutOfProcess;
 using Y51_SE2Online.Core;
 using Y51_SE2Online.SyncEngine;
 
@@ -46,7 +45,6 @@ internal static partial class ServerAccess
 	{
 		if (!DepositOff)
 		{
-			Patch(harmony, "deposit all (sender)", AccessTools.Method(typeof(OutOfProcessPeerTransport), nameof(OutOfProcessPeerTransport.ProcessMessage)), prefix: nameof(KeenMessagePrefix), finalizer: nameof(KeenMessageFinalizer));
 			Patch(harmony, "deposit all", AccessTools.Method(typeof(InProcessGameServerSessionComponent), "TryDepositAllNonEssentialItemsImpl"), prefix: nameof(DepositPrefix));
 		}
 		if (!OwnerOff) Patch(harmony, "default owner", AccessTools.Method(typeof(OwnershipSessionComponent), nameof(OwnershipSessionComponent.GetDefaultOwner)), prefix: nameof(DefaultOwnerPrefix));
@@ -86,8 +84,7 @@ internal static partial class ServerAccess
 		return false;
 	}
 
-	// The player whose signals are being replayed on the server, on either transport (Keen's: ProcessMessage of that
-	// player's transport; SE2 Online's: Y51PeerTransport around its signal replay).
+	// The player whose signals are being replayed on the server (Y51PeerTransport around its signal replay).
 	[ThreadStatic] private static ClientId? _signalClient;
 
 	internal static ClientId? EnterSignal(ClientId client)
@@ -98,18 +95,6 @@ internal static partial class ServerAccess
 	}
 
 	internal static void LeaveSignal(ClientId? before) => _signalClient = before;
-
-	private static void KeenMessagePrefix(OutOfProcessPeerTransport __instance, out ClientId? __state)
-	{
-		__state = _signalClient;
-		_signalClient = __instance is Keen.VRage.Multiplayer.Transport.OutOfProcess.Server.OutOfProcessServerPeerTransport ? __instance.PeerClientId : null;
-	}
-
-	private static Exception? KeenMessageFinalizer(Exception? __exception, ClientId? __state)
-	{
-		_signalClient = __state;
-		return __exception;
-	}
 
 	/// <summary>The checks a player's story gets past the generic ones, by story; null lets it run.</summary>
 	private static string? RequestRefusal(ClientId sender, long caller, IAsyncStateMachine story)

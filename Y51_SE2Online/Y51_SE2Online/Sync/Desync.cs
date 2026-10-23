@@ -305,6 +305,8 @@ public sealed class DesyncPolicy
 
 	public int Suppressed => _tracks.Values.Count(t => t.Suppressed);
 
+	public int Tracked => _tracks.Count;
+
 	public Verdict Report(uint netId, long now)
 	{
 		if (!_tracks.TryGetValue(netId, out var t)) _tracks[netId] = t = new Track();

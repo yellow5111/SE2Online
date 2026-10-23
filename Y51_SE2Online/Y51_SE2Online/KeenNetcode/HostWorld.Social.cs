@@ -76,7 +76,6 @@ internal sealed partial class HostWorld
 	{
 		if (_host is not { } host || host.Access.Revision == _accessRevision) return;
 		_accessRevision = host.Access.Revision;
-		Y51_SE2Online.KeenNetcode.KeenNet.ForgetAdmissions();
 	}
 
 	private void ApplyPcuLimit(Session session)

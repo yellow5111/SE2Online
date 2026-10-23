@@ -121,7 +121,9 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		host.OnBeforeEngineInstantiated += OnBeforeEngineInstantiated;
 		Optional("plugin texts", () => OnlineUi.InstallRawTexts(_harmony));
 		Controller = new OnlineSessionController(new OnlineRuntime(this));
-		KeenNet.Install(_harmony, _log);
+		SteamUsers.Install(_harmony);
+		Engine.KeenOff.InstallNetworking(_harmony);
+		OwnNet.Install(_harmony);
 		IdentityCarryOver.Install(_harmony, _log);
 		_harmony.Patch(AccessTools.Method(typeof(Keen.Game2.GameAppComponent), nameof(Keen.Game2.GameAppComponent.LoadNetworkClientAsync)), prefix: M(nameof(KeenJoinPrefix)));
 		_harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Core.Game.Systems.Session), "Update"), postfix: new HarmonyMethod(typeof(HostWorld), nameof(HostWorld.SessionUpdatePostfix)));
@@ -170,10 +172,10 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		Optional("projection block references", () => ProjectionRefs.Install(_harmony));
 		Optional("ghost block delete ownership", () => GhostBlocks.Install(_harmony));
 		Optional("resilient replication", () => ResilientReplication.Install(_harmony));
-		Optional("story closures for players' requests", () => KeenNetcode.StoryClosures.Install(_harmony));
 		Optional("cockpit toolbars for players", () => KeenNetcode.ToolbarRequests.Install(_harmony));
 		Optional("terminal waits for this player's data", () => KeenNetcode.TerminalGuard.Install(_harmony));
 		Optional("jetpack flames after a repeated state", () => KeenNetcode.JetpackFlames.Install(_harmony));
+		Optional("world saves survive a reference to an unsaved entity", () => KeenNetcode.SaveGuard.Install(_harmony));
 		Optional("log noise: repeated not-serializable notes", () => KeenNetcode.LogNoise.Install(_harmony));
 		Optional("SE2 Online replication engine", () => Engine.Y51Replication.Install(_harmony));
 		Optional("death ragdolls follow the server", () => Engine.ClientRagdolls.Install(_harmony));
@@ -186,7 +188,6 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		Optional("server-side access checks", () => ServerAccess.Install(_harmony));
 		Optional("tool reach for remote players", () => ToolReach.Install(_harmony));
 		Optional("hand drill on planet boulders for remote players", () => DrillReach.Install(_harmony));
-		Optional("one pilot per ship", () => OnePilot.Install(_harmony));
 		Optional("streaming radius", () => Streaming.Install(_harmony));
 		Optional("seat guard (sitting while seated)", () => SeatGuard.Install(_harmony));
 		Optional("control panel group names", () => NameSync.Install(_harmony));
@@ -229,9 +230,9 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			Optional("build sounds at the block", () => BuildAudio.Install(_harmony));
 			Optional("other players' cockpit and landing gear sounds", () => PlayerAudio.Install(_harmony));
 		}
-		// SE2 4.0 ships Keen's own multiplayer behind -enableMultiplayer; SE2 Online runs on it. Set last: with it on, every
-		// single-player world opens a joinable session that only KeenNet's lobby and hello gates keep closed.
-		Keen.Game2.Simulation.GameFeatureConfig.MultiplayerEnabled = true;
+		// SE2 4.0 ships the game's own multiplayer behind -enableMultiplayer. SE2 Online's own netcode leaves it off: no
+		// joinable game session, no lobby join, no Steam join requests to the game.
+		Keen.Game2.Simulation.GameFeatureConfig.MultiplayerEnabled = false;
 		_log.Info(DedicatedRuntime.Headless ? "Y51_SE2Online dedicated bootstrap installed" : "Y51_SE2Online ready: use Multiplayer in the main or pause menu");
 	}
 
@@ -291,13 +292,10 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			HostWorld hostWorld = HostWorld.Install(_log);
 			hostWorld.SpawnNearHost = _options.SpawnNearHost;
 			hostWorld.OnePilot = _options.OnePilot;
+			hostWorld.DesyncChecks = _options.DesyncChecks;
 			HostSettings settings = new HostSettings(_options.Identities, _options.Grids, _options.Research);
 			hostWorld.ConfigureIdentities(settings);
 			if (settings.Identities) hooks.AddRange(PatchPermissions("host"));
-			KeenNet.LobbyWanted = (_options.Dedicated ? Keen.VRage.Core.Services.GameSessions.JoinableSessionType.Private
-				: _options.FriendsOnly ? Keen.VRage.Core.Services.GameSessions.JoinableSessionType.FriendsOnly
-				: _options.Advertise ? Keen.VRage.Core.Services.GameSessions.JoinableSessionType.Public
-				: Keen.VRage.Core.Services.GameSessions.JoinableSessionType.Hidden, _options.MaxPlayers + 1);
 		}
 		if (joining)
 		{
@@ -323,6 +321,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 	public static void Tick(Keen.Game2.GameAppComponent app)
 	{
 		App = app;
+		OwnNet.KeepGameMultiplayerOff();
 		long started = ServerProfiler.Now;
 		KytheraVeh.Tick();
 		if (app.Server == null) _observedWorld = null;
@@ -334,13 +333,13 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		ClientWorld.Current?.MainTick(app);
 		ClientWorld.ReturnOrphanJoin(app);
 		HostWorld.Current?.MainTick(app);
-		KeenNet.ApplyLobby();
+		Y51_SE2Online.Engine.Y51Replication.Watchdog();
 		ServerProfiler.Lap(ServerSection.Online, started);
 #if !PULSAR
 		if (_steamReady || DedicatedRuntime.Requested) OwnMotionProbe.FakeLag();
 #endif
-		Instance?.AttachToKeenJoin(app);
 		Instance?.AutoJoin(app);
+		Y51_SE2Online.Steam.SteamJoins.Tick();
 		RunParkedJoin();
 #if !PULSAR
 		if (_steamReady) UiShots.Tick(app);
@@ -363,7 +362,6 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		TurretRelations.Reset();
 		PvpRules.Reset();
 		Sync.OfflineStats.Reset();
-		KeenNet.LobbyWanted = (Keen.VRage.Core.Services.GameSessions.JoinableSessionType.Private, 1);
 		NametagOverlay.Enabled = false;
 		NametagOverlay.ResetAll();
 		_installingMode = false;
@@ -402,6 +400,13 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		if (_autoJoined || Controller == null || Controller.Busy || !_steamReady || app.Client != null || app.Server != null || app._isTransitioning.IsSet) return;
 		string arg = LaunchArgs.FirstOrDefault(a => a.StartsWith(MpOptions.Prefix + "autojoin:", StringComparison.OrdinalIgnoreCase));
 		_autoJoined = true;
+		// Steam started the game from a friend's "Join Game" (their connect line is the launch options).
+		if (arg == null && Y51_SE2Online.Steam.SteamJoins.LaunchJoin(LaunchArgs) is { } launch)
+		{
+			_log.Info("session: joining from Steam's launch options");
+			MpMenu.Activate(launch);
+			return;
+		}
 		if (arg == null) return;
 		string address = arg.Substring((MpOptions.Prefix + "autojoin:").Length);
 		_log.Info("session: joining " + address + " (launch option)");
@@ -409,9 +414,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		{
 			// -y51online:autojoin:local[:port]: a game this Steam account hosts on this PC (test play).
 			int port = address.Length > 6 && int.TryParse(address.Substring(6), out int p) ? p : MpMenu.Settings?.ListenPort ?? MpOptions.DefaultIpPort;
-			var options = MpOptions.Parse(new[] { MpOptions.Prefix + "join:wait" });
-			options.KeenSession = new LocalSessionID(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, port));
-			Controller.Request(options, MpClock.NowMs());
+			Controller.Request(MpOptions.Parse(new[] { MpOptions.Prefix + "join-address:127.0.0.1:" + port }), MpClock.NowMs());
 			return;
 		}
 		Controller.Request(MpOptions.Parse(new[] { MpOptions.Prefix + "join-address:" + address }), MpClock.NowMs());
@@ -422,8 +425,6 @@ public sealed class MpPlugin : IPlugin, IDisposable
 	private static bool KeenJoinPrefix(Keen.VRage.Core.Services.GameSessions.GameSessionID sessionID, ref Keen.VRage.Library.Threading.Task __result)
 	{
 		if (ClientWorld.Joining || Instance == null || Controller == null) return true;
-		// With SE2 Online's rejoin off, the game's own reconnect stays the game's own, as before.
-		if (Controller.Current is { Rejoin: false } && App is { } app && KeenNetcode.LeaveDetect.KeenReconnecting(app, sessionID)) return true;
 		// While a session change is under way the game's own join used to run unwatched, and its end (refused, failed) went
 		// to the game's crash monitor; it waits for the change to finish and goes through SE2 Online like any other.
 		if (Controller.Busy)
@@ -440,10 +441,14 @@ public sealed class MpPlugin : IPlugin, IDisposable
 
 	private static void RequestKeenJoin(Keen.VRage.Core.Services.GameSessions.GameSessionID sessionID)
 	{
-		var options = MpOptions.Parse(new[] { MpOptions.Prefix + "join:wait" });
-		options.KeenSession = sessionID;
-		GameLog.Instance.Info($"session: the game asked to join {sessionID}; SE2 Online takes the join over");
-		Controller!.Request(options, MpClock.NowMs());
+		// SE2 Online joins over its own link: a server address is joined by address; nothing else maps.
+		if (sessionID is not Keen.VRage.Core.Services.GameSessions.GameSessionIPEndpoint { IPEndpoint: { } address })
+		{
+			GameLog.Instance.Warn($"session: the game asked to join {sessionID}; SE2 Online joins servers by Steam friend, invite, server list or address, so this join is dropped");
+			return;
+		}
+		GameLog.Instance.Info($"session: the game asked to join {sessionID}; SE2 Online joins {address}");
+		Controller!.Request(MpOptions.Parse(new[] { MpOptions.Prefix + "join-address:" + address }), MpClock.NowMs());
 	}
 
 	/// <summary>Main thread: a game join parked while the controller was busy goes once it is free.</summary>
@@ -459,20 +464,6 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		// A launch-option join goes first.
 		if (Instance?.AutoJoinPending == true) return;
 		if (System.Threading.Interlocked.Exchange(ref _parkedJoin, null) is { } parked) RequestKeenJoin(parked);
-	}
-
-	// The game's own join (Steam invite, "Join Game", join code) started a network client without SE2 Online: ride along
-	// so the host's join check gets our request.
-	private void AttachToKeenJoin(Keen.Game2.GameAppComponent app)
-	{
-		if (KeenNet.ClientComms == null || Controller == null || Controller.Busy || Controller.Current?.Join == true) return;
-		if (KeenNet.ClientServer is not { } server || KeenNet.SteamIdOf(server) is not ulong host) return;
-		var options = MpOptions.Parse(new[] { "-y51online:join:" + host });
-		options.KeenAttached = true;
-		// What a Retry dials (the session never dials while attached): a dedicated server's address or the host's lobby.
-		options.KeenSession = KeenNet.LastJoined;
-		_log.Info($"session: the game joined server {host} by itself; SE2 Online joins along");
-		Controller.Attach(options);
 	}
 
 	private sealed class OnlineRuntime : IOnlineRuntime
@@ -602,6 +593,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			{
 				_steamReady = true;
 				NetSession.Current?.SignalSteamReady("SteamGameServiceComponent.Initialize");
+				Y51_SE2Online.Steam.SteamJoins.Start();
 			}
 			else
 			{

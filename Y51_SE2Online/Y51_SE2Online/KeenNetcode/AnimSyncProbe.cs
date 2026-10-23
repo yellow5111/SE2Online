@@ -17,7 +17,6 @@ using Keen.VRage.Library.Utils;
 using Keen.VRage.Multiplayer.Replications;
 using Y51_SE2Online.Core;
 using Y51_SE2Online.SyncEngine;
-using Transport = Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport;
 
 namespace Y51_SE2Online.KeenNetcode;
 
@@ -64,7 +63,6 @@ internal static class AnimSyncProbe
 	{
 		if (!SelfTest.Requested) return;
 		harmony.Patch(AccessTools.Method(typeof(AnimationBlackboardComponent), "BlackboardReceive"), postfix: new HarmonyMethod(typeof(AnimSyncProbe), nameof(ReceivePostfix)));
-		harmony.Patch(AccessTools.Method(typeof(Transport), "ProcessIncomingSampledData"), prefix: new HarmonyMethod(typeof(AnimSyncProbe), nameof(SampledPrefix)));
 		if (AccessTools.TypeByName("Keen.VRage.Voxels.Client.Components.PlanetFloraClientComponent") is { } flora)
 		{
 			harmony.Patch(AccessTools.Method(flora, "OnCreateSectorPhysics"), prefix: new HarmonyMethod(typeof(AnimSyncProbe), nameof(SectorPhysicsPrefix)));
@@ -91,14 +89,6 @@ internal static class AnimSyncProbe
 		foreach (var (k, v) in ints) keys += $" {k.String}={v}";
 		foreach (var (k, v) in strings) keys += $" {k.String}={v.String}";
 		lock (Sync) Received.Add((__instance.Entity, keys, AnimPlayout.Replaying));
-	}
-
-	private static void SampledPrefix(Transport.SampledDataBatch batch)
-	{
-		foreach (var list in batch.Lists)
-			if (list is Transport.SampledList<EntityMotionState> motion)
-				foreach (var e in motion.Entries)
-					NoteSample(e.Value.ServerTime.Ticks);
 	}
 
 	internal static void NoteSample(long serverTicks)

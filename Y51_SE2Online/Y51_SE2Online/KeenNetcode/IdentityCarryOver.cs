@@ -40,7 +40,8 @@ internal static class IdentityCarryOver
 
 	private static IdentityId? Legacy(IdentitiesSessionComponent identities, GameServiceUser user)
 	{
-		if (user == GameServiceUser.Invalid || identities.TryGetIdentityOf(user) != null || KeenNet.SteamIdOf(user) is not ulong steamId) return null;
+		// Another game instance of an account is not that Steam user: it never takes the account's 2.4 identity.
+		if (user == GameServiceUser.Invalid || OwnNet.IsInstance(user) || identities.TryGetIdentityOf(user) != null || SteamUsers.SteamIdOf(user) is not ulong steamId) return null;
 		var legacy = new IdentityId(PlayerIdentities.Derive("steam:" + steamId));
 		if (!identities._identities.Contains(legacy) || identities.TryGetUserOf(legacy) != null) return null;
 		_log.Info($"identities: Steam user {steamId} gets back identity {(long)legacy} from this world's SE2 2.4 days");

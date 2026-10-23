@@ -7,7 +7,6 @@ using Keen.Game2.Simulation.WorldObjects.CubeBlocks.Toolbar;
 using Keen.VRage.Core.Game.Components;
 using Keen.VRage.DCS.Components;
 using Keen.VRage.Multiplayer.Replications.FailureStrategies;
-using Keen.VRage.Multiplayer.Transport.OutOfProcess.Client;
 using Y51_SE2Online.Core;
 
 namespace Y51_SE2Online.KeenNetcode;
@@ -37,10 +36,12 @@ internal static class ToolbarRequests
 		// First, so the hint check (run from ServerAccess) is set up even if a patch below fails.
 		_hintMachine = typeof(ToolbarActionHintReplicationSessionComponent).GetNestedTypes(System.Reflection.BindingFlags.NonPublic).FirstOrDefault(t => t.Name.StartsWith("<GetTile>", System.StringComparison.Ordinal));
 		_hintBlock = _hintMachine?.GetField("toolbarBlock") is { } block && block.FieldType == typeof(SkipOnReplicationFail<Entity>) ? block : null;
+		// ProjectileWeaponBaseComponent.Detach: the same shape (it calls entity.Value.TryGet on the server, and a weapon the
+		// player's game could not name arrives as null: an error and an assertion each time on PingPerfect).
+		_weaponMachine = typeof(Keen.Game2.Simulation.WorldObjects.Weapons.ProjectileWeaponBaseComponent).GetNestedTypes(System.Reflection.BindingFlags.NonPublic).FirstOrDefault(t => t.Name.StartsWith("<Detach>", System.StringComparison.Ordinal));
+		_weaponEntity = _weaponMachine?.GetField("entity") is { } weapon && weapon.FieldType == typeof(SkipOnReplicationFail<Entity>) ? weapon : null;
+		if (_weaponEntity == null) GameLog.Instance.Warn("toolbars: ProjectileWeaponBaseComponent.Detach not found; weapon detach requests naming no weapon are not refused");
 		if (_hintBlock == null) GameLog.Instance.Warn("toolbars: ToolbarActionHintReplicationSessionComponent.GetTile not found; toolbar hint requests naming no block are not refused");
-		var plan = AccessTools.TypeByName("Keen.VRage.Multiplayer.NetworkStories.NetworkStorySerializationPlan") ?? throw new System.TypeLoadException("NetworkStorySerializationPlan");
-		harmony.Patch(AccessTools.Method(plan, "Restore") ?? throw new System.MissingMethodException("NetworkStorySerializationPlan.Restore"),
-			postfix: new HarmonyMethod(typeof(ToolbarRequests), nameof(RestorePostfix)));
 		harmony.Patch(AccessTools.Method(typeof(BlockToolbarReplicationSessionComponent), nameof(BlockToolbarReplicationSessionComponent.TryGetToolbar), new[] { typeof(Entity), typeof(int) })
 			?? throw new System.MissingMethodException("BlockToolbarReplicationSessionComponent.TryGetToolbar(Entity, int)"),
 			prefix: new HarmonyMethod(typeof(ToolbarRequests), nameof(TryGetToolbarPrefix)));
@@ -50,8 +51,9 @@ internal static class ToolbarRequests
 			prefix: new HarmonyMethod(typeof(ToolbarRequests), nameof(DetachPrefix)));
 	}
 
-	// Only the stories whose code answers a null toolbar with nothing: the id request and the tile press and clears.
-	private static void RestorePostfix(IAsyncStateMachine __result)
+	/// <summary>A player's story rebuilt on the server (Engine/OwnStories.Restore): only the stories whose code answers a null
+	/// toolbar with nothing (the id request and the tile press and clears) are disarmed.</summary>
+	internal static void Restored(IAsyncStateMachine __result)
 	{
 		if (__result == null || !MpPlugin.Online) return;
 		var owner = __result.GetType().DeclaringType;
@@ -61,10 +63,26 @@ internal static class ToolbarRequests
 			GameLog.Instance.Warn("toolbars: a player asked for a toolbar of a block their game could not name; answered with no toolbar (their game asks again when they sit down again)");
 	}
 
-	/// <summary>A player's toolbar hint request that names no block (refused by ServerAccess as a cancellation).</summary>
+	private static System.Type? _weaponMachine;
+
+	private static System.Reflection.FieldInfo? _weaponEntity;
+
+	public static long WeaponDetachesRefused;
+
+	/// <summary>A player's request that names no entity where the server's story needs one: a toolbar hint without its block,
+	/// a weapon detach without its weapon (refused by ServerAccess as a cancellation).</summary>
 	internal static bool NamesNoHintBlock(IAsyncStateMachine machine)
 	{
-		if (_hintBlock == null || machine.GetType() != _hintMachine || !MpPlugin.Online) return false;
+		if (!MpPlugin.Online) return false;
+		var type = machine.GetType();
+		if (_weaponEntity != null && type == _weaponMachine)
+		{
+			if (_weaponEntity.GetValue(machine) is not SkipOnReplicationFail<Entity> { Value: null }) return false;
+			if (System.Threading.Interlocked.Increment(ref WeaponDetachesRefused) == 1)
+				GameLog.Instance.Warn("weapons: a player's game asked to detach from a weapon it could not name; refused");
+			return true;
+		}
+		if (_hintBlock == null || type != _hintMachine) return false;
 		if (_hintBlock.GetValue(machine) is not SkipOnReplicationFail<Entity> { Value: null }) return false;
 		if (System.Threading.Interlocked.Increment(ref HintsRefused) == 1)
 			GameLog.Instance.Warn("toolbars: a player asked for a toolbar hint of a block their game could not name; refused");
@@ -81,7 +99,7 @@ internal static class ToolbarRequests
 		if (__instance._entityToId.ContainsKey(key)) return true;
 		// The co-op host's own game runs in process: no network ids, nothing to name.
 		var session = __instance.Entity.GetSession();
-		var mapper = session.SessionComponents.TryGet<OutOfProcessClientPeerTransportSessionComponent>()?.NetworkIdMapper;
+		var mapper = Engine.OwnHost.Existing(session) is { IsServer: false } own ? own.Ids : null;
 		if (mapper == null || mapper.TryGetId(toolbar) != null || mapper.TryGetRetiredId(toolbar) != null) return true;
 		if (System.Threading.Interlocked.Increment(ref Unnamed) == 1)
 			GameLog.Instance.Warn($"toolbars: {Name(toolbar)} ({toolbar}) has no network id in this game, so its toolbar cannot be asked for yet; sitting down again asks again. {Why(session.SessionComponents, mapper, toolbar)}");
@@ -113,7 +131,7 @@ internal static class ToolbarRequests
 
 	// What settles why a seat has no network id: whether Keen's replay pairs it (a client-only entity gets Keen's ExclusiveTag
 	// when it enters the scene), whether it is still a stub, and its grid ("_Split" in the name is a split made in this game).
-	private static string Why(Entity components, Keen.VRage.Multiplayer.Transport.OutOfProcess.NetworkIdMapper mapper, Entity seat)
+	private static string Why(Entity components, Engine.OwnIds mapper, Entity seat)
 	{
 		string paired = Safe(() => components.TryGet<Keen.VRage.Multiplayer.Replications.InProcess.LegacyClientSessionComponent>() is { } replication
 			? replication.ReplayContext.HasPairingLocal(seat).ToString() : "no replication component");

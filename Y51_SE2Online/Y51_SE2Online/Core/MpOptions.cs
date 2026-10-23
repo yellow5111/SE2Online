@@ -135,6 +135,8 @@ public sealed class MpOptions
 
 	public bool BuildFix { get; private set; } = true;
 
+	public bool DesyncChecks { get; internal set; } = true;
+
 	public bool ControlFix { get; private set; } = true;
 
 	public bool FastSmooth { get; private set; }
@@ -404,6 +406,9 @@ public sealed class MpOptions
 		case "buildfix":
 			BuildFix = OnOff(value, "buildfix");
 			return true;
+		case "desync":
+			DesyncChecks = OnOff(value, "desync");
+			return true;
 		case "controlfix":
 			ControlFix = OnOff(value, "controlfix");
 			return true;
@@ -594,6 +599,10 @@ public sealed class MpOptions
 			if (!BuildFix)
 			{
 				parts.Add("buildfix=off");
+			}
+			if (Host && !DesyncChecks)
+			{
+				parts.Add("desync=off");
 			}
 			if (!ControlFix)
 			{

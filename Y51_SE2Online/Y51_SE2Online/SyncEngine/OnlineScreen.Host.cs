@@ -50,7 +50,7 @@ public sealed partial class OnlineScreen
         _hostPlayers = OnlineUi.Button("Players", MpMenu.OpenPlayers, "HostPlayers", true);
         _stopHost = OnlineUi.Button("Stop hosting", MpMenu.Leave, "StopHosting", true);
         _hostSave = OnlineUi.Button("Apply host settings", Save, "SaveHostSettings", true);
-        _copyCode = OnlineUi.SmallButton("Copy code", () => Copy(KeenNet.JoinCode?.ToDisplayString()), "CopyJoinCode");
+        _copyCode = OnlineUi.SmallButton("Copy code", () => { }, "CopyJoinCode");
         _copyAddress = OnlineUi.SmallButton("Copy", () => Copy(HostAddress()), "CopyHostAddress");
 
         // The session card.
@@ -114,6 +114,8 @@ public sealed partial class OnlineScreen
             OnlineUi.Field("Bind address", _bind, "0.0.0.0 listens on every IPv4 network", null, 300), OnlineUi.Field("Listen port", _port, "UDP; forward it on your router", null, 300),
             OnlineUi.Field("Public address", _publicAddress, "Shown on the card and in the browser", null, 300));
         var sync = OnlineUi.Section("SYNC", _ownReplication, _clientMovement, _onePilot, _buildGhosts, _waterSync);
+        // SE2 Online's own netcode always carries the world.
+        _ownReplication.IsVisible = false;
         var columns = new Grid { ColumnDefinitions = new ColumnDefinitions("*,24,*") };
         var leftColumn = OnlineUi.Stack(session, motd);
         var rightColumn = OnlineUi.Stack(direct, sync);
@@ -186,13 +188,10 @@ public sealed partial class OnlineScreen
         else if (hosting) _heroDetail.Text = "Hosting is on. Load or create a world and players can join it.";
         else _heroDetail.Text = "Start hosting, then load or create a world. Your current world can be hosted too.";
 
-        var code = KeenNet.JoinCode;
-        _code.Text = live && code is { } c ? c.ToDisplayString() : "----  ----";
-        _code.Opacity = live && code != null ? 1 : .35;
-        _codeHint.Text = !live ? "Your join code appears once your world is open."
-            : _visibility == FriendsOnly ? "Friends-only sessions cannot be found by code. Pick Public or Invite and code."
-            : "Players enter it on their Direct connect page.";
-        _copyCode.IsEnabled = live && code != null;
+        _code.Text = "----  ----";
+        _code.Opacity = .35;
+        _codeHint.Text = "Join codes are not used by this version: players join through Steam, the server list or your address.";
+        _copyCode.IsEnabled = false;
 
         string address = HostAddress();
         _hostAddress.Text = _directIp.IsChecked != true ? "Off" : address ?? "Port " + settings.ListenPort;
@@ -205,7 +204,7 @@ public sealed partial class OnlineScreen
         _host.IsVisible = !hosting;
         _load.IsVisible = _create.IsVisible = !MpMenu.HasWorld && hosting;
         _invite.IsVisible = _hostPlayers.IsVisible = _stopHost.IsVisible = hosting;
-        _invite.IsEnabled = live && KeenNet.LobbyId != null;
+        _invite.IsEnabled = live;
         _stopHost.IsEnabled = !busy;
         _hostSave.Content = hosting ? "Apply host settings" : "Save host settings";
         for (int i = 0; i < _visibilityCards.Length; i++)

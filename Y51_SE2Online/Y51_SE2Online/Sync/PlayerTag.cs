@@ -17,11 +17,13 @@ public readonly record struct PlayerTag(ushort ClientId, uint NetId, string Name
 	/// player who is not online (their parked body), unless that player's last broadcast state was off.
 	/// </summary>
 	public static List<PlayerTag> Build(bool nametags, IEnumerable<(ushort ClientId, uint NetId, long Identity, string Name)> online,
-		IEnumerable<(uint NetId, long Owner)> bodies, IReadOnlyDictionary<long, string> names, ISet<long> silent)
+		IEnumerable<(uint NetId, long Owner)> bodies, IReadOnlyDictionary<long, string> names, ISet<long> silent, long hostIdentity = 0)
 	{
 		var tags = new List<PlayerTag>();
 		if (!nametags) return tags;
+		// A co-op host is always online, also before its own entry reaches the list.
 		var onlineIds = new HashSet<long>();
+		if (hostIdentity != 0) onlineIds.Add(hostIdentity);
 		foreach (var p in online)
 		{
 			onlineIds.Add(p.Identity);
@@ -31,7 +33,7 @@ public readonly record struct PlayerTag(ushort ClientId, uint NetId, string Name
 		foreach (var (netId, owner) in bodies.OrderBy(b => b.Owner).ThenBy(b => b.NetId))
 		{
 			if (key == ushort.MaxValue) break;
-			if (netId == 0 || !PlayerIdentities.IsHuman(owner) || owner == PlayerIdentities.HotfixIdentity || onlineIds.Contains(owner) || silent.Contains(owner)) continue;
+			if (netId == 0 || !PlayerIdentities.IsHuman(owner) || onlineIds.Contains(owner) || silent.Contains(owner)) continue;
 			if (!names.TryGetValue(owner, out string name)) continue;
 			tags.Add(new PlayerTag(key++, netId, name + OfflineSuffix));
 		}

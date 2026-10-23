@@ -81,7 +81,7 @@ internal static class UiShots
 			Next(now, 5000);
 			break;
 		case 5:
-			if (!MpMenu.HasWorld || KeenNet.JoinCode == null) return;
+			if (!MpMenu.HasWorld) return;
 			Next(now, 8000);
 			break;
 		case 6:
@@ -99,7 +99,7 @@ internal static class UiShots
 			break;
 		case 9:
 			Shot("y51-host-live-bottom");
-			log.Info($"uishot: done (join code {KeenNet.JoinCode?.ToDisplayString()})");
+			log.Info("uishot: done");
 			_step = -1;
 			break;
 		}

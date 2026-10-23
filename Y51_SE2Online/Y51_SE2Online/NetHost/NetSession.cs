@@ -122,15 +122,10 @@ internal sealed partial class NetSession
 		_o.MaxPlayers = after.MaxPlayers;
 		_o.FriendsOnly = after.FriendsOnly;
 		_o.Advertise = after.Advertise;
-		// The Steam lobby type follows too: public sessions must be findable and joinable by anyone, not only friends.
-		KeenNet.LobbyWanted = (after.FriendsOnly ? Keen.VRage.Core.Services.GameSessions.JoinableSessionType.FriendsOnly
-			: after.Advertise ? Keen.VRage.Core.Services.GameSessions.JoinableSessionType.Public
-			: Keen.VRage.Core.Services.GameSessions.JoinableSessionType.Hidden, after.MaxPlayers + 1);
 		_o.SessionName = after.SessionName.Trim();
 		_o.Description = after.Description.Trim();
 		_o.PublicAddress = after.PublishedAddress;
 		_o.Country = Countries.Normalize(after.Country) ?? "";
-		if ((_o.Password ?? "") != (after.Password ?? "")) KeenNet.ForgetAdmissions();
 		_o.Password = after.Password ?? "";
 		_o.Pvp = after.Pvp;
 		_o.OfflineRaidProtection = after.OfflineRaidProtection;
@@ -365,7 +360,7 @@ internal sealed partial class NetSession
 		return !_stop;
 	}
 
-	private void RunCore() => RunKeen();
+	private void RunCore() => RunOwn();
 
 	private (HostSession? Host, ClientSession? Client) CreateSessions(MpTransport transport, string name, ulong localId)
 	{
@@ -384,7 +379,7 @@ internal sealed partial class NetSession
 					ResolveType = EngineCodec.ResolveType,
 					IsClientInput = EngineCodec.IsClientInput,
 					CheckSignal = CommandLayouts.Check,
-					Settings = new HostSettings(_o.Identities, _o.Grids, _o.Research, _o.WaterSync, _o.ClientMovement, _o.OwnReplication && !MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "keen-replication")),
+					Settings = new HostSettings(_o.Identities, _o.Grids, _o.Research, _o.WaterSync, _o.ClientMovement, true),
 					HostName = name,
 					LookTotals = _o.Predict,
 					MaxPlayers = _o.MaxPlayers,

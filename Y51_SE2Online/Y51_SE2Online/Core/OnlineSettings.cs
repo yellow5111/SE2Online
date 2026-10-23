@@ -83,6 +83,8 @@ public sealed class OnlineSettings
     public bool OwnReplication { get; set; } = true;
     /// <summary>Hosting: only the player who sat down first in one of a ship's control seats flies it; others in its seats are passengers.</summary>
     public bool OnePilot { get; set; } = true;
+    /// <summary>Hosting: every 5 s the server checks each player's world against its own and logs what stays different.</summary>
+    public bool DesyncChecks { get; set; } = true;
     /// <summary>Hosting: players see the placement outline of anyone building near them.</summary>
     public bool BuildGhosts { get; set; } = true;
     /// <summary>Hosting: the respawn ships players may choose (Pathfinder, ...); empty offers every ship.</summary>
@@ -237,6 +239,7 @@ public sealed class OnlineSettings
         options.ClientMovement = ClientMovement;
         options.OwnReplication = OwnReplication;
         options.OnePilot = OnePilot;
+        options.DesyncChecks = DesyncChecks;
         options.VoiceRadiusMeters = VoiceRadiusMeters;
         options.UsageMultipliers = UsageMultipliers;
         options.InventorySizes = InventorySizes;

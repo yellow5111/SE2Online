@@ -119,7 +119,7 @@ internal sealed partial class HostWorld
 					if (owners.Contains(player.Identity)) names[player.Identity] = Tagged(player.Identity, player.Name);
 				}
 			}
-			HostNametags.Roster.Set(PlayerTag.Build(NametagOverlay.Enabled, online, bodies, names, silent));
+			HostNametags.Roster.Set(PlayerTag.Build(NametagOverlay.Enabled, online, bodies, names, silent, Y51_SE2Online.Dedicated.DedicatedRuntime.Requested ? 0 : _hostIdentity));
 			// The host's own overlay finds these characters in its client scene by owner (it does not share the server's ids).
 			var tagOwners = new Dictionary<uint, long>();
 			foreach (var (_, netId, identity, _) in online) if (netId != 0) tagOwners[netId] = identity;

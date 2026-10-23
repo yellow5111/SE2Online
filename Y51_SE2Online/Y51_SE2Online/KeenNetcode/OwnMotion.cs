@@ -23,7 +23,6 @@ using Y51_SE2Online.Core;
 using Y51_SE2Online.NetHost;
 using Y51_SE2Online.Sync;
 using Y51_SE2Online.SyncEngine;
-using Transport = Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport;
 
 namespace Y51_SE2Online.KeenNetcode;
 
@@ -90,8 +89,6 @@ internal static class OwnMotion
 		harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Physics.Havok.HavokSessionComponent), "CollectDataForCharacters"), prefix: Hook(nameof(CollectCharacterPrefix)));
 		if (!System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "ownyaw:off"))
 			harmony.Patch(AccessTools.Method(typeof(CharacterMovementComponent), "ApplyControlData"), postfix: Hook(nameof(GroundYawPostfix)));
-		harmony.Patch(AccessTools.Method(typeof(Transport), "ProcessIncomingData"), prefix: Hook(nameof(IncomingDataPrefix)));
-		harmony.Patch(AccessTools.Method(typeof(Transport), "ProcessIncomingSampledData"), prefix: Hook(nameof(IncomingSampledPrefix)));
 		OwnStatePrediction.Install(harmony);
 	}
 
@@ -118,7 +115,7 @@ internal static class OwnMotion
 
 	// The server answers with its movement state after each input: it takes this game's toggles from its inputs.
 	private static bool _serverStates;
-	private static KeenIds? _clientIds;
+	private static SessionIds? _clientIds;
 	private static Session? _idsSession;
 	private static long _nextScanMs, _statsLogMs, _ackedMs, _vanillaUntilMs, _ackCount, _errorLogMs;
 
@@ -246,36 +243,18 @@ internal static class OwnMotion
 
 	private static readonly bool KeepServerStates = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "ownfilter:off");
 
-	private static void IncomingDataPrefix(Transport.OutOfProcessDataBatch dataBatch)
+	/// <summary>
+	/// Player's game: a value the server sends for the character this game drives itself that this game keeps its own copy
+	/// of (the server's comes a round trip late): its control flags, its physics state, and the states it predicts (crouch,
+	/// dampeners, jetpack tuning) while it predicts toggles. Removals of the control flags are the server's.
+	/// </summary>
+	internal static bool KeepsOwn(int typeId, Entity target, bool removal)
 	{
-		if (!_driving || _ownEntity is not { } own) return;
-		if (KeepServerStates)
-		{
-			foreach (var list in dataBatch.DataLists)
-				if (list is Transport.PendingList<AdvancedCharacterControlData> flags) flags.Data.RemoveAll(d => d.Target == own);
-			return;
-		}
-		bool states = TogglePredicting != null;
-		foreach (var list in dataBatch.DataLists)
-			switch (list)
-			{
-			case Transport.PendingList<AdvancedCharacterControlData> flags: flags.Data.RemoveAll(d => d.Target == own); break;
-			case Transport.PendingList<Keen.VRage.Physics.Character.CharacterPhysicsState> physics: physics.Data.RemoveAll(d => d.Target == own); break;
-			case Transport.PendingList<CharacterCrouchTag> crouch when states: crouch.Data.RemoveAll(d => d.Target == own); break;
-			case Transport.PendingList<DampeningData> dampeners when states: dampeners.Data.RemoveAll(d => d.Target == own); break;
-			case Transport.PendingList<MaxThrustData> thrust when states: thrust.Data.RemoveAll(d => d.Target == own); break;
-			case Transport.PendingList<CharacterMovementComponent.JetpackModeData> mode when states: mode.Data.RemoveAll(d => d.Target == own); break;
-			case Transport.PendingList<SoftSpeedLimitData> limit when states: limit.Data.RemoveAll(d => d.Target == own); break;
-			}
-		dataBatch.Removals?.RemoveAll(r => r.Target == own && (r.DataType == typeof(Keen.VRage.Physics.Character.CharacterPhysicsState) || states && PredictedStates.Contains(r.DataType)));
-	}
-
-	private static void IncomingSampledPrefix(Transport __instance, Transport.SampledDataBatch batch)
-	{
-		if (!_driving || _ownEntity is not { } own) return;
-		foreach (var list in batch.Lists)
-			if (list is Transport.SampledList<AdvancedCharacterControlData> flags)
-				flags.Entries.RemoveAll(e => __instance.ResolveSampledTarget(e.Id, __instance.SessionComponent.Entity.Scene) == own);
+		if (!_driving || _ownEntity is not { } own || !ReferenceEquals(own, target)) return false;
+		Type type = Keen.VRage.DCS.Internal.RuntimeDataInfo.Of(typeId).RuntimeType;
+		if (type == typeof(AdvancedCharacterControlData)) return !removal;
+		if (KeepServerStates) return false;
+		return type == typeof(Keen.VRage.Physics.Character.CharacterPhysicsState) || TogglePredicting != null && PredictedStates.Contains(type);
 	}
 
 	private static bool Seated(Entity character)
@@ -315,7 +294,7 @@ internal static class OwnMotion
 		}
 		var own = OwnCharacter(session);
 		bool drive = own != null && own.TryGet<CharacterPhysicsEntityComponent>()?.CharacterPhysicsDefinition.Simulated == true && !Seated(own);
-		if (!ReferenceEquals(session, _idsSession)) { _idsSession = session; _clientIds = new KeenIds(session, server: false); }
+		if (!ReferenceEquals(session, _idsSession)) { _idsSession = session; _clientIds = new SessionIds(session, server: false); }
 		var ids = _clientIds!;
 		if (!ReferenceEquals(own, _correctedFor))
 		{
@@ -566,7 +545,7 @@ internal static class OwnMotion
 		wt.Orientation = st.Value.Orientation;
 	}
 
-	private static void Rebase(Entity own, in OwnPose pose, KeenIds ids, string why)
+	private static void Rebase(Entity own, in OwnPose pose, SessionIds ids, string why)
 	{
 		var at = ToWorld(pose, ids, out var parent);
 		own.Data.SetWorldTransform(at);
@@ -622,7 +601,7 @@ internal static class OwnMotion
 	private static readonly bool GridFrameOff = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "gridframe:off");
 	private static readonly FrameHold<DEntity, Entity> HeldFrames = new();
 
-	private static (uint Id, WorldTransform? Frame) FrameOf(Entity character, KeenIds ids)
+	private static (uint Id, WorldTransform? Frame) FrameOf(Entity character, SessionIds ids)
 	{
 		if (GridFrameOff)
 		{
@@ -643,7 +622,7 @@ internal static class OwnMotion
 		return (id, parent.Data.GetWorldTransform());
 	}
 
-	private static WorldTransform ToWorld(in OwnPose pose, KeenIds ids, out Entity? parent)
+	private static WorldTransform ToWorld(in OwnPose pose, SessionIds ids, out Entity? parent)
 	{
 		var at = new WorldTransform(new Vector3D(pose.Position.X, pose.Position.Y, pose.Position.Z), new Quaternion(pose.Rotation.X, pose.Rotation.Y, pose.Rotation.Z, pose.Rotation.W));
 		parent = null;
@@ -718,7 +697,7 @@ internal static class OwnMotion
 	}
 
 	/// <summary>Server thread, after each update: answers the input the last tick applied and applies the next one.</summary>
-	public static void ServerTick(Session session, IEnumerable<(ushort ClientId, Entity? Character)> players, HostSession host, KeenIds ids)
+	public static void ServerTick(Session session, IEnumerable<(ushort ClientId, Entity? Character)> players, HostSession host, SessionIds ids)
 	{
 		long now = MpClock.NowMs();
 		long stamp = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -1008,7 +987,6 @@ internal static class OwnMotion
 		lock (player.Gate)
 			if (player.Inputs.HasNext || now - player.LastInputMs > StaleMs) return;
 		_inputWaits++;
-		(KeenNet.ServerComms as LocalServerSession)?.PumpMessages();
 		long until = System.Diagnostics.Stopwatch.GetTimestamp() + System.Diagnostics.Stopwatch.Frequency * InputWaitMs / 1000;
 		while (System.Diagnostics.Stopwatch.GetTimestamp() < until)
 		{
@@ -1027,7 +1005,7 @@ internal static class OwnMotion
 		Apply(player, character, default);
 	}
 
-	private static OwnPose PoseOf(Entity character, uint seq, ushort epoch, KeenIds ids, bool state)
+	private static OwnPose PoseOf(Entity character, uint seq, ushort epoch, SessionIds ids, bool state)
 	{
 		var at = character.Data.GetWorldTransform();
 		character.Data.TryGet<RigidBodyData>(out var body);
@@ -1045,7 +1023,7 @@ internal static class OwnMotion
 	}
 
 	/// <summary>The server's pose wins: the player's game jumps there and inputs sent before it are ignored (new epoch).</summary>
-	private static void Resync(HostSession host, ushort clientId, Player player, Entity character, KeenIds ids, long now, string why)
+	private static void Resync(HostSession host, ushort clientId, Player player, Entity character, SessionIds ids, long now, string why)
 	{
 		ushort epoch;
 		lock (player.Gate)

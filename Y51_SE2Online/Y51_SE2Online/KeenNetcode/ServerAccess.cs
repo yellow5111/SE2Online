@@ -40,17 +40,6 @@ internal static partial class ServerAccess
 		Patch(harmony, "control panel", AccessTools.Method(typeof(StreamedControlPanelSessionComponent), nameof(StreamedControlPanelSessionComponent.Attach),
 			new[] { typeof(Entity), typeof(ControlPanelListModel), typeof(ReplicationEventContext) }), prefix: nameof(ControlPanelPrefix));
 		Patch(harmony, "medbays", AccessTools.Method(typeof(RespawnSessionComponent), nameof(RespawnSessionComponent.ActivateRespawnPoint)), prefix: nameof(ActivateRespawnPrefix));
-		Patch(harmony, "story caller", AccessTools.Method(typeof(Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport), "ProcessStory"),
-			prefix: nameof(StoryPrefix), finalizer: nameof(StoryFinalizer));
-		Patch(harmony, "story arguments", AccessTools.Method(typeof(Keen.VRage.Multiplayer.Transport.OutOfProcess.Server.OutOfProcessServerPeerTransport), "RestoreStoryStateMachine"),
-			postfix: nameof(RestoredStoryPostfix));
-		if (!ReturningStoriesOff)
-		{
-			// Not MoveNetworkStory itself: its exception filter breaks Harmony's rewrite. This is where it captures the story.
-			Patch(harmony, "returning stories (sent)", AccessTools.Method(typeof(Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport), "TransformStoryInternal",
-				new[] { typeof(Keen.VRage.Multiplayer.NetworkStories.StoryProgress), typeof(Keen.VRage.Multiplayer.NetworkStories.StoryId) }), postfix: nameof(MoveStoryPostfix));
-			Patch(harmony, "returning stories", AccessTools.Method(typeof(Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport), "TryAcceptReturningStory"), prefix: nameof(ReturningStoryPrefix));
-		}
 		var toolbar = typeof(Keen.Game2.Simulation.WorldObjects.CubeBlocks.Toolbar.BlockToolbarServerComponent);
 		Patch(harmony, "button panels", System.Linq.Enumerable.FirstOrDefault(AccessTools.GetDeclaredMethods(toolbar), m => m.Name == "ActivateTile" && m.GetParameters().Length == 3), prefix: nameof(ToolbarPrefix));
 		// A press arrives through the one-argument overload, which the JIT inlines the three-argument one into.
@@ -122,55 +111,20 @@ internal static partial class ServerAccess
 
 	private static readonly bool ReturningStoriesOff = Off("returning stories"), ToolbarUnknownOff = Off("toolbar callers");
 
-	// The state machine type of every story Keen's transport has in flight to a peer.
-	private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport,
-		System.Collections.Generic.Dictionary<Keen.VRage.Multiplayer.NetworkStories.StoryId, Type>> _sentStories = new();
-
-	// Only this side's own stories: TransformStoryInternal also sends the peer's stories back to it (MoveTo.Client), and
-	// those never return here. With them left out the table holds at most what Keen has in flight to that peer.
-	private static void MoveStoryPostfix(Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport __instance, Keen.VRage.Multiplayer.NetworkStories.StoryProgress story,
-		Keen.VRage.Multiplayer.NetworkStories.StoryId id)
-	{
-		if (story is not Keen.VRage.Multiplayer.NetworkStories.StoryProgress.Move move
-			|| !ReturningStories.Records(id.IsFromServer, __instance is Keen.VRage.Multiplayer.Transport.OutOfProcess.Server.OutOfProcessServerPeerTransport)) return;
-		var sent = _sentStories.GetOrCreateValue(__instance);
-		lock (sent) sent[id] = move.StateMachine.GetType();
-	}
-
-	private static bool ReturningStoryPrefix(Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport __instance, Keen.VRage.Multiplayer.NetworkStories.IStoryData story, ref bool __result)
-	{
-		if (!_sentStories.TryGetValue(__instance, out var sent)) return true;
-		Type? type;
-		lock (sent) sent.Remove(story.StoryId, out type);
-		if (story is not Keen.VRage.Multiplayer.NetworkStories.StateMachineEnvelope back || ReturningStoryRefusal(__instance.PeerClientId, type, back) is not { } refused) return true;
-		if (!__instance._storiesInFlight.Remove(story.StoryId, out var tcs)) return true;
-		tcs.SetResult(new Keen.VRage.Multiplayer.NetworkStories.StoryProgress.Complete(new Keen.VRage.Multiplayer.Transport.StoryFault(refused)));
-		__result = true;
-		return false;
-	}
-
 	/// <summary>
 	/// A story this side moved to the peer may come back under its id only as the same state machine: the peer swapping in
 	/// another story there would get it run without the checks a story the peer starts goes through. Both transports.
 	/// </summary>
-	internal static Exception? ReturningStoryRefusal(Keen.VRage.Multiplayer.ClientId peer, Type? sent, Keen.VRage.Multiplayer.NetworkStories.StateMachineEnvelope back)
+	internal static Exception? ReturningStoryRefusal(Keen.VRage.Multiplayer.ClientId peer, Type? sent, string backTypeName)
 	{
 		if (ReturningStoriesOff || sent == null) return null;
-		// Compared by name, as the game writes it (AssemblyQualifiedName): a name the peer chose is never resolved here.
-		if (!ReturningStories.Refuses(sent.AssemblyQualifiedName, back.StateMachineTypeName)) return null;
+		// Compared by name, as SE2 Online writes it (AssemblyQualifiedName): a name the peer chose is never resolved here.
+		if (!ReturningStories.Refuses(sent.AssemblyQualifiedName, backTypeName)) return null;
 		Refused++;
-		if (LogDue(peer, "returning-story")) GameLog.Instance.Info($"access: refused ClientId {peer.Id}'s answer to {sent.DeclaringType?.Name}.{StoryName(sent)}: it came back as another story ({back.StateMachineTypeName}; further ones within 5 s not logged)");
+		if (LogDue(peer, "returning-story")) GameLog.Instance.Info($"access: refused ClientId {peer.Id}'s answer to {sent.DeclaringType?.Name}.{StoryName(sent)}: it came back as another story ({backTypeName}; further ones within 5 s not logged)");
 		// A cancellation, not a fault: the server's own story usually runs unawaited, and the game's monitor for those sends
 		// any other exception to the crash handler, so a refused answer closed the server.
 		return new System.Threading.Tasks.TaskCanceledException("Access denied: the answer is another story");
-	}
-
-	private static void StoryPrefix(Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport __instance, Keen.VRage.Multiplayer.NetworkStories.IStoryData story,
-		out (Keen.VRage.Multiplayer.ClientId? Client, bool Hosting) __state)
-	{
-		__state = (_storyClient, _hostingStory);
-		_storyClient = __instance.PeerClientId;
-		_hostingStory = !__instance._storiesInFlight.ContainsKey(story.StoryId);
 	}
 
 	/// <summary>
@@ -189,12 +143,6 @@ internal static partial class ServerAccess
 
 	internal static void CheckRestoredStory(Keen.VRage.Multiplayer.ClientId sender, ref System.Runtime.CompilerServices.IAsyncStateMachine machine) => RestoredStoryPostfix(sender, ref machine);
 
-	private static Exception? StoryFinalizer(Exception? __exception, (Keen.VRage.Multiplayer.ClientId? Client, bool Hosting) __state)
-	{
-		(_storyClient, _hostingStory) = __state;
-		return __exception;
-	}
-
 	// A story arrives with whatever arguments the client wrote, and SE2 4.0 checks at most the story's own component: never
 	// whose character an argument is (seating, unseating or feeding someone else's character) nor which identity an
 	// ownership transfer names (taking any grid). 0.15.3 refused both on its own story path. A refused story is swapped
@@ -205,7 +153,7 @@ internal static partial class ServerAccess
 		// server request in the restored machine (it writes into the machine's own fields).
 		if (__result != null && sender != Keen.VRage.Multiplayer.ClientId.Server && ToolbarRequests.NamesNoHintBlock(__result))
 		{
-			__result = new CancelledStory("a toolbar hint for a block the player's game could not name");
+			__result = new CancelledStory("a request naming an entity the player's game could not name");
 			return;
 		}
 		if (!Enforcing || !_hostingStory || sender == Keen.VRage.Multiplayer.ClientId.Server || __result == null) return;
@@ -315,6 +263,12 @@ internal static partial class ServerAccess
 	private static Exception? ToolbarStoryFinalizer(Exception? __exception)
 	{
 		_toolbarStories--;
+		return __exception;
+	}
+
+	private static Exception? StoryFinalizer(Exception? __exception, (Keen.VRage.Multiplayer.ClientId? Client, bool Hosting) __state)
+	{
+		(_storyClient, _hostingStory) = __state;
 		return __exception;
 	}
 

@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Keen.VRage.DCS.Components;
-using Keen.VRage.Multiplayer.Transport.OutOfProcess;
 using Y51_SE2Online.Core;
 
 namespace Y51_SE2Online.Engine;
@@ -31,6 +30,9 @@ internal sealed class SignalDedupe
 
 	private static readonly bool Off = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "signals:all");
 
+	/// <summary>A setter the server repeats with the same values (what IsRepeat may skip for a player).</summary>
+	public static bool IsStateSignal(string name) => StateSignals.Contains(name);
+
 	private readonly Dictionary<(string Signal, object Target), object?[]> _last = new();
 	private readonly Dictionary<Entity, List<string>> _signalsOf = new(ReferenceEqualityComparer.Instance);
 
@@ -43,15 +45,16 @@ internal sealed class SignalDedupe
 		foreach (string signal in signals) _last.Remove((signal, entity));
 	}
 
-	public bool IsRepeat(in RecordedSignal signal, Func<Entity, bool> exact)
+	public bool IsRepeat(OwnSignal signal, Func<Entity, bool> exact)
 	{
-		if (Off || signal.Arguments is not { Count: > 0 } args) return false;
-		string name = signal.Signal.String;
+		var args = signal.Args;
+		if (Off || args.Length == 0) return false;
+		string name = signal.Name;
 		if (!StateSignals.Contains(name)) return false;
-		var values = new object?[args.Count];
+		var values = new object?[args.Length];
 		for (int i = 0; i < values.Length; i++)
 		{
-			object? value = args[i].Value is PayloadArg payload ? payload.Payload : args[i].Value;
+			object? value = args[i].Value;
 			if (!ByValue(value)) return false;
 			values[i] = value;
 		}

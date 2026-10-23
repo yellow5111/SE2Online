@@ -56,14 +56,11 @@ internal static class OwnMotionProbe
 		_lagSet = true;
 		string arg = MpPlugin.LaunchArgs.FirstOrDefault(a => a.StartsWith(MpOptions.Prefix + "fakelag:", StringComparison.OrdinalIgnoreCase));
 		if (arg == null || !int.TryParse(arg[(MpOptions.Prefix.Length + 8)..], out int ms)) return;
-		FramedSession.LagMs = ms;
-		GameLog.Instance.Info($"selftest: this game's sends on the game connection wait {ms} ms");
+		GameLog.Instance.Warn($"selftest: -y51online:fakelag:{ms} is not supported by SE2 Online's own link; sends are not delayed");
 		string? jitter = MpPlugin.LaunchArgs.FirstOrDefault(a => a.StartsWith(MpOptions.Prefix + "fakejitter:", StringComparison.OrdinalIgnoreCase));
 		if (jitter?[(MpOptions.Prefix.Length + "fakejitter:".Length)..].Split(':') is [var every, var hold] && long.TryParse(every, out long e) && long.TryParse(hold, out long h))
 		{
-			FramedSession.JitterEveryMs = e;
-			FramedSession.JitterHoldMs = h;
-			GameLog.Instance.Info($"selftest: every {e} ms this game's sends are held {h} ms and leave together");
+			GameLog.Instance.Warn($"selftest: -y51online:fakejitter:{e}:{h} is not supported by SE2 Online's own link");
 		}
 	}
 

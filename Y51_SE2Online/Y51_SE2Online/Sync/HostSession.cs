@@ -34,6 +34,12 @@ public sealed partial class HostSession : IStorySink
 
 		public ClientStatus Status;
 
+		/// <summary>This connection already asked for the world's session snapshot.</summary>
+		public bool SnapshotAsked;
+
+		/// <summary>The password it joined with: access is checked again when its game asks for the world.</summary>
+		public string JoinPassword = "";
+
 		public bool AdminStateSent;
 
 		/// <summary>Takes <see cref="SyncMsg.RosterSync"/> patches (said so in its join request).</summary>
@@ -324,6 +330,7 @@ public sealed partial class HostSession : IStorySink
 		}
 		PlayerRecord player = client.Player;
 		_world.ForgetStories(peer);
+		_world.PeerLeft(peer);
 		if (player != null)
 		{
 			lock (_sync)
@@ -385,6 +392,9 @@ public sealed partial class HostSession : IStorySink
 				break;
 			case SyncMsg.RulesAck:
 				OnRulesAck(peer, data);
+				break;
+			case SyncMsg.Snapshot:
+				OnSnapshotRequest(peer, data);
 				break;
 			case SyncMsg.EngineUp:
 				if (StatusOf(peer) == ClientStatus.Synced && EngineUpstream?.Invoke(peer, data) == false)
@@ -450,6 +460,7 @@ public sealed partial class HostSession : IStorySink
 			return;
 		}
 		client.Name = req.PlayerName;
+		client.JoinPassword = req.Password ?? "";
 		client.Patches = (req.Features & JoinRequest.RosterPatches) != 0;
 		client.TradeView = (req.Features & JoinRequest.TradeView) != 0;
 		client.BuildGhosts = (req.Features & JoinRequest.BuildGhosts) != 0;
@@ -464,9 +475,12 @@ public sealed partial class HostSession : IStorySink
 			Reject(peer, VersionMismatch.Refusal(_o.PluginVersion, req.PluginVersion), JoinRejectCode.Version);
 			return;
 		}
+		// The game's own handshake refused other game builds; SE2 Online's own join does now (the world's data differs).
 		if (req.GameVersion != _o.GameVersion)
 		{
-			_log.Warn($"sync(host): {peer} runs game {req.GameVersion}, host {_o.GameVersion}; continuing, but entity data may not match");
+			// Generic: a Version refusal is shown as the plugin version notice, which would hide this reason.
+			Reject(peer, $"This server runs Space Engineers 2 {_o.GameVersion}; your game is {req.GameVersion}. Both need the same game build: update the game in Steam, or wait for the server to update.", JoinRejectCode.Generic);
+			return;
 		}
 		if (client.Status == ClientStatus.Connected && client.Player == null && !CheckAccess(peer, req))
 		{
@@ -1399,11 +1413,66 @@ public sealed partial class HostSession : IStorySink
 			IdentityId = client.Player?.IdentityId ?? 0,
 			PlayerId = client.Player?.PlayerId ?? 0,
 			Players = PlayerTable(),
-			Mods = _world.Mods.ToList()
+			Mods = _world.Mods.ToList(),
+			HostMissions = _world.HostMissions
 		};
 		_t.Send(peer, Channel.Control, accept.Encode());
-		_log.Info($"sync(host): {peer} '{client.Name}' admitted; the game's own netcode sends the world");
+		_log.Info($"sync(host): {peer} '{client.Name}' admitted; the world goes to it on SE2 Online's transport");
 	}
+
+	// One snapshot per connection: each one captures the whole world's session state on the server.
+	private void OnSnapshotRequest(PeerId peer, byte[] data)
+	{
+		if (!SnapshotMessage.IsRequest(data)) throw new ArgumentOutOfRangeException(nameof(data), "a snapshot request carries nothing");
+		ushort clientId;
+		string password;
+		lock (_sync)
+		{
+			if (!_clients.TryGetValue(peer, out RemoteClient client) || client.Status != ClientStatus.Synced || client.Player == null || client.SnapshotAsked)
+			{
+				_log.Warn($"sync(host): snapshot request from {peer} ignored ({(client == null ? "unknown" : client.SnapshotAsked ? "already sent" : client.Status.ToString())})");
+				return;
+			}
+			client.SnapshotAsked = true;
+			clientId = client.Player.ClientId;
+			password = client.JoinPassword;
+		}
+		// Bans, the whitelist or the password may have changed since this player was accepted (mod downloads take minutes).
+		if (_o.Access.CheckJoin(PeerAlias.SteamOf(peer.Value), password, _o.Password, _o.SessionName, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) is { } verdict)
+		{
+			_log.Warn($"sync(host): {peer} no longer passes the join check ({(verdict.Code == JoinRejectCode.Removed ? "banned" : verdict.Text)}); refusing the world");
+			_t.Send(peer, Channel.Control, TextMessage.Encode(SyncMsg.JoinReject, verdict.Code, verdict.Text));
+			_t.Disconnect(peer, DisconnectCodes.NotAllowed, verdict.Code == JoinRejectCode.Removed ? "banned" : verdict.Text);
+			return;
+		}
+		_world.SnapshotRequested(peer, clientId);
+	}
+
+	/// <summary>The world's session snapshot for an accepted player (any thread); false if it is gone.</summary>
+	public bool SendSnapshot(PeerId peer, byte[] snapshot, Guid user)
+	{
+		lock (_sync)
+		{
+			if (!_clients.TryGetValue(peer, out RemoteClient client) || client.Status != ClientStatus.Synced) return false;
+			_t.Send(peer, Channel.Bulk, SnapshotMessage.Encode(snapshot, null, user));
+			client.LifecycleBytes += snapshot.Length;
+			return true;
+		}
+	}
+
+	/// <summary>Any thread: closes a player's connection as a loss (its game joins again by itself).</summary>
+	public void DisconnectPeer(PeerId peer, string why) => _t.Disconnect(peer, 1000, why);
+
+	/// <summary>Any thread: the server could not take this player's game in; it is told why and disconnected.</summary>
+	public void DropPeer(PeerId peer, string why)
+	{
+		_log.Warn($"sync(host): dropping {peer}: {why}");
+		_t.Send(peer, Channel.Control, TextMessage.Encode(SyncMsg.JoinReject, JoinRejectCode.Generic, why));
+		_t.Disconnect(peer, DisconnectCodes.ProtocolError, why);
+	}
+
+	/// <summary>The co-op host's own Steam id (0 on a dedicated server).</summary>
+	public ulong HostSteamId => _o.HostSteamId;
 
 	public bool BeginCapture(PeerId peer, out uint worldLifeSeq) => BeginCapture(peer, 1, out worldLifeSeq);
 

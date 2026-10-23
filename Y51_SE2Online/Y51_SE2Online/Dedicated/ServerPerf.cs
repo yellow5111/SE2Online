@@ -252,7 +252,7 @@ internal static class ServerPerf
 			_worstMs = Math.Max(_worstMs, frame.FrameMs);
 			_worstWorkMs = Math.Max(_worstWorkMs, frame.FrameMs - wait);
 		}
-		var clock = app.Server?.Entity.Get<WorldSessionComponent>()?.OwnedSession?.SessionComponents.TryGet<GameTimeSessionComponent>();
+		var clock = app.Server?.Entity.Get<WorldSessionComponent>()?.OwnedSession?.SessionComponents?.TryGet<GameTimeSessionComponent>();
 		if (clock == null) { _windowStartMs = 0; return; }
 		double world = clock.FrameTime.TotalSeconds;
 		if (_windowStartMs == 0) { Reset(now, world); return; }
@@ -262,8 +262,14 @@ internal static class ServerPerf
 		// Worst frame is start to start, so a clean 60 Hz window reads 17 ms; the longest work shows what the tick itself took.
 		GameLog.Instance.Info(FormattableString.Invariant(
 			$"perf: world time +{advanced:0.0} s over {wall:0.0} s wall (sim speed {advanced / wall:0.00}); {_windowTicks} ticks ({_windowTicks / wall:0.0}/s), {_caughtUpTicks} run late to catch up, {ServerProfiler.Ms(_droppedTicks) / 1000:0.0} s of backlog dropped; worst frame {_worstMs:0} ms{(_paced ? FormattableString.Invariant($", longest work {_worstWorkMs:0} ms") : "")}; CPU {(cpu - _windowCpu).TotalSeconds / wall:0.0} of {Environment.ProcessorCount} logical processors"));
+		// A world running behind for a whole window gets its jobs timed too (they were timed only after slow single frames).
+		Behind = advanced / wall < 0.8;
+		if (JobProfiler.TakeWindow() is { Length: > 0 } top) GameLog.Instance.Info($"perf: game jobs with the most time over the last {wall:0} s (ms): {top}");
 		Reset(now, world);
 	}
+
+	/// <summary>The last 30 s window ran the world below 0.8 of real time (DedicatedRuntime then times the game's jobs).</summary>
+	public static bool Behind;
 
 	private static void Reset(long now, double world)
 	{

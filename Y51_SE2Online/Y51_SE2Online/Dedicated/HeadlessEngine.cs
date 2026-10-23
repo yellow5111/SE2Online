@@ -10,7 +10,6 @@ using Keen.Game2.Game.GameComponents;
 using Keen.Game2.Game.Networking;
 using Keen.Game2.Game.RuntimeSystems.GameSessions;
 using Keen.Game2.Game.SessionComponents;
-using Keen.Game2.OutOfProcess;
 using Keen.Game2.Simulation.GameSystems.Missions;
 using Keen.Game2.Simulation.RuntimeSystems;
 using Keen.Game2.Simulation.RuntimeSystems.CoreConfigurations;
@@ -32,7 +31,6 @@ using Keen.VRage.Library.Localization;
 using Keen.VRage.Library.Utils;
 using Keen.VRage.Multiplayer.Replications;
 using Keen.VRage.Multiplayer.Transport;
-using Keen.VRage.Multiplayer.Transport.OutOfProcess.Server;
 using Y51_SE2Online.Core;
 using Task = Keen.VRage.Library.Threading.Task;
 
@@ -110,7 +108,7 @@ internal static class HeadlessEngine
         __instance.CoreScene = scene;
         engine.EntitySerializer = scene.Serializer;
         engine.SceneBuilder.UserObject = scene;
-        engine.SceneBuilder.AddJobsFromType(typeof(GameServerNetworkingComponent));
+        Y51_SE2Online.Engine.KeenOff.AddServerNetworkingJobs(engine.SceneBuilder);
         engine.AddService(VersionExt.FromAssembly(typeof(GameApp).Assembly));
         var projects = ((IEnumerable<VRageProject>)AccessTools.Method(typeof(GameApp), "GetProjects")
             .Invoke(null, new object[] { args })).ToList();
@@ -238,16 +236,9 @@ internal static class HeadlessEngine
             await app.WaitForSaveToFinish();
             bool mission = await MissionScreenSessionComponent.IsMissionWorld(args, app);
             var server = app.Scene.Dynamic();
-            server.WithComponent<DedicatedServerWorldTickMockComponent>();
+            server.WithComponent<Keen.Game2.OutOfProcess.DedicatedServerWorldTickMockComponent>();
             server.WithComponent<ReplicationServerCoreComponent>();
-            server.WithComponent<GameSessionDedicatedServerComponent>(new GameSessionDedicatedServerComponentObjectBuilder
-            {
-                ListenEndpoint = new System.Net.IPEndPoint(System.Net.IPAddress.Any, 27015),
-                ServerName = "Dedicated server"
-            }, StringId.Get("IGameSessionProvider"), StringId.Get("IServerGameSessionProvider"));
-            server.WithComponent<GameServerNetworkingComponent>(new GameServerNetworkingComponentObjectBuilder());
-            server.WithComponent<OutOfProcessServerTransportCoreComponent>();
-            server.WithComponent<LoggingIncidentReportingCoreComponent>();
+            Y51_SE2Online.Engine.KeenOff.AddServerNetworking(ref server);
             var ob = GameWorldBuilder.CreateBaseGame(ref server, true, app._instanceIndex, mission);
             GameWorldBuilder.BuildGameServer(ref server);
             if (args.SaveId.HasValue)

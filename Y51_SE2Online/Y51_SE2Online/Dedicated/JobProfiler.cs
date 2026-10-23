@@ -25,6 +25,9 @@ internal static class JobProfiler
 
 	private static readonly Dictionary<(Scene Scene, int Job, Kind Kind), long> Frame = new();
 
+	// The same, summed over ServerPerf's 30 s window: what a sustained slow tick goes to, not only the spikes.
+	private static readonly Dictionary<(Scene Scene, int Job, Kind Kind), long> Window = new();
+
 	[System.ThreadStatic] private static long _childTicks;
 
 	[System.ThreadStatic] private static int _lastJob;
@@ -57,6 +60,15 @@ internal static class JobProfiler
 		if (Installed) return;
 		Installed = true;
 		harmony.Patch(AccessTools.Method(typeof(Scene), nameof(Scene.Tick)), transpiler: Own(nameof(Transpiler)));
+	}
+
+	/// <summary>Back to the game's own Scene.Tick (timing switched on only while the world ran behind).</summary>
+	public static void Uninstall(Harmony harmony)
+	{
+		if (!Installed) return;
+		harmony.Unpatch(AccessTools.Method(typeof(Scene), nameof(Scene.Tick)), AccessTools.Method(typeof(JobProfiler), nameof(Transpiler)));
+		Installed = false;
+		lock (Sync) { Frame.Clear(); Window.Clear(); }
 	}
 
 	private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> code)
@@ -131,7 +143,22 @@ internal static class JobProfiler
 			string text = describe && Frame.Count > 0
 				? string.Join(", ", Frame.OrderByDescending(e => e.Value).Take(top).Select(e => $"{Name(e.Key.Scene, e.Key.Job, e.Key.Kind)} {ServerProfiler.Ms(e.Value):0}"))
 				: "";
+			foreach (var (key, ticks) in Frame) Window[key] = (Window.TryGetValue(key, out long sum) ? sum : 0) + ticks;
 			Frame.Clear();
+			return text;
+		}
+	}
+
+	/// <summary>The window's top jobs by total time ("" when none were timed), and a fresh window.</summary>
+	public static string TakeWindow(int top = 8)
+	{
+		if (!Installed) return "";
+		lock (Sync)
+		{
+			string text = Window.Count > 0
+				? string.Join(", ", Window.OrderByDescending(e => e.Value).Take(top).Select(e => $"{Name(e.Key.Scene, e.Key.Job, e.Key.Kind)} {ServerProfiler.Ms(e.Value):0}"))
+				: "";
+			Window.Clear();
 			return text;
 		}
 	}

@@ -57,24 +57,6 @@ internal static class ProjectionProbe
 		harmony.Patch(AccessTools.Method(typeof(PreviewHostComponent), nameof(PreviewHostComponent.RemoveBlockDataFromPreview)),
 			postfix: new HarmonyMethod(typeof(ProjectionProbe), nameof(PreviewPostfix)));
 		harmony.Patch(AccessTools.Method(typeof(PreviewHostComponent), "AddBlockDataToPreviewGrid"), postfix: new HarmonyMethod(typeof(ProjectionProbe), nameof(PreviewPostfix)));
-		harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport), "ProcessRecordedSignal"),
-			prefix: new HarmonyMethod(typeof(ProjectionProbe), nameof(SignalPrefix)));
-	}
-
-	// The wire side of a projection signal, before Keen replays it into handlers: proves it arrived and what it carried.
-	private static void SignalPrefix(Keen.VRage.Multiplayer.Transport.OutOfProcess.RecordedSignal signal)
-	{
-		string name = signal.Signal.String;
-		if (name == null || !name.Contains("ProjectionSourceComponent", StringComparison.Ordinal)) return;
-		var args = signal.Arguments.Select(a => a.Value switch
-		{
-			ProjectionSourceComponent.ChildRef r => "ref " + Describe(r),
-			Entity e => "entity " + e.GetComposition()?.DebugNameShort,
-			null => "null",
-			var v => v.GetType().Name
-		});
-		string kind = name[(name.IndexOf("ProjectionSourceComponent_", StringComparison.Ordinal) + "ProjectionSourceComponent_".Length)..].Replace("_Trampoline", "");
-		GameLog.Instance.Info($"selftest-proj: wire signal {kind} received with {string.Join(", ", args)}; refs written {ProjectionRefs.Written}, read {ProjectionRefs.Read}");
 	}
 
 	public static void Tick(Session session)

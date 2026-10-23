@@ -360,7 +360,7 @@ internal sealed partial class HostWorld
         var subset = session.SessionComponents.TryGet<Keen.VRage.Multiplayer.Replications.SceneSubset.SceneSubsetServerSessionComponent>() is { EnforcementEnabled: true } enforced ? enforced : null;
         foreach (var (client, transport) in replication.ClientPeers)
         {
-            var tracker = (transport as Keen.VRage.Multiplayer.Transport.OutOfProcess.Server.OutOfProcessServerPeerTransport)?._tracker;
+            var tracker = (transport as Y51_SE2Online.Engine.Y51ServerTransport)?.Tracker;
             foreach (var grid in grids)
             {
                 if (subset != null && !subset.IsInSubset(client, grid.Data.GetTopLevelParent().Entity)) continue;

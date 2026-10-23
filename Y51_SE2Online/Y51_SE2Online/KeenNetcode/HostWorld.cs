@@ -30,7 +30,12 @@ internal sealed partial class HostWorld : IHostWorld
 
 	private volatile WorldSessionComponent? _worldSession;
 
-	private readonly ConcurrentDictionary<ushort, (ulong SteamId, string Name)> _unidentified = new();
+	private readonly ConcurrentDictionary<ushort, (ulong SteamId, string Name, Keen.VRage.Core.Services.Data.GameServiceUser User)> _unidentified = new();
+
+	// SE2 Online's own netcode: the game user each connected player is registered under.
+	private readonly ConcurrentDictionary<PeerId, Keen.VRage.Core.Services.Data.GameServiceUser> _userOf = new();
+
+	private volatile bool _missions;
 
 	private readonly ConcurrentDictionary<ushort, long> _identityOf = new();
 
@@ -83,7 +88,7 @@ internal sealed partial class HostWorld : IHostWorld
 	/// <summary>Server: the characters of the players joined now (test rigs).</summary>
 	internal List<Entity> JoinedCharacters => _joiners.Values.Select(j => j.Character).OfType<Entity>().ToList();
 
-	private KeenIds? _ids;
+	private SessionIds? _ids;
 
 	private Entity? _hostCharacterServer;
 
@@ -101,12 +106,16 @@ internal sealed partial class HostWorld : IHostWorld
 
 	public bool OnePilot { get; set; }
 
+	/// <summary>The server checks every player's world against its own (OwnDesync); -y51online:desync:off turns it off.</summary>
+	public bool DesyncChecks { get; set; } = true;
+
 	public TypeKeyTable Keys { get; } = new();
 
 	// ponytail: filled from the loaded world's mod list in phase 3 (mod consent/download); empty means "no mods".
 	private volatile System.Collections.Generic.List<WorldMod> _mods = new();
 
-	private bool _modsRead;
+	// The server session the mod list, missions flag and ids were read for: a co-op host may load another world while hosting.
+	private volatile Session? _readFor;
 
 	private static Keen.VRage.Core.Worlds.ModList? LoadedMods()
 	{
@@ -127,21 +136,22 @@ internal sealed partial class HostWorld : IHostWorld
 	public static void Reset()
 	{
 		Current = null;
-		KeenNet.HostingActive = false;
-		KeenNet.ResetHost();
+		OwnNet.ResetHost();
 	}
 
 	public void Bind(HostSession host)
 	{
 		_host = host;
-		KeenNet.HostingActive = true;
 	}
 
 	public void SetWorldSession(WorldSessionComponent world) => _worldSession = world;
 
 	private Session? ServerSession => _worldSession?.OwnedSession;
 
-	public bool WorldReady => ServerSession != null && KeenNet.ServerComms != null;
+	// Own netcode: the accept carries the mod list and missions flag, so they must have been read for this world first.
+	public bool WorldReady => ServerSession is { } session && OwnNet.ServerReady && ReferenceEquals(_readFor, session);
+
+	public bool HostMissions => _missions;
 
 	public bool WorldLoaded => ServerSession != null;
 
@@ -215,6 +225,15 @@ internal sealed partial class HostWorld : IHostWorld
 
 	internal long IdentityOf(ushort clientId) => _identityOf.TryGetValue(clientId, out long identity) ? identity : 0;
 
+	/// <summary>A player of this identity is in the world with a living character (server thread).</summary>
+	internal bool IsPlaying(long identity)
+	{
+		if (identity == 0) return false;
+		foreach (var joiner in _joiners.Values)
+			if (joiner.Character != null && IdentityOf(joiner.ClientId) == identity) return true;
+		return false;
+	}
+
 
 
 	public void ConfigureIdentities(HostSettings settings)
@@ -223,24 +242,50 @@ internal sealed partial class HostWorld : IHostWorld
 		_research = settings.Research;
 	}
 
-	public void RequestCapture(PeerId client)
+	// The world goes to the player once its game asks for the snapshot (SnapshotRequested), after any mod downloads.
+	public void RequestCapture(PeerId client) => _host?.AcceptKeen(client);
+
+	// The game user of a player, as SE2 Online registers it (OwnUsers).
+	private Keen.VRage.Core.Services.Data.GameServiceUser UserOf(PeerId peer, string key) => OwnNet.UserFor(peer, key, _host?.HostSteamId ?? 0);
+
+	public void SnapshotRequested(PeerId peer, ushort clientId)
 	{
-		_log.Info($"keen host: admitting {client} to the game's own handshake");
-		KeenNet.Admit(client.Value);
-		_host?.AcceptKeen(client);
+		var host = _host;
+		if (host == null || host.Players().FirstOrDefault(p => p.ClientId == clientId && p.Peer == peer) is not { } record) return;
+		var user = UserOf(peer, record.Key);
+		_userOf[peer] = user;
+		_log.Info($"own join: ClientId {clientId} '{record.Name}' ({peer}) asks for the world; game user {user}");
+		OwnNet.Join(user, bytes => host.SendSnapshot(peer, bytes, user.Id), why => host.DropPeer(peer, why));
+	}
+
+	/// <summary>The hosted world unloaded (a co-op host loads another one): every player's game had that world, so each
+	/// connection closes as a loss and the player's game joins again by itself, into whatever world is hosted then.</summary>
+	public void WorldGone()
+	{
+		var host = _host;
+		_userOf.Clear();
+		// Everyone connected, also players accepted but still downloading mods: their accept named the old world.
+		if (host != null)
+			foreach (var record in host.Players())
+				if (record.Peer is { } peer) host.DisconnectPeer(peer, "the host's world closed");
+	}
+
+	public void PeerLeft(PeerId peer)
+	{
+		if (_userOf.TryRemove(peer, out var user)) OwnNet.Leave(user);
 	}
 
 	public void CancelCapture(PeerId client) { }
 
-	public void Rejected(PeerId peer, string why) => KeenNet.Refuse(peer.Value, why);
+	public void Rejected(PeerId peer, string why) { }
 
 	public void OnOwnMotion(ushort clientId, byte[] inputs) => KeenNetcode.OwnMotion.Offer(clientId, inputs);
 
-	public void RegisterPlayer(PeerId client, ushort clientId, string identityKey, string name) => _unidentified[clientId] = (client.Value, name);
+	public void RegisterPlayer(PeerId client, ushort clientId, string identityKey, string name) => _unidentified[clientId] = (client.Value, name, UserOf(client, identityKey));
 
 	public string Stats() => $"SE2 Online netcode, {_joiners.Values.Count(j => !j.Local)} player(s) online";
 
-	public string DesyncDescribe() => "desync checks: Keen netcode";
+	public string DesyncDescribe() => DesyncChecks ? DesyncStats.DescribeHost() : "desync checks: off";
 
 	public string SignalStats() => "";
 
@@ -327,23 +372,28 @@ internal sealed partial class HostWorld : IHostWorld
 			foreach (var (clientId, who) in _unidentified)
 			{
 				// Keen creates the player's identity when its client asks for the world snapshot.
-				if (identities.TryGetIdentityOf(KeenNet.UserOf(who.SteamId)) is not { } identity) continue;
+				if (identities.TryGetIdentityOf(who.User != default ? who.User : SteamUsers.UserOf(who.SteamId)) is not { } identity) continue;
 				_unidentified.TryRemove(clientId, out _);
 				_identityOf[clientId] = (long)identity;
 				_log.Info($"keen host: ClientId {clientId} '{who.Name}' is IdentityId {(long)identity}");
 				host.PlayerIdentified(clientId, (long)identity, (long)identity);
+				if ((long)identity == PlayerIdentities.HotfixIdentity && Y51_SE2Online.Dedicated.DedicatedRuntime.Requested && Social is { } social)
+				{
+					try { lock (social.Sync) social.ReclaimHostSlot(session, who.SteamId); }
+					catch (Exception ex) { _log.Warn($"factions: giving the world creator's grids back failed ({ex.GetType().Name}: {ex.Message}); tried again at their next join"); }
+				}
 			}
 		}
-		if (_ids == null) _ids = new KeenIds(session, server: true);
-		if (!_modsRead)
+		if (!ReferenceEquals(_readFor, session))
 		{
-			_modsRead = true;
+			_ids = new SessionIds(session, server: true);
 			// A co-op host's in-process server session does not get the game's ModList service; the projects the game
 			// loaded for the world are the same list (it builds ModList from them).
 			_mods = WorkshopMods.From(session.ExternalServices?.TryGet<Keen.VRage.Core.Worlds.ModList>() ?? LoadedMods());
 			if (_mods.Count > 0) _log.Info("keen host: the world runs mods: " + WorldMods.Summary(_mods));
+			_missions = session.SessionComponents.TryGet<Keen.Game2.Simulation.GameSystems.Missions.MissionSessionComponent>() != null;
+			_readFor = session;
 		}
-		KeenMods.Publish(_mods, Y51_SE2Online.Dedicated.DedicatedRuntime.Requested, session.SessionComponents.TryGet<Keen.Game2.Simulation.GameSystems.Missions.MissionSessionComponent>() != null);
 		long now = MpClock.NowMs();
 		if (now >= _nextCharacterScanMs)
 		{

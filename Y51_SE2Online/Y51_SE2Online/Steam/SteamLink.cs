@@ -552,6 +552,16 @@ internal sealed class SteamLink : IPacketLink, IDisposable
 		return false;
 	}
 
+	/// <summary>The connection is up and visibly backed up (Sync/LinkGrace): late pongs from it are a slow link, not a dead game.</summary>
+	public bool IsSessionAlive(uint conn)
+	{
+		if (!_conns.TryGetValue(conn, out var c) || !c.Connected) return false;
+		var status = new SteamNetConnectionRealTimeStatus_t { reserved = new uint[16] };
+		var lanes = new SteamNetConnectionRealTimeLaneStatus_t { reserved = new uint[10] };
+		return _api.GetConnectionRealTimeStatus(c.Handle, ref status, 0, ref lanes) == EResult.k_EResultOK
+			&& Y51_SE2Online.Sync.LinkGrace.Backlogged(status.m_cbPendingReliable, status.m_usecQueueTime.m_SteamNetworkingMicroseconds);
+	}
+
 	public int GetPendingReliableBytes(uint conn)
 	{
 		if (!_conns.TryGetValue(conn, out var c))

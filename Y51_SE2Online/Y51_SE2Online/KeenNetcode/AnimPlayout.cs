@@ -8,10 +8,8 @@ using Keen.VRage.Game.Components.Animations;
 using Keen.VRage.Game.Multiplayer;
 using Keen.VRage.Library.Utils;
 using Keen.VRage.Multiplayer.Replications;
-using Keen.VRage.Multiplayer.Transport.OutOfProcess;
 using Y51_SE2Online.Core;
 using Y51_SE2Online.Sync;
-using Transport = Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport;
 
 namespace Y51_SE2Online.KeenNetcode;
 
@@ -69,9 +67,6 @@ internal static class AnimPlayout
 		var receive = AccessTools.Method(typeof(AnimationBlackboardComponent), "BlackboardReceive");
 		_receive = AccessTools.MethodDelegate<ReceiveFn>(receive);
 		harmony.Patch(receive, prefix: new HarmonyMethod(typeof(AnimPlayout), nameof(ReceivePrefix)));
-		harmony.Patch(AccessTools.Method(typeof(OutOfProcessPeerTransportSessionComponent), "ProcessFromRemote"),
-			prefix: new HarmonyMethod(typeof(AnimPlayout), nameof(BeforeInbound)), postfix: new HarmonyMethod(typeof(AnimPlayout), nameof(AfterInbound)));
-		harmony.Patch(AccessTools.Method(typeof(Transport), "ProcessIncomingSampledData"), prefix: new HarmonyMethod(typeof(AnimPlayout), nameof(SampledPrefix)));
 		harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Animation.Client.GameObjects.MultiStrategyAnimationControllerComponent), "UpdateAnimationController"),
 			prefix: new HarmonyMethod(typeof(AnimPlayout), nameof(AnimationPrefix)) { priority = Priority.Last });
 	}
@@ -117,31 +112,18 @@ internal static class AnimPlayout
 	private static bool PlayedBack(Entity entity, out MotionHistory history)
 		=> entity.Data.TryGet(out history) && history.Newest.ServerTime != TimeSpan.Zero && !ReferenceEquals(entity, OwnMotion.Driving);
 
-	private static void BeforeInbound(OutOfProcessPeerTransportSessionComponent __instance)
+	/// <summary>A joined player's game, before the server's frames of this frame apply (Y51Replication.Inbound).</summary>
+	internal static void BeginInbound()
 	{
-		if (__instance.IsServer) return;
 		_inbound = true;
 		OwnAnimation.Restore();
 	}
 
-	private static void AfterInbound(OutOfProcessPeerTransportSessionComponent __instance)
+	internal static void EndInbound()
 	{
-		if (__instance.IsServer) return;
 		_inbound = false;
 		// Changes read with no motion sample after them (nothing moved, or the samples come next read): the newest known time.
 		lock (Held) Held.Stamp(_newestSample);
-	}
-
-	// The server sends a frame's signals, then that frame's motion samples: changes received before a sample batch
-	// belong to its server time.
-	private static void SampledPrefix(Transport.SampledDataBatch batch)
-	{
-		long newest = 0;
-		foreach (var list in batch.Lists)
-			if (list is Transport.SampledList<EntityMotionState> motion)
-				foreach (var entry in motion.Entries)
-					newest = Math.Max(newest, entry.Value.ServerTime.Ticks);
-		NoteSamples(newest);
 	}
 
 	/// <summary>Motion samples were read (the engine transport calls this; Keen's transport through the prefix above).</summary>
