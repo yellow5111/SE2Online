@@ -141,6 +141,9 @@ internal static class OwnMotion
 
 	internal static Entity? Driving => _driving ? _ownEntity : null;
 
+	/// <summary>This game's own character as last found (predicted or not).</summary>
+	internal static Entity? OwnEntity => _ownEntity;
+
 	/// <summary>Main menu: let go of the last world's character and ids (the next session binds itself again).</summary>
 	internal static void ResetClient()
 	{

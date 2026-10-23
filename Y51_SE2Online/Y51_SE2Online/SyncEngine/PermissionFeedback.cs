@@ -78,12 +78,14 @@ internal static class PermissionFeedback
         Notify("Permission Denied", "You don't have access to this block!");
     }
 
-    internal static void Notify(string title, string text)
+    /// <summary>Shows the notice unless one of these is still on screen; true when it showed.</summary>
+    internal static bool Notify(string title, string text)
     {
-        if (_toast != null) return;
+        if (_toast != null) return false;
         var ui = MpPlugin.App?.ClientSession?.SessionComponents.TryGet<SessionInGameUISessionComponent>();
         _toast = ui?.DisplayNotification(new NotificationViewModel(title, text, TimeSpan.FromSeconds(3)));
         if (_toast != null) _toast.OnDisposed += _ => _toast = null;
+        return _toast != null;
     }
 
     // The interactor owns the hover handle and disposes it when the player looks away or the block leaves the scene,

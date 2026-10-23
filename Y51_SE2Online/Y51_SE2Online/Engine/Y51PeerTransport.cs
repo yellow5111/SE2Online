@@ -271,24 +271,29 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 			EngineCoverage.Note(op.Kind is DataLane.Kind.Set or DataLane.Kind.SampledSet ? "data" : "data-remove", _keyNames[op.Key], Out, 8 + (op.Bytes?.Length ?? 0));
 		}
 		_drained.Clear();
+		// Stories of this side that could not go out: their waits end after the frame is sent (a wait's continuation runs
+		// inline and may queue new units, which then belong to the next frame).
+		List<IStoryData>? unsent = null;
 		if (_sequence.Count > 0)
 		{
+			var units = new List<object>(_sequence);
+			_sequence.Clear();
 			try
 			{
-				byte[] archive = SerializeSequence(_sequence);
+				byte[] archive = SerializeSequence(units);
 				w.Archive(EngineWire.Unit.SequenceArchive, archive);
 				EngineCoverage.Note("archive", "signals and stories", Out, archive.Length + 5);
 				// Once in a while each signal alone, for what each kind costs on the wire.
 				if (EngineCoverage.On && ++_sizeSample % 120 == 0)
-					foreach (object unit in _sequence)
+					foreach (object unit in units)
 						if (unit is RecordedSignal one) EngineCoverage.Note("signal-bytes", one.Signal.String, Out, SerializeSequence(new List<object> { one }).Length);
 			}
 			catch (Exception ex)
 			{
-				Dropped += _sequence.Count;
-				GameLog.Instance.WarnOnce("engine-seq-" + Name, $"engine {Name}: a frame's signals and stories could not be serialized and were dropped ({ex.GetType().Name}: {ex.Message})");
+				// One unit that could not be written used to drop the whole frame, story answers with it: a player whose
+				// per-player data answer went that way could never open the terminal (opening it closed the game, 0.16.6).
+				unsent = Salvage(w, units, ex);
 			}
-			_sequence.Clear();
 		}
 		if (!w.IsEmpty)
 		{
@@ -314,8 +319,72 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 				Send(message, state: true);
 			}
 		}
+		if (unsent != null) EndUnsentWaits(unsent);
 		AfterDispatch();
 		EngineCoverage.MaybeWrite();
+	}
+
+	/// <summary>Writes what can be written of a frame that failed as a whole; returns this side's stories that did not go out.</summary>
+	private List<IStoryData> Salvage(EngineWire.Writer w, List<object> units, Exception first)
+	{
+		var unsent = new List<IStoryData>();
+		(List<object> Kept, List<SequenceSalvage.Failure<object>> Failed)? salvage;
+		try { salvage = SequenceSalvage.Keep<object>(units, TryWrite, SkippedAnswer); }
+		catch (Exception ex) { GameLog.Instance.WarnOnce("engine-salvage-" + Name, $"engine {Name}: sorting out a frame that could not be written failed ({Innermost(ex)})"); salvage = null; }
+		if (salvage is not { } result)
+		{
+			Dropped += units.Count;
+			GameLog.Instance.WarnOnce("engine-seq-" + Name, $"engine {Name}: a frame's signals and stories could not be serialized and were dropped ({Innermost(first)})");
+			foreach (object unit in units) if (unit is StateMachineEnvelope envelope) unsent.Add(envelope);
+			return unsent;
+		}
+		bool written = false;
+		try
+		{
+			if (result.Kept.Count > 0) w.Archive(EngineWire.Unit.SequenceArchive, SerializeSequence(result.Kept));
+			written = true;
+		}
+		catch (Exception again)
+		{
+			Dropped += result.Kept.Count;
+			GameLog.Instance.WarnOnce("engine-seq-kept-" + Name, $"engine {Name}: a frame's signals and stories could not be serialized and were dropped ({Innermost(again)})");
+		}
+		foreach (var failure in result.Failed)
+		{
+			Dropped++;
+			string name = failure.Unit is RecordedSignal signal ? signal.Signal.String : StoryName((IStoryData)failure.Unit);
+			string fate = failure.Unit is RecordedSignal ? "dropped" : written && failure.Replacement != null ? "answered as skipped" : "not sent";
+			GameLog.Instance.WarnOnce("engine-unit-" + Name + name, $"engine {Name}: {name} could not be serialized ({Innermost(failure.Error)}); {fate}");
+			if (failure.Unit is StateMachineEnvelope envelope) unsent.Add(envelope);
+		}
+		if (!written) foreach (object unit in result.Kept) if (unit is StateMachineEnvelope envelope) unsent.Add(envelope);
+		return unsent;
+	}
+
+	private Exception? TryWrite(List<object> units)
+	{
+		try { SerializeSequence(units); return null; }
+		catch (Exception ex) { return ex; }
+	}
+
+	// A story that cannot go out is answered as skipped, the way SE2's own transport skips one, when the peer waits for it
+	// (an answer to its story, or any completion); this side's own wait ends in EndUnsentWaits.
+	private object? SkippedAnswer(object unit)
+	{
+		if (unit is not IStoryData story) return null;
+		bool peerWaits = story is StoryComplete || Component.ReplicationComponent.IsValidForeignStoryId(story.StoryId);
+		return peerWaits ? new StoryComplete { StoryId = story.StoryId, Completion = new StoryFault(new SkipNetworkStoryException()) } : null;
+	}
+
+	private void EndUnsentWaits(List<IStoryData> unsent)
+	{
+		foreach (IStoryData story in unsent)
+		{
+			if (!_storiesInFlight.Remove(story.StoryId, out var tcs)) continue;
+			_storyTypes.Remove(story.StoryId);
+			try { tcs.SetResult(new StoryProgress.Complete(new StoryFault(new SkipNetworkStoryException()))); }
+			catch (Exception ex) { GameLog.Instance.WarnOnce("engine-unsent-" + Name, $"engine {Name}: ending the wait of a story that was not sent failed ({Innermost(ex)})"); }
+		}
 	}
 
 	protected abstract SyncMsg UpstreamKind { get; }
@@ -325,6 +394,12 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 	protected virtual void AfterDispatch() { }
 
 	private static readonly CompressionType ChunkCompression = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "lane:raw") ? CompressionType.Brotli : CompressionType.None;
+
+	private static string Innermost(Exception ex)
+	{
+		while (ex.InnerException != null) ex = ex.InnerException;
+		return ex.GetType().Name + ": " + ex.Message;
+	}
 
 	private byte[] SerializeSequence(List<object> sequence)
 	{
@@ -443,6 +518,7 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 			catch (Exception ex)
 			{
 				UnitsFailed++;
+				if (!Component.IsServer) KeenNetcode.UnitFailureLog.NoteError("frame unreadable", Name, ex);
 				GameLog.Instance.WarnOnce("engine-frame-" + Name, $"engine {Name}: a frame could not be read ({ex.GetType().Name}: {ex.Message}); the rest of it is skipped");
 			}
 		}
@@ -489,6 +565,7 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 			catch (Exception ex) when (ex.CanHandle())
 			{
 				UnitsFailed++;
+				if (!Component.IsServer) KeenNetcode.UnitFailureLog.NoteError("apply failed", o is IStoryData failedStory ? StoryName(failedStory) + " story" : o.GetType().Name, ex);
 				GameLog.Instance.WarnOnce("engine-unit-" + o.GetType().Name, $"engine {Name}: applying {o.GetType().Name} failed ({ex.GetType().Name}: {ex.Message})");
 			}
 		}
@@ -629,7 +706,7 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 				continue;
 			}
 			try { Component.ProcessSignal(signal, _pipeline); ParkedSignalsApplied++; }
-			catch (Exception ex) when (ex.CanHandle()) { UnitsFailed++; GameLog.Instance.WarnOnce("engine-parked-signal", $"engine {Name}: a held signal failed ({ex.GetType().Name}: {ex.Message})"); }
+			catch (Exception ex) when (ex.CanHandle()) { UnitsFailed++; KeenNetcode.UnitFailureLog.NoteError("held signal failed", "signal", ex); GameLog.Instance.WarnOnce("engine-parked-signal", $"engine {Name}: a held signal failed ({ex.GetType().Name}: {ex.Message})"); }
 		}
 		_parkedSignals.Clear();
 		_parkedSignals.AddRange(still);

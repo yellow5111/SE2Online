@@ -6,6 +6,7 @@ using Keen.VRage.Core;
 using Keen.VRage.Core.Game.Data;
 using Keen.VRage.Core.Game.Systems;
 using Keen.VRage.DCS.Components;
+using Keen.VRage.Library.Collections;
 using Keen.VRage.Library.Mathematics;
 using Keen.VRage.Multiplayer.Replications.FailureStrategies;
 using Keen.VRage.Voxels.Components;
@@ -41,6 +42,9 @@ internal static class FloraPhysicsRecovery
 	private static readonly System.Reflection.PropertyInfo? StorageProperty = AccessTools.Property(typeof(PlanetFloraComponent), "Storage");
 
 	private static readonly System.Reflection.FieldInfo? PendingBuilds = ClientFlora == null ? null : AccessTools.Field(ClientFlora, "_pendingSectorPhysics");
+	private static readonly System.Reflection.FieldInfo? RemovedItems = ClientFlora == null ? null : AccessTools.Field(ClientFlora, "_removedItems");
+	private static readonly System.Reflection.MethodInfo? RemoveMaterialized = AccessTools.Method(typeof(PlanetFloraSectorPhysicsComponent), "OnSyncRemoveCollider");
+	private static readonly System.Reflection.MethodInfo? RemovePhysicsData = AccessTools.Method(typeof(LogicalFloraSectorObjectBuilder), "RemoveSubCollider");
 
 	// Physics entities seen arriving and still unbuilt, and when; kept until built, named by the server's signal or gone.
 	private static readonly Dictionary<PlanetFloraSectorPhysicsComponent, long> Pending = new();
@@ -48,11 +52,15 @@ internal static class FloraPhysicsRecovery
 	// The ones built here: the server's own signal coming later must not build them again (a second build of a sector
 	// still in progress throws in the game's pending table). Weak, so a world left behind is not kept alive by it.
 	private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<PlanetFloraSectorPhysicsComponent, object> Recovered = new();
-	private static long _nextMs, _recovered, _unmatched, _duplicates;
+	private static long _nextMs, _recovered, _unmatched, _duplicates, _pruned;
+
+	// Per built sector: the client flora's removed-trees set last applied to it (the game swaps in a new set on each change).
+	private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<PlanetFloraSectorPhysicsComponent, object> Pruned = new();
 
 	public static void Install(Harmony harmony)
 	{
-		if (CreateSectorPhysics == null || SectorsField == null || AverageRadius == null || StorageProperty == null || PendingBuilds == null)
+		if (CreateSectorPhysics == null || SectorsField == null || AverageRadius == null || StorageProperty == null || PendingBuilds == null
+			|| RemovedItems == null || RemoveMaterialized == null || RemovePhysicsData == null)
 			throw new MissingMethodException("PlanetFloraClientComponent.OnCreateSectorPhysics / PlanetFloraComponent internals");
 		harmony.Patch(AccessTools.Method(typeof(PlanetFloraSectorPhysicsComponent), "Init", new[] { typeof(PlanetFloraSectorPhysicsComponentObjectBuilder) }),
 			postfix: new HarmonyMethod(typeof(FloraPhysicsRecovery), nameof(InitPostfix)));
@@ -79,6 +87,9 @@ internal static class FloraPhysicsRecovery
 
 	private static void InitPostfix(PlanetFloraSectorPhysicsComponent __instance)
 	{
+		// The client session's sectors only: a dedicated server or a co-op host's server scene builds its own.
+		if (!MpPlugin.Online || MpPlugin.App?.ClientSession is not { } client) return;
+		if (__instance.Entity?.Scene is { } scene && !ReferenceEquals(scene, client.Scene)) return;
 		lock (Pending) Pending[__instance] = MpClock.NowMs();
 	}
 
@@ -86,8 +97,11 @@ internal static class FloraPhysicsRecovery
 	public static void ClientTick(Session session)
 	{
 		long now = MpClock.NowMs();
-		if (now < _nextMs || ClientFlora == null) return;
+		if (now < _nextMs || ClientFlora == null || !MpPlugin.Online) return;
 		_nextMs = now + 500;
+		// Inside the client session's update: a failure here must not stop the rest of it.
+		try { PruneCutTrees(session); }
+		catch (Exception ex) { GameLog.Instance.WarnOnce("flora-prune-pass", $"flora: checking flora physics for cut trees failed ({(ex.InnerException ?? ex).GetType().Name}: {(ex.InnerException ?? ex).Message})"); }
 		List<PlanetFloraSectorPhysicsComponent> due = new();
 		lock (Pending)
 		{
@@ -128,6 +142,43 @@ internal static class FloraPhysicsRecovery
 		}
 	}
 
+	// A tree cut after this game built its sector's flora physics stayed in that physics: the game drops a cut tree from its
+	// own lists, but from the physics only while the tree's collider is materialized when the server's SyncRemoveCollider
+	// arrives. Walking there later materialized a collider the server no longer had, and the predicted character kept
+	// bumping into it (snaps on the ground every second or so).
+	private static void PruneCutTrees(Session session)
+	{
+		foreach (var entity in session.GetEntitiesOfType<PlanetFloraSectorPhysicsComponent>())
+		{
+			if (EngineCodec.IsDead(entity) || entity.TryGet<PlanetFloraSectorPhysicsComponent>() is not { } physics || !Initialized(physics) || physics.Builder == null) continue;
+			var planet = entity.TryGet<FloraSectorComponent>()?.PlanetEntity ?? NearestPlanet(session, entity.Data.GetWorldTransform().Position);
+			if (planet == null || TryGetClientFlora!.Invoke(planet, new object[] { default(Keen.VRage.Library.Utils.StringId) }) is not { } flora) continue;
+			if (RemovedItems!.GetValue(flora) is not HashSetDictionary<SectorId, short> removed) continue;
+			if (Pruned.TryGetValue(physics, out var applied) && ReferenceEquals(applied, removed)) continue;
+			Pruned.AddOrUpdate(physics, removed);
+			if (!removed.ContainsKey(physics.SectorId)) continue;
+			try
+			{
+				int before = physics.Builder.ColliderCount;
+				foreach (short index in removed[physics.SectorId])
+				{
+					// Materialized: the game's own client removal (collider and its physics data). Not yet: its physics data,
+					// so the collider is never materialized.
+					RemoveMaterialized!.Invoke(physics, new object[] { index });
+					RemovePhysicsData!.Invoke(physics.Builder, new object?[] { index, null });
+				}
+				int gone = before - physics.Builder.ColliderCount;
+				if (gone <= 0) continue;
+				if (_pruned == 0) GameLog.Instance.Info($"flora: removed {gone} cut tree(s) from the flora physics of sector {physics.SectorId} (the server had cut them after this game built it)");
+				_pruned += gone;
+			}
+			catch (Exception ex)
+			{
+				GameLog.Instance.WarnOnce("flora-prune", $"flora: could not remove the colliders of cut trees ({(ex.InnerException ?? ex).GetType().Name}: {(ex.InnerException ?? ex).Message})");
+			}
+		}
+	}
+
 	// Where the server puts each sector's physics entity (PlanetFloraServerComponent.SpawnSectorPrefab), for the sectors
 	// this game's flora has generated.
 	private static List<(SectorId Sector, Vector3D At)> Centres(PlanetFloraComponent flora)
@@ -145,7 +196,7 @@ internal static class FloraPhysicsRecovery
 		return list;
 	}
 
-	internal static string Stats => $"{_recovered} flora sectors built without the server's signal ({_unmatched} tries before this game had generated the sector, {_duplicates} late signals not built twice)";
+	internal static string Stats => $"{_recovered} flora sectors built without the server's signal ({_unmatched} tries before this game had generated the sector, {_duplicates} late signals not built twice, {_pruned} trees cut after the build removed from the physics)";
 
 	/// <summary>Flora sector physics entities in <paramref name="session"/> whose colliders are built.</summary>
 	internal static int Built(Session session)

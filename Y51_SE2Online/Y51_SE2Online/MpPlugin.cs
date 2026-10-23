@@ -172,6 +172,8 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		Optional("resilient replication", () => ResilientReplication.Install(_harmony));
 		Optional("story closures for players' requests", () => KeenNetcode.StoryClosures.Install(_harmony));
 		Optional("cockpit toolbars for players", () => KeenNetcode.ToolbarRequests.Install(_harmony));
+		Optional("terminal waits for this player's data", () => KeenNetcode.TerminalGuard.Install(_harmony));
+		Optional("jetpack flames after a repeated state", () => KeenNetcode.JetpackFlames.Install(_harmony));
 		Optional("log noise: repeated not-serializable notes", () => KeenNetcode.LogNoise.Install(_harmony));
 		Optional("SE2 Online replication engine", () => Engine.Y51Replication.Install(_harmony));
 		Optional("death ragdolls follow the server", () => Engine.ClientRagdolls.Install(_harmony));

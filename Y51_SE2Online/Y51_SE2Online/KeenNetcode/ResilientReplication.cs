@@ -45,6 +45,7 @@ internal static class ResilientReplication
 		};
 		if (fits) return true;
 		System.Threading.Interlocked.Increment(ref SignalsSkipped);
+		UnitFailureLog.Note("list change skipped", __instance.GetType().Name + " " + change.Kind, $"at {change.StartingIndex}, this game's copy has {list.Count} items");
 		GameLog.Instance.WarnOnce("collection-change-skipped", $"replication: skipped a list change ({change.Kind} at {change.StartingIndex}) that does not fit this game's copy ({list.Count} items)");
 		return false;
 	}
@@ -60,6 +61,7 @@ internal static class ResilientReplication
 			return __exception;
 		System.Threading.Interlocked.Increment(ref SignalsSkipped);
 		string what = (__exception.InnerException ?? __exception).GetType().Name + ": " + __exception.Message.Split('\n')[0];
+		UnitFailureLog.NoteError("unreadable chunk", (__exception.InnerException ?? __exception).GetType().Name, __exception);
 		GameLog.Instance.WarnOnce("chunk-unreadable", "replication: skipped a network chunk this game could not read (" + what + "); the rest of the batch applies. First one in full: " + __exception);
 		return new Keen.VRage.Library.Serialization.SerializationException("skipped unreadable chunk",
 			new Keen.VRage.Multiplayer.Replications.InProcess.NoMatchingLocalPairingException(what));
@@ -88,6 +90,7 @@ internal static class ResilientReplication
 		if (!MpPlugin.Online) return true;
 		string message = __1;
 		if (message == null || !message.StartsWith("Transport unit failed network pairing", StringComparison.Ordinal)) return true;
+		UnitFailureLog.NotePairing(message);
 		long count = System.Threading.Interlocked.Increment(ref _pairingSkips), now = MpClock.NowMs();
 		if (count == 1) { _pairingLogMs = now; return true; }
 		if (now - _pairingLogMs < 30_000) return false;
@@ -150,6 +153,7 @@ internal static class ResilientReplication
 		if (!MpPlugin.Online) return __exception;
 		if (__exception is null or OutOfMemoryException or StackOverflowException) return __exception;
 		SignalsSkipped++;
+		UnitFailureLog.NoteError("signal skipped", __exception.GetType().Name, __exception);
 		GameLog.Instance.WarnOnce("signal-skipped-" + __exception.GetType().Name, $"replication: skipped a signal that failed to apply ({__exception.GetType().Name}: {__exception.Message}); further ones are counted, not logged");
 		return null;
 	}
@@ -168,6 +172,7 @@ internal static class ResilientReplication
 		if (_readingData <= 0 || __exception is not Keen.VRage.Multiplayer.Replications.InProcess.NoMatchingLocalPairingException) return __exception;
 		__result = _placeholder ??= EntityAllocator.AllocateStub();
 		_placeholderUsed = true;
+		UnitFailureLog.Note("data entry dropped", "entity not here", $"NetworkId({entityId})");
 		GameLog.Instance.WarnOnce("replication-placeholder", $"replication: a data change named entity NetworkId({entityId}) this game does not have (removed the same tick); that entry is dropped, the rest of the tick applies");
 		return null;
 	}

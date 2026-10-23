@@ -261,8 +261,14 @@ internal static class KeenNet
 
 	public static GameServiceUser UserOf(ulong steamId) => LocalPeers.UserOf(steamId) ?? _ids?.GetServiceUser(new CSteamID(steamId)) ?? IdGenerator.GetGameServiceUserFromUserSteamId(new CSteamID(steamId));
 
-	/// <summary>Whether Steam still holds a connected session with this player (only over Steam; false for loopback and direct IP).</summary>
-	public static bool SteamSessionConnected(bool host, GameServiceUser user) => SteamSession(host, user, out _) == ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_Connected;
+	/// <summary>
+	/// Whether Steam still holds a connected session with this player and data waits on it, in Steam's buffer or SE2
+	/// Online's large-message queue (only over Steam; false for loopback and direct IP). Connected with nothing waiting is a
+	/// game that stopped answering: it gets no grace beyond the ping timeout.
+	/// </summary>
+	public static bool SteamSessionConnected(bool host, GameServiceUser user)
+		=> SteamSession(host, user, out var q) == ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_Connected
+		   && Sync.LinkGrace.Backlogged(q.m_cbPendingReliable + PendingReliableBytes(host, user), q.m_usecQueueTime.m_SteamNetworkingMicroseconds);
 
 	/// <summary>
 	/// The game's own connection to that peer is still up: its Steam session, or for a direct IP join its TCP connection.
@@ -278,24 +284,47 @@ internal static class KeenNet
 	private static ESteamNetworkingConnectionState SteamSession(bool host, GameServiceUser user, out SteamNetConnectionRealTimeStatus_t status)
 	{
 		status = default;
-		if ((host ? _serverFramed : ClientComms as FramedSession)?.Inner is not SteamPeerToPeerSession steam || !steam.TryGetIdentity(user, out SteamNetworkingIdentity id))
+		if (SteamOf((host ? _serverFramed : ClientComms as FramedSession)?.Inner) is not { } steam || !steam.TryGetIdentity(user, out SteamNetworkingIdentity id))
 			return ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_None;
 		return steam._isServer
 			? SteamGameServerNetworkingMessages.GetSessionConnectionInfo(ref id, out _, out status)
 			: SteamNetworkingMessages.GetSessionConnectionInfo(ref id, out _, out status);
 	}
 
-	private static long _linksLoggedMs;
+	private static System.Reflection.FieldInfo? _statImpl;
 
-	// Input lag reports need the link's numbers: Steam's ping and how much waits ahead of the next input or update.
+	// SteamNetworkingEngineComponent.CreateSession hands out the Steam session wrapped in a StatCountingPeerToPeerSession,
+	// so the Steam check above never matched: every player got only the 30 s ping timeout, never the grace for a long queue.
+	private static SteamPeerToPeerSession? SteamOf(IPeerToPeerSession? session)
+	{
+		if (session is SteamPeerToPeerSession steam) return steam;
+		if (session is not StatCountingPeerToPeerSession counted) return null;
+		_statImpl ??= AccessTools.Field(typeof(StatCountingPeerToPeerSession), "_impl");
+		return _statImpl?.GetValue(counted) as SteamPeerToPeerSession;
+	}
+
+	private static long _linksLoggedMs, _linksCheckedMs;
+
+	private static readonly Dictionary<GameServiceUser, (bool Bad, long LoggedMs)> _badLinks = new();
+
+	// Input lag reports need the link's numbers: Steam's ping and how much waits ahead of the next input or update. Every
+	// 2 minutes for everyone, and for a link that turns slow or backed up at once, then at most once a minute while it stays so.
 	private static void LogLinks(GameServerNetworkingComponent server)
 	{
 		long now = Environment.TickCount64;
-		if (now - _linksLoggedMs < 30000) return;
-		_linksLoggedMs = now;
+		if (now - _linksCheckedMs < 1000) return;
+		_linksCheckedMs = now;
+		bool due = now - _linksLoggedMs >= 120000;
+		if (due) _linksLoggedMs = now;
 		foreach (GameServiceUser user in server._validatedPeers)
 		{
 			if (SteamSession(true, user, out var q) != ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_Connected) continue;
+			bool bad = Sync.LinkGrace.Bad(q.m_nPing, q.m_cbPendingReliable, q.m_usecQueueTime.m_SteamNetworkingMicroseconds);
+			_badLinks.TryGetValue(user, out var was);
+			bool turnedBad = bad && (!was.Bad || now - was.LoggedMs >= 60000);
+			if (_badLinks.Count > 512) _badLinks.Clear();
+			if (!due && !turnedBad) { _badLinks[user] = (bad, was.LoggedMs); continue; }
+			_badLinks[user] = (bad, now);
 			_log.Info($"steam link {SteamIdOf(user)?.ToString() ?? user.ToString()}: ping {q.m_nPing} ms, quality {q.m_flConnectionQualityLocal:P0} here / {q.m_flConnectionQualityRemote:P0} there, "
 				+ $"out {q.m_flOutBytesPerSec / 1024:0} KiB/s of {q.m_nSendRateBytesPerSecond / 1024} KiB/s allowed, in {q.m_flInBytesPerSec / 1024:0} KiB/s, "
 				+ $"waiting {q.m_cbPendingReliable / 1024} KiB reliable + {q.m_cbPendingUnreliable / 1024} KiB unreliable ({q.m_usecQueueTime.m_SteamNetworkingMicroseconds / 1000} ms queue)");
