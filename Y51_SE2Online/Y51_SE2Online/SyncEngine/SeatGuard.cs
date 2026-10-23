@@ -36,7 +36,7 @@ internal static class SeatGuard
 		if (!__result || !MpPlugin.Online) return;
 		// The host's sit request asks CanSeat too: a seat on a grid the player may not use refuses them there, and the
 		// client stands back up (SeatingFailed). Same rule as the grid's terminal: sharing, factions, block lists.
-		if (AdminAccess.Hosting && ReferenceEquals(SessionOf(__instance), MpPlugin.App?.ServerSession) && pilot.TryGet<Keen.Game2.Simulation.WorldObjects.Characters.CharacterLifeComponent>() != null
+		if (AdminAccess.Hosting && !Y51_SE2Online.KeenNetcode.ServerAccess.SeatOff && ReferenceEquals(SessionOf(__instance), MpPlugin.App?.ServerSession) && pilot.TryGet<Keen.Game2.Simulation.WorldObjects.Characters.CharacterLifeComponent>() != null
 			&& TeamPermissions.OwnerOf(pilot) is long owner && owner != 0 && PlayerIdentities.IsHuman(owner)
 			&& !Y51_SE2Online.KeenNetcode.ServerAccess.MayUse(null, new Keen.Game2.Simulation.GameSystems.Ownership.IdentityId(owner), __instance._block.Entity))
 		{

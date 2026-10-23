@@ -464,7 +464,9 @@ public sealed class JoinProgress
 			case JoinStage.LookingForHost: return (DialogKind.Progress, "Joining", detail ?? "Looking for a friend who is hosting...", key);
 			case JoinStage.Connecting: return (DialogKind.Progress, "Joining " + host, "Connecting" + attempt + "..." + (detail != null ? "\n" + detail : ""), key);
 			case JoinStage.WaitingForHostWorld: return (DialogKind.Progress, "Joining " + host, "Connected. Waiting for the host to open a world...", key);
-			case JoinStage.Lost when _autoRejoin: return (DialogKind.Progress, "Connection lost", "Lost the connection to " + host + ".\n" + (_inGame ? "Returning to the main menu, then rejoining..." : "Rejoining..."), key);
+			// The game's own reconnect prompt handles a loss SE2 Online does not rejoin (a join the game started itself).
+			case JoinStage.Lost when !_rejoinKey: return (DialogKind.None, "", "", key);
+			case JoinStage.Lost when _autoRejoin: return (DialogKind.Progress, "Connection lost", "Lost the connection to " + host + "." + (detail != null ? "\n" + detail : "") + "\n" + (_inGame ? "Returning to the main menu, then rejoining..." : "Rejoining..."), key);
 			case JoinStage.Lost: return (DialogKind.Retry, "Connection lost", "Lost the connection to " + host + "." + (detail != null ? "\n\n" + detail : ""), key);
 			// Past the handshake there is nothing to cancel back to: the world arrives or the join fails. It ends once the
 			// world is built: a first spawn then waits on the spawn menu, which this modal dialog would cover.

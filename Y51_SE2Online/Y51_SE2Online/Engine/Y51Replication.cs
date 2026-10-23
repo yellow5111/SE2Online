@@ -75,7 +75,10 @@ internal static class Y51Replication
 		var peer = PeerOf(remoteUser);
 		if (host.StatusOf(peer) != HostSession.ClientStatus.Synced)
 		{
-			GameLog.Instance.Warn($"engine: {remoteUser} ({peer}) reached the game's handshake without an SE2 Online session; it gets the game's own netcode");
+			// Its SE2 Online session went away after it was admitted: it would get the game's own netcode on a host that
+			// chose SE2 Online's. It is closed; the game removes the peer it adds here.
+			GameLog.Instance.Warn($"engine: {remoteUser} ({peer}) reached the game's handshake without an SE2 Online session; closing it");
+			if (!MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "vanilla-clients")) KeenNet.Kick(remoteUser, "no SE2 Online session");
 			return true;
 		}
 		try { SyncProperties.Track(__instance._replicationCore); }
@@ -204,6 +207,18 @@ internal static class Y51Replication
 		}
 		GameLog.Instance.Info("engine: the host's world arrives on SE2 Online's transport");
 		return false;
+	}
+
+	/// <summary>Main menu: nothing of the last server's session stays referenced here.</summary>
+	internal static void ResetClient()
+	{
+		lock (ClientGate)
+		{
+			_client?.Dispose();
+			_client = null;
+			_clientSession = null;
+			ClientEarly.Clear();
+		}
 	}
 
 	private static bool ClientRemovePeerPrefix(OutOfProcessClientPeerTransportSessionComponent __instance)

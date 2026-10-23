@@ -262,6 +262,13 @@ internal sealed partial class HostWorld : IHostWorld
 	/// <summary>Runs on the server session's own thread, once per server update.</summary>
 	public static void SessionUpdatePostfix(Session __instance)
 	{
+		long started = ServerProfiler.Now;
+		try { SessionUpdate(__instance); }
+		finally { ServerProfiler.Lap(ServerSection.Online, started); }
+	}
+
+	private static void SessionUpdate(Session __instance)
+	{
 		if (!ServerWork.IsEmpty && ReferenceEquals(__instance, MpPlugin.App?.ServerSession))
 		{
 			while (ServerWork.TryDequeue(out var work)) work(__instance);
@@ -292,6 +299,11 @@ internal sealed partial class HostWorld : IHostWorld
 		else if (ReferenceEquals(__instance, MpPlugin.App?.ClientSession) && MpPlugin.App?.ServerSession == null) Engine.SyncProbe.Tick(__instance, server: false);
 		if (ReferenceEquals(__instance, MpPlugin.App?.ServerSession)) Engine.StateProbe.Tick(__instance, server: true);
 		else if (ReferenceEquals(__instance, MpPlugin.App?.ClientSession) && MpPlugin.App?.ServerSession == null) Engine.StateProbe.Tick(__instance, server: false);
+#if !PULSAR
+		if (ReferenceEquals(__instance, MpPlugin.App?.ClientSession) && MpPlugin.App?.ServerSession == null) KeenNetcode.GroupProbe.ClientTick(__instance);
+		KeenNetcode.DockProbe.Tick(__instance);
+		KeenNetcode.BoulderProbe.Tick(__instance);
+#endif
 		if (ReferenceEquals(__instance, MpPlugin.App?.ClientSession) && MpPlugin.App?.ServerSession == null && ClientWorld.Progress.Stage == JoinStage.Playing)
 		{
 			Engine.ActionProbe.Tick(__instance);
@@ -349,6 +361,7 @@ internal sealed partial class HostWorld : IHostWorld
 		if (Social is { } selfTestSocial) KeenNetcode.SelfTest.Server(session, selfTestSocial, _log);
 		SelfTestBring(session);
 		KeenNetcode.MotionProbe.ServerTick(session, _hostIdentity);
+		KeenNetcode.CruiseProbe.ServerTick(session, KeenNetcode.CruiseProbe.HostToo ? new[] { ((ushort)0, _hostCharacterServer) } : _joiners.Values.Select(j => (j.ClientId, j.Character)));
 		KeenNetcode.BuildProbe.Server(session, _log);
 		KeenNetcode.OwnMotionProbe.ServerTick(session, _joiners.Values.Where(j => !j.Local).Select(j => (j.ClientId, j.Character)));
 		KeenNetcode.AnimSyncProbe.ServerTick(session);

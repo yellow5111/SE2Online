@@ -499,7 +499,7 @@ internal sealed partial class NetSession
 		switch (info.Code)
 		{
 		case 1003:
-			return "no answer from the host for 30 s";
+			return "no answer from the host (" + reason + ")";
 		case 1004:
 			if (info.ByPeer)
 			{

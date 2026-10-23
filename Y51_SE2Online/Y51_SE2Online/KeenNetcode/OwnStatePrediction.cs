@@ -97,8 +97,7 @@ internal static class OwnStatePrediction
 		_boost = CharacterBoostState.None;
 		_impulse = false;
 		_boostRefused = false;
-		_fuelBase = (float.NaN, float.NaN);
-		_flightBurns = _boostBurns = false;
+		Ledger.Reset();
 	}
 
 	/// <summary>
@@ -139,14 +138,8 @@ internal static class OwnStatePrediction
 	// as the server's fuel signals do. The server's state still wins in the ack.
 	private static readonly Guid FuelId = new("c634cbaa-2ab6-424f-a129-99c1428ac2c7");
 	private static JetpackFuelComponentDefinition? _fuel;
-	private const int BurnRing = 256;
-	private static readonly (uint Seq, float Flight, float Boost)[] Burns = new (uint, float, float)[BurnRing];
-	private static (float Flight, float Boost) _fuelBase = (float.NaN, float.NaN);
-	private static uint _fuelBaseSeq, _fuelChangedSeq;
-
-	// Only a stat the server is seen burning is predicted: some worlds' jetpacks burn nothing (the stat never drops) and
-	// a script or a refill sets it at once; a drop no bigger than the burn of the ticks since the last change is a burn.
-	private static bool _flightBurns, _boostBurns;
+	// Only a stat the server is seen burning is predicted (Sync.FuelLedger).
+	private static readonly FuelLedger Ledger = new();
 	private static long _fuelOuts;
 
 	private static readonly bool FuelOff = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "ownfuel:off");
@@ -169,30 +162,15 @@ internal static class OwnStatePrediction
 				: _boost != CharacterBoostState.None ? _fuel.BoostFlightFuel : _fuel.PrecisionFlightFuel;
 			if (amount.Stat == boostStat) b = amount.GetFrameValue(); else f = amount.GetFrameValue();
 		}
-		Burns[seq % BurnRing] = (seq, f, b);
-		if (flight.Value != _fuelBase.Flight || boost.Value != _fuelBase.Boost)
-		{
-			int since = Math.Clamp(Net.Seq.Diff(seq, _fuelChangedSeq), 1, 30);
-			_flightBurns |= flight.Value < _fuelBase.Flight && _fuelBase.Flight - flight.Value <= 2 * since * _fuel.PrecisionFlightFuel.GetFrameValue() + 1e-3f;
-			_boostBurns |= boost.Value < _fuelBase.Boost && _fuelBase.Boost - boost.Value <= 2 * since * _fuel.BoostFlightFuel.GetFrameValue() + 1e-3f;
-			_fuelChangedSeq = seq;
-			_fuelBase = (flight.Value, boost.Value);
-			_fuelBaseSeq = OwnMotion.ClientCorrection.NewestAck;
-		}
-		float flightLeft = flight.Value, boostLeft = boost.Value;
-		if (_fuelBaseSeq != 0 && Net.Seq.Diff(seq, _fuelBaseSeq) is > 0 and < BurnRing)
-			for (uint s = _fuelBaseSeq + 1; s != seq + 1; s++)
-			{
-				var burn = Burns[s % BurnRing];
-				if (burn.Seq == s) { flightLeft -= burn.Flight; boostLeft -= burn.Boost; }
-			}
-		if (_boostBurns && _boost != CharacterBoostState.None && boostLeft <= boost.MinValue)
+		Ledger.Record(seq, f, b);
+		var (flightLeft, boostLeft) = Ledger.Left(seq, flight.Value, boost.Value, OwnMotion.ClientCorrection.NewestAck, _fuel.PrecisionFlightFuel.GetFrameValue(), _fuel.BoostFlightFuel.GetFrameValue());
+		if (Ledger.BoostBurns && _boost != CharacterBoostState.None && boostLeft <= boost.MinValue)
 		{
 			SetBoost(own, CharacterBoostState.None);
 			_boostRefused = true;
-			if (_fuelOuts++ < 20) GameLog.Instance.Info($"own motion: predicted boost fuel out ({boost.Value:0.00} replicated, input {seq}, {Net.Seq.Diff(seq, _fuelBaseSeq)} unanswered)");
+			if (_fuelOuts++ < 20) GameLog.Instance.Info($"own motion: predicted boost fuel out ({boost.Value:0.00} replicated, input {seq}, {Ledger.Unanswered(seq)} unanswered)");
 		}
-		if (_flightBurns && _boost == CharacterBoostState.None && flightLeft <= flight.MinValue && Movement(own) is { CurrentMovementState: CharacterMovementState.Jetpack } movement)
+		if (Ledger.FlightBurns && _boost == CharacterBoostState.None && flightLeft <= flight.MinValue && Movement(own) is { CurrentMovementState: CharacterMovementState.Jetpack } movement)
 		{
 			SetState(own, movement, CharacterMovementState.Ground);
 			if (_fuelOuts++ < 20) GameLog.Instance.Info($"own motion: predicted flight fuel out ({flight.Value:0.00} replicated, input {seq})");
@@ -299,7 +277,22 @@ internal static class OwnStatePrediction
 			mode.MaxTorque = torque;
 			data.Set(mode);
 		}
+		// JetpackMovementComponent.UpdateInAirFriction: with no thrust asked for, the body takes the "resting in air"
+		// physics material (it grips what it touches). Without it the player's jetpack character slid down slopes the
+		// server's sat still on (dampeners off on a 40% grade: 3 m off in 2 s). A tick later than the server's.
+		if (!AirFrictionOff && data.TryGet<Keen.VRage.Physics.Character.CharacterPhysicsData>(out var physics))
+		{
+			data.TryGet<Keen.Game2.Simulation.WorldObjects.CubeBlocks.Movement.VoluntaryThrustData>(out var voluntary);
+			bool resting = Vector3.IsZero(voluntary.VoluntaryThrust);
+			if (physics.RestingInAir != resting)
+			{
+				physics.RestingInAir = resting;
+				data.Set(physics);
+			}
+		}
 	}
+
+	private static readonly bool AirFrictionOff = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "ownairfriction:off");
 
 	private static void SetBoost(Entity own, CharacterBoostState state)
 	{

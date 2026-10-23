@@ -60,9 +60,20 @@ internal static class ResilientReplication
 			return __exception;
 		System.Threading.Interlocked.Increment(ref SignalsSkipped);
 		string what = (__exception.InnerException ?? __exception).GetType().Name + ": " + __exception.Message.Split('\n')[0];
-		GameLog.Instance.WarnOnce("chunk-unreadable", "replication: skipped a network chunk this game could not read (" + what + "); the rest of the batch applies");
+		GameLog.Instance.WarnOnce("chunk-unreadable", "replication: skipped a network chunk this game could not read (" + what + "); the rest of the batch applies. First one in full: " + __exception);
 		return new Keen.VRage.Library.Serialization.SerializationException("skipped unreadable chunk",
 			new Keen.VRage.Multiplayer.Replications.InProcess.NoMatchingLocalPairingException(what));
+	}
+
+	// A network value naming a component of an entity whose copy here has no component with those tags: Keen indexes the
+	// component list with -1 and the whole chunk is lost. Says which entity and component, once per kind.
+	private static void ComponentRefPrefix(ref Keen.VRage.DCS.Serialization.SerializedComponent? from)
+	{
+		if (from is not { Entity: { } entity } value) return;
+		var composition = entity.GetComposition();
+		if (composition == null || Keen.VRage.DCS.ObjectBuilders.EntityObjectBuilderFunctions.TryGetIndexOf(composition, value.Tags.AsSpan(), out _) >= 0) return;
+		string tags = string.Join(",", value.Tags);
+		GameLog.Instance.WarnOnce("component-ref-" + composition.DebugNameShort + tags, $"replication: the server named component [{tags}] of {entity} ({composition.DebugNameShort}), which this game's copy of it does not have");
 	}
 
 	public static long Dropped;
@@ -113,6 +124,9 @@ internal static class ResilientReplication
 		Guard(harmony, "pairing warning rate", AccessTools.Method(typeof(Keen.VRage.Library.Diagnostics.LogExtensions), nameof(Keen.VRage.Library.Diagnostics.LogExtensions.Warning),
 			new[] { typeof(Keen.VRage.Library.Diagnostics.Log), typeof(string) }), prefix: nameof(PairingWarningPrefix));
 		Guard(harmony, "signals", AccessTools.Method(typeof(OutOfProcessSignalPipeline), nameof(OutOfProcessSignalPipeline.ProcessSignal)), finalizer: nameof(SignalFinalizer));
+		Guard(harmony, "component reference names", AccessTools.Method(typeof(Keen.VRage.DCS.Serialization.ComponentProxySerializer), "Convert",
+			new[] { typeof(Keen.VRage.Library.Serialization.SerializationContext), typeof(Keen.VRage.DCS.Serialization.SerializedComponent?).MakeByRefType(), typeof(Component).MakeByRefType() }),
+			prefix: nameof(ComponentRefPrefix));
 	}
 
 	private static void Guard(Harmony harmony, string what, System.Reflection.MethodBase? target, string? prefix = null, string? finalizer = null)

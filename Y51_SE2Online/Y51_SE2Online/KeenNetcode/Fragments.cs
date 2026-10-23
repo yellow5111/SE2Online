@@ -14,6 +14,8 @@ internal sealed class FramedSession : IPeerToPeerSession
 
 	public IPeerToPeerSession Inner { get; }
 
+	public int PendingBytes(GameServiceUser user) => _link.PendingBytes(user);
+
 	public FramedSession(IPeerToPeerSession inner, IMpLog log, Func<GameServiceUser, bool>? admitted = null)
 	{
 		Inner = inner;

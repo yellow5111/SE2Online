@@ -380,7 +380,7 @@ internal sealed partial class HostWorld
     }
 
     /// <summary>A respawn ship's free working cockpit, on its first (main) grid first.</summary>
-    private static SeatComponent? RespawnCockpit(IEnumerable<Entity> grids)
+    internal static SeatComponent? FindCockpit(IEnumerable<Entity> grids)
     {
         foreach (var grid in grids)
         {
@@ -460,7 +460,7 @@ internal sealed partial class HostWorld
             return;
         }
         _shipReadyAt[(long)identity] = now + ShipCooldownMs;
-        if (RespawnCockpit(grids.OrderBy(g => g != main)) is { } cockpit)
+        if (FindCockpit(grids.OrderBy(g => g != main)) is { } cockpit)
         {
             j.SeatTarget = cockpit.Entity;
             j.SeatBody = character;
@@ -475,6 +475,14 @@ internal sealed partial class HostWorld
     /// character, so its cockpit takes the control over (CockpitControllableComponent.PossessPilot). The seat keeps the
     /// pilot's offset from it as the spot it stands up at, so the pilot is put in front of the seat first.
     /// </summary>
+    internal static void Seat(SeatComponent seat, Entity body)
+    {
+        var block = seat.Entity.Data.GetWorldTransform();
+        body.Data.Teleport(new WorldTransform(block.Position + (Vector3D)block.Orientation.GetForward() * 1.5, block.Orientation));
+        SetPilotInternal(seat, body);
+        seat.BroadcastSetPilot(body);
+    }
+
     private void SeatRespawnPilot(Joiner j)
     {
         var seatEntity = j.SeatTarget!;
@@ -486,10 +494,7 @@ internal sealed partial class HostWorld
             _log.Info($"host spawn: ClientId {j.ClientId} '{j.Name}' stays beside its respawn ship (its cockpit is taken, broken or gone)");
             return;
         }
-        var block = seatEntity.Data.GetWorldTransform();
-        body.Data.Teleport(new WorldTransform(block.Position + (Vector3D)block.Orientation.GetForward() * 1.5, block.Orientation));
-        SetPilotInternal(seat, body);
-        seat.BroadcastSetPilot(body);
+        Seat(seat, body);
         _log.Info($"host spawn: ClientId {j.ClientId} '{j.Name}' seated in its respawn ship's {seatEntity.GetComposition()?.DebugNameShort} ({(j.Possessed ? "its client possesses the pilot" : "no possession report in time")})");
     }
 

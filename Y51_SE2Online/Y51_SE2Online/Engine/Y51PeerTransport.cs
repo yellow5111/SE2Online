@@ -104,6 +104,19 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 
 	// --- outbound: what the game hands this peer ---
 
+	// Signals only server-side components listen to, whose arguments a player's game cannot even read: a grid's turrets
+	// finding a new priority target names the character's PriorityTargetComponent, which only the server's character
+	// composition has (AutoTargetingComponent, the only listener, is server-only too). Every player joining a world with
+	// turrets lost that chunk as "could not read" (IndexOutOfRange in ComponentFunctions.GetMatchingComponent).
+	// The 4.0.0.3155 sweep (every replicated signal against every server/client composition pair, by component key) found
+	// this one; rerun Tools/sweep_server_only_signals.py after a game update.
+	private static int _serverSideOnlyLogged;
+
+	private static readonly HashSet<string> ServerSideOnly = new(StringComparer.Ordinal)
+	{
+		"Replay_Keen_Game2_Simulation_WorldObjects_CubeGrids_Weapons_TargetingGridComponent_OnNewPriorityTargetSignal_Trampoline",
+	};
+
 	public void FilterAndSendCommandBuffer(ReplicationCommandBuffer localCommandBuffer)
 	{
 		// Keen may still call a peer it has not dropped yet; nothing queues for one that is gone.
@@ -111,6 +124,12 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 		var frame = _pipeline.GetOutboundFrame(localCommandBuffer);
 		foreach (RecordedSignal signal in frame.Signals)
 		{
+			if (Component.IsServer && ServerSideOnly.Contains(signal.Signal.String))
+			{
+				if (System.Threading.Interlocked.Exchange(ref _serverSideOnlyLogged, 1) == 0)
+					GameLog.Instance.Info("engine: signals only the server listens to stay on the server: " + string.Join(", ", ServerSideOnly));
+				continue;
+			}
 			if (Component.IsServer && _signalDedupe.IsRepeat(in signal, IsOwn)) continue;
 			_sequence.Add(signal);
 			EngineCoverage.Note("signal", signal.Signal.String, Out);

@@ -85,10 +85,11 @@ internal sealed partial class HostWorld
 				if (live) onlineCharacters.Add(character);
 				online.Add((joiner.ClientId, live ? joiner.NetId : 0, IdentityOf(joiner.ClientId), Tagged(IdentityOf(joiner.ClientId), joiner.Name)));
 			}
-			// Players still loading in have no joiner yet; their parked body must not read as offline to them.
+			// Players still loading in have no joiner yet; their parked body must not read as offline to them. A record whose
+			// player left (no peer) stays for the rejoin: counting it online hid that body's "(offline)" tag altogether.
 			foreach (var player in _host?.Players() ?? Array.Empty<HostSession.PlayerRecord>())
 			{
-				if (!_joiners.ContainsKey(player.ClientId)) online.Add((player.ClientId, 0, IdentityOf(player.ClientId), ""));
+				if (player.Peer != null && !_joiners.ContainsKey(player.ClientId)) online.Add((player.ClientId, 0, IdentityOf(player.ClientId), ""));
 			}
 			var hostCharacter = _hostCharacterServer;
 			if (hostCharacter != null && !EngineCodec.IsDead(hostCharacter) && !onlineCharacters.Contains(hostCharacter) && _ids.TryGet(hostCharacter, out var hostId))

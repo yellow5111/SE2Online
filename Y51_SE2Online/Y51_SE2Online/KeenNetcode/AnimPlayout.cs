@@ -50,6 +50,15 @@ internal static class AnimPlayout
 	[ThreadStatic]
 	internal static long? Replaying;
 
+	/// <summary>Main menu: let go of the last world's session and held changes.</summary>
+	internal static void Reset()
+	{
+		_session = null;
+		_interpolation = null;
+		_newestSample = 0;
+		lock (Held) Held.Clear();
+	}
+
 	public static void Install(Harmony harmony)
 	{
 		if (MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "animsync:off"))

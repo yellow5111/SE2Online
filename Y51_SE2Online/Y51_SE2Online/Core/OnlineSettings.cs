@@ -81,6 +81,8 @@ public sealed class OnlineSettings
     public bool ClientMovement { get; set; } = true;
     /// <summary>Hosting: SE2 Online's own replication engine carries the world to players (ordering, lanes, motion timing); off falls back to the game's own netcode. Players need the same setting from the host, which they get on joining.</summary>
     public bool OwnReplication { get; set; } = true;
+    /// <summary>Hosting: only the player who sat down first in one of a ship's control seats flies it; others in its seats are passengers.</summary>
+    public bool OnePilot { get; set; } = true;
     /// <summary>Hosting: players see the placement outline of anyone building near them.</summary>
     public bool BuildGhosts { get; set; } = true;
     /// <summary>Hosting: the respawn ships players may choose (Pathfinder, ...); empty offers every ship.</summary>
@@ -234,6 +236,7 @@ public sealed class OnlineSettings
         options.WaterSync = WaterSync;
         options.ClientMovement = ClientMovement;
         options.OwnReplication = OwnReplication;
+        options.OnePilot = OnePilot;
         options.VoiceRadiusMeters = VoiceRadiusMeters;
         options.UsageMultipliers = UsageMultipliers;
         options.InventorySizes = InventorySizes;

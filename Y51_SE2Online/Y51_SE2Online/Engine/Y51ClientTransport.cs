@@ -91,7 +91,13 @@ internal sealed class Y51ClientTransport : Y51PeerTransport, IClientPeerTranspor
 	private async KTask Confirm(KTask operation, ulong batch)
 	{
 		await KTask.SetLifetime(_client);
-		await operation;
+		// Confirmed even when building it failed: the server holds staged spawns (world areas, a fast travel destination)
+		// until every player confirms, and an unconfirmed batch held them for everyone.
+		try { await operation; }
+		catch (Exception ex) when (Keen.VRage.Library.Utils.ExceptionUnrollHelper.CanHandle(ex))
+		{
+			GameLog.Instance.Warn($"engine {Name}: building object batch #{batch} failed ({ex.GetType().Name}: {ex.Message}); confirmed anyway so the server does not wait for it; those objects are missing in this game until it rejoins");
+		}
 		// The batch's entities are in the scene now: their motion that came while they were built applies in this frame.
 		ApplyParked();
 		Acks++;

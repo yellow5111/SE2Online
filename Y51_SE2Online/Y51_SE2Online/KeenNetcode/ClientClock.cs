@@ -48,6 +48,16 @@ internal static class ClientClock
 	/// <summary>The player's clock minus the server's at the last sample, in ms (positive: the player runs ahead).</summary>
 	public static double LastErrorMs;
 
+	/// <summary>Main menu: let go of the last world's clock component.</summary>
+	internal static void Reset()
+	{
+		_clock = null;
+		_asking = false;
+		_pending = 0;
+		_serverAt = _rawAt = null;
+		_rate = 1;
+	}
+
 	public static void Install(Harmony harmony) => harmony.Patch(
 		AccessTools.Method(typeof(GameTimeSessionComponent), "Init", new[] { typeof(GameTimeSessionComponentObjectBuilder) }),
 		prefix: new HarmonyMethod(typeof(ClientClock), nameof(InitPrefix)));

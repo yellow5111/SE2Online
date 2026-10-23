@@ -20,6 +20,7 @@ internal static class PlayerAudio
 	public static void Install(Harmony harmony)
 	{
 		harmony.Patch(AccessTools.Method(typeof(CockpitAudioComponent), "PossessPilot"), prefix: new HarmonyMethod(typeof(PlayerAudio), nameof(CockpitPilotPrefix)));
+		harmony.Patch(AccessTools.Method(typeof(CockpitAudioComponent), "UnpossessPilot"), prefix: new HarmonyMethod(typeof(PlayerAudio), nameof(CockpitReadyPrefix)));
 		harmony.Patch(AccessTools.Method(typeof(MagneticBlockEffectsComponent), "PlayLockAudio"), prefix: new HarmonyMethod(typeof(PlayerAudio), nameof(MagneticLockPrefix)));
 	}
 
@@ -31,7 +32,12 @@ internal static class PlayerAudio
 		return players != null && TeamPermissions.OwnerOf(character) != (long)players.LocalPlayerIdentity;
 	}
 
-	private static bool CockpitPilotPrefix(Entity pilot) => !AdminAccess.InSession || !IsOtherCharacter(pilot);
+	// A pilot set in the same batch that creates the cockpit arrives before the cockpit is in the scene, where SE2 4.0
+	// creates its interior sound: the game's handler then threw and the crash handler closed the game (a co-op host's own
+	// game, which applies the server's signals in process, without the network path's guards).
+	private static bool CockpitPilotPrefix(CockpitAudioComponent __instance, Entity pilot) => __instance._snapshot != null && (!AdminAccess.InSession || !IsOtherCharacter(pilot));
+
+	private static bool CockpitReadyPrefix(CockpitAudioComponent __instance) => __instance._snapshot != null;
 
 	private static bool MagneticLockPrefix(MagneticBlockEffectsComponent __instance, string state)
 	{

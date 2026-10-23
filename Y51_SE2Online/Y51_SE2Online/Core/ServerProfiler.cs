@@ -34,6 +34,8 @@ public enum ServerSection
 	Capture,
 	/// <summary>Desync detection (state hashes for the clients to compare).</summary>
 	Desync,
+	/// <summary>SE2 Online's own upkeep on the game's threads: controller, host world, session update work.</summary>
+	Online,
 	Count
 }
 

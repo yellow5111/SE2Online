@@ -94,6 +94,60 @@ public static class WorldMods
 		return result;
 	}
 
+	/// <summary>
+	/// An A2S_RULES reply: the rules, or null with the challenge to ask again with. Anything else is null too, a split
+	/// reply included (SE2 Online's rules fit one packet).
+	/// </summary>
+	public static Dictionary<string, string>? ParseA2sRules(byte[] reply, out byte[]? challenge)
+	{
+		challenge = null;
+		if (reply.Length < 5 || BitConverter.ToInt32(reply, 0) != -1) return null;
+		if (reply[4] == (byte)'A')
+		{
+			if (reply.Length >= 9) challenge = reply[5..9];
+			return null;
+		}
+		if (reply[4] != (byte)'E' || reply.Length < 7) return null;
+		int count = reply[5] | reply[6] << 8, at = 7;
+		var rules = new Dictionary<string, string>();
+		for (int i = 0; i < count; i++)
+		{
+			if (CString(reply, ref at) is not { } key || CString(reply, ref at) is not { } value) return null;
+			rules[key] = value;
+		}
+		return rules;
+	}
+
+	public const int MaxSplitPackets = 16;
+
+	/// <summary>
+	/// A split A2S reply (Source format: id, total, number, size, then the part) joined once every part of the reply the
+	/// last packet belongs to is in; null while parts are missing, and for compressed or malformed parts.
+	/// </summary>
+	public static byte[]? JoinSplit(IReadOnlyList<byte[]> packets)
+	{
+		if (packets.Count == 0 || packets[^1].Length < 12) return null;
+		int id = BitConverter.ToInt32(packets[^1], 4), total = packets[^1][8];
+		if (id < 0 || total is 0 or > MaxSplitPackets) return null;
+		var parts = new byte[]?[total];
+		foreach (byte[] packet in packets)
+		{
+			if (packet.Length < 12 || BitConverter.ToInt32(packet, 4) != id) continue;
+			if (packet[8] != total || packet[9] >= total) return null;
+			parts[packet[9]] = packet[12..];
+		}
+		return parts.Any(p => p == null) ? null : parts.SelectMany(p => p!).ToArray();
+	}
+
+	private static string? CString(byte[] bytes, ref int at)
+	{
+		int end = Array.IndexOf(bytes, (byte)0, at);
+		if (end < 0) return null;
+		string text = System.Text.Encoding.UTF8.GetString(bytes, at, end - at);
+		at = end + 1;
+		return text;
+	}
+
 	public static string Summary(IReadOnlyList<WorldMod> mods) =>
 		mods == null || mods.Count == 0 ? "None" : string.Join(", ", mods.Select(m => m.Describe()));
 

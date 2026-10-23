@@ -90,6 +90,7 @@ internal static class DedicatedRuntime
             // Steam runs as a game server on every 4.0 dedicated server, so the Workshop is fetched through it either way.
             DedicatedMods.Install(harmony);
             if (Headless) HeadlessEngine.Install(harmony);
+            NoCrashDialog();
             NativeSessionSettings.Install(harmony);
             NativeDefinitionSettings.Install(harmony);
             harmony.Patch(AccessTools.Method(typeof(GameApp), "StartPlayerExperienceAsync"),
@@ -126,13 +127,46 @@ internal static class DedicatedRuntime
 
     private static void GameUpdatePostfix() => ServerProfiler.TickEnd();
 
+    // After a crash SE2 waits up to 5 minutes for someone to close its crash message box before its crash report goes out
+    // and the process ends; nobody sees that box on an unattended server, so the runner could not restart it for 5 minutes.
+    // The report is still written and sent.
+    private static void NoCrashDialog()
+    {
+        try
+        {
+            var handler = Keen.VRage.Library.Utils.Singleton<Keen.VRage.Core.Platform.CrashReporting.CrashHandler>.Instance;
+            AccessTools.Property(handler.GetType(), "ShowMessageBox")!.SetValue(handler, false);
+            GameLog.Instance.Info("dedicated: no crash message box (a crash reports and ends at once, so the runner can restart it)");
+        }
+        catch (Exception ex) { GameLog.Instance.Warn("dedicated: the crash message box stays on (" + ex.Message + ")"); }
+    }
+
+#if !PULSAR
+    private static long _crashAtMs;
+
+    // Test rig (-y51online:selftest-crash): the loaded server throws on its main thread 60 s later, a crash the game's crash
+    // handler takes, to time how soon the process ends and the runner can restart it.
+    private static void SelfTestCrash()
+    {
+        if (!_loaded || !MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "selftest-crash")) return;
+        long now = MpClock.NowMs();
+        if (_crashAtMs == 0) { _crashAtMs = now + 60_000; GameLog.Instance.Info("selftest: crash: the server throws in 60 s"); return; }
+        if (now < _crashAtMs || _crashAtMs < 0) return;
+        _crashAtMs = -1;
+        throw new InvalidOperationException("selftest: crash (-y51online:selftest-crash)");
+    }
+#endif
+
     public static void Tick(GameAppComponent app)
     {
+#if !PULSAR
+        SelfTestCrash();
+#endif
         var frame = Requested ? ServerProfiler.BeginFrame(_saving) : null;
         long started = ServerProfiler.Now;
         // A stalled server frame pauses every player's and grid's updates; joiners see it as a pop when they resume.
         bool slow = frame != null && _loaded && frame.FrameMs > ServerProfiler.SlowFrameMs;
-        string jobs = JobProfiler.TakeFrame(slow);
+        string jobs = JobProfiler.TakeFrame(slow || ServerPerf.TraceJobs(frame));
         if (slow && MpClock.NowMs() - _lastSlowLogMs > 2000)
         {
             _lastSlowLogMs = MpClock.NowMs();
@@ -147,7 +181,7 @@ internal static class DedicatedRuntime
             }
             catch (Exception ex) { GameLog.Instance.Warn("dedicated: could not time the game's jobs: " + ex); }
         }
-        if (Headless && Active) ServerPerf.Tick(app, frame);
+        if (Headless && Active) ServerPerf.Tick(app, frame, jobs);
         try { TickCore(app); }
         finally
         {

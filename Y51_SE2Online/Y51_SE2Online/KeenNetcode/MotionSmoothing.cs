@@ -57,6 +57,16 @@ internal static class MotionSmoothing
 	private static readonly ConcurrentDictionary<DEntity, bool> Buffered = new();
 	internal static long HeldSamples, Released, Late;
 
+	/// <summary>Main menu: let go of the last world's scene and characters.</summary>
+	internal static void Reset()
+	{
+		_scene = null;
+		_characters = new();
+		Widened.Clear();
+		Buffered.Clear();
+		lock (Gate) Held.Clear();
+	}
+
 	public static void Install(Harmony harmony)
 	{
 		bool on = !MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "interpolate:off");

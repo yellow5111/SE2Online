@@ -539,6 +539,8 @@ internal static class PlanetProbe
 				}
 				continue;
 			}
+			// The grid lap stands it on its lander, which may hover high up (a co-op world's lander drop).
+			if (ServerGrid.ContainsKey(clientId)) continue;
 			if (Place(session, character, at.Position, PlaceAboveMeters, out double height))
 				GameLog.Instance.Info($"selftest: planet server: put ClientId {clientId} on the ground ({height:0} m below it)");
 			else if (FarMeters > 0 && ReferenceEquals(character, scripted)) FarMove(session, clientId, character, at, now);

@@ -76,7 +76,11 @@ internal static class MpMenu
     public static bool Joined => MpPlugin.Controller?.Current?.Join == true && HasWorld;
     private static bool HostOnlyPrefix() => !Joined;
 
-    private static void WorldExitPrefix() => MpPlugin.Controller?.WorldExiting(MpClock.NowMs());
+    private static void WorldExitPrefix()
+    {
+        ClientWorld.PlayerLeft();
+        MpPlugin.Controller?.WorldExiting(MpClock.NowMs());
+    }
     private static void ApplicationExitPrefix()
     {
         NetSession.Current?.Stop("game exiting");
@@ -447,10 +451,25 @@ internal static class MpMenu
     }
 
     public static void Leave() => Queue(() => { if (!Busy) Request(null); });
-    public static void Retry() => Queue(() =>
+    /// <summary>Joins the last server again.</summary>
+    public static void Retry() => RetryThen(null);
+
+    /// <summary>Like <see cref="Retry()"/>; <paramref name="going"/> runs only when that rejoin really starts.</summary>
+    public static void RetryThen(Action? going) => Queue(() =>
     {
         var options = MpPlugin.Controller?.Current;
-        if (!Busy && options?.Join == true && ClientWorld.Current?.IdleAfterJoin == true) Request(options);
+        if (!Busy && options?.Join == true && ClientWorld.Current?.IdleAfterJoin == true)
+        {
+            // A join the game started and SE2 Online rode along with never dials by itself (NetSession: _keenJoinIssued):
+            // Retry is SE2 Online's own join to that host. A copy: the old world still holds these options.
+            if (options.KeenAttached)
+            {
+                options = options.Copy();
+                options.KeenAttached = false;
+            }
+            Request(options);
+            going?.Invoke();
+        }
     });
     public static void Admin(Sync.AdminRequest request) => Queue(() => AdminAccess.Send(request));
 

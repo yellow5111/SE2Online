@@ -90,6 +90,7 @@ internal static class AdminAccess
     // The host or server owns a joiner's world, so the native "save before quitting" choice does not apply.
     private static bool LeavePrefix(InGameMenuScreenViewModel __instance) => !ConfirmLeave(__instance, () =>
     {
+        ClientWorld.PlayerLeft();
         MpPlugin.Controller?.WorldExiting(MpClock.NowMs());
         __instance._gameApp.Disconnect();
     }, "Leave");

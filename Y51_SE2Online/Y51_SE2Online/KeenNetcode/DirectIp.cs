@@ -195,6 +195,9 @@ internal sealed class DirectIpClientSession : LocalMessageSource, IGameSession, 
 
 	public bool AcceptConnection(GameServiceUser user) => user == LocalPeers.Server;
 
+	/// <summary>The TCP connection to the host is still open.</summary>
+	public bool IsConnected(GameServiceUser user) => !_lost && _peers.Has(user);
+
 	public void CloseConnection(GameServiceUser user) => _peers.Close(user);
 
 	public bool SendMessage(GameServiceUser user, ReadOnlySpan<byte> data, byte channel = 0, MessageReliability reliability = MessageReliability.Reliable)

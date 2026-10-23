@@ -330,6 +330,9 @@ internal sealed class LocalServerSession : LocalMessageSource, IPeerToPeerSessio
 
 	public bool AcceptConnection(GameServiceUser user) => _peers.ContainsKey(user) || _direct?.Has(user) == true || _inner.AcceptConnection(user);
 
+	/// <summary>A direct IP player whose TCP connection is still open.</summary>
+	public bool DirectConnected(GameServiceUser user) => _direct?.Has(user) == true;
+
 	public void CloseConnection(GameServiceUser user)
 	{
 		if (_peers.TryRemove(user, out var stream)) stream.Close();

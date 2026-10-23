@@ -31,14 +31,15 @@ public readonly record struct OwnInput(Vector3 Movement, Vector3 Rotation, bool 
 /// <summary>
 /// Player to server: the newest inputs, newest first, so one lost packet loses none of them. Flag bit
 /// <see cref="TogglesFlag"/> on every input says this game puts its toggles in its inputs and predicts them (servers
-/// before 0.16.4 ignore it and keep taking Keen's own toggle requests).
+/// before 0.16.4 ignore it and keep taking Keen's own toggle requests). <see cref="PaceFlag"/>: this game skips one of its
+/// ticks when the server's ack asks (<see cref="OwnState.Skip"/>), so the server need not merge inputs to catch up.
 /// </summary>
 public static class OwnInputs
 {
 	public const int Redundancy = 6, InputSize = 25, HeaderSize = 8;
-	public const byte TogglesFlag = 0x80;
+	public const byte TogglesFlag = 0x80, PaceFlag = 0x40;
 
-	public static byte[] Encode(ushort epoch, uint newest, IReadOnlyList<OwnInput> newestFirst, bool toggles = true)
+	public static byte[] Encode(ushort epoch, uint newest, IReadOnlyList<OwnInput> newestFirst, bool toggles = true, bool paced = false)
 	{
 		int count = Math.Min(newestFirst.Count, Redundancy);
 		var w = new WireWriter(HeaderSize + count * InputSize).U8((byte)SyncMsg.OwnMotion).U16(epoch).U32(newest).U8((byte)count);
@@ -47,13 +48,13 @@ public static class OwnInputs
 			var input = newestFirst[i];
 			foreach (float f in new[] { input.Movement.X, input.Movement.Y, input.Movement.Z, input.Rotation.X, input.Rotation.Y, input.Rotation.Z })
 				w.I32(BitConverter.SingleToInt32Bits(f));
-			w.U8((byte)((input.Jump ? 1 : 0) | (input.Sprint ? 2 : 0) | (input.Boost ? 4 : 0) | ((int)(input.Toggles & OwnToggles.All) << 3) | (toggles ? TogglesFlag : 0)));
+			w.U8((byte)((input.Jump ? 1 : 0) | (input.Sprint ? 2 : 0) | (input.Boost ? 4 : 0) | ((int)(input.Toggles & OwnToggles.All) << 3) | (toggles ? TogglesFlag : 0) | (paced ? PaceFlag : 0)));
 		}
 		return w.ToArray();
 	}
 
 	/// <summary>Null when <paramref name="d"/> is not a whole input message.</summary>
-	public static (ushort Epoch, uint Newest, OwnInput[] NewestFirst, bool Toggles)? Decode(ReadOnlySpan<byte> d)
+	public static (ushort Epoch, uint Newest, OwnInput[] NewestFirst, bool Toggles, bool Paced)? Decode(ReadOnlySpan<byte> d)
 	{
 		if (d.Length < HeaderSize || d[0] != (byte)SyncMsg.OwnMotion) return null;
 		var r = new WireReader(d.Slice(1));
@@ -62,7 +63,7 @@ public static class OwnInputs
 		int count = r.U8();
 		if (count > Redundancy || d.Length != HeaderSize + count * InputSize) return null;
 		var inputs = new OwnInput[count];
-		bool toggles = false;
+		bool toggles = false, paced = false;
 		for (int i = 0; i < count; i++)
 		{
 			var movement = new Vector3(F(ref r), F(ref r), F(ref r));
@@ -70,8 +71,9 @@ public static class OwnInputs
 			byte flags = r.U8();
 			inputs[i] = new OwnInput(movement, rotation, (flags & 1) != 0, (flags & 2) != 0, (flags & 4) != 0, (OwnToggles)((flags >> 3) & (int)OwnToggles.All));
 			toggles |= (flags & TogglesFlag) != 0;
+			paced |= (flags & PaceFlag) != 0;
 		}
-		return (epoch, newest, inputs, toggles);
+		return (epoch, newest, inputs, toggles, paced);
 		static float F(ref WireReader r) => BitConverter.Int32BitsToSingle(r.I32());
 	}
 }
@@ -126,6 +128,10 @@ public readonly record struct OwnPose(uint Seq, ushort Epoch, uint Parent, Vec3D
 public static class OwnState
 {
 	public const byte Crouched = 4, Dampeners = 8, Boosting = 16, Forced = 64;
+
+	/// <summary>Server to a game that sent <see cref="OwnInputs.PaceFlag"/>: its inputs queue up here (this server ticks
+	/// slower than the game), skip one tick. Not part of the state; taken off before the state is compared.</summary>
+	public const byte Skip = 128;
 
 	private const byte Toggled = 3 | Crouched | Dampeners;
 	private const int Ground = 1, Jetpack = 2;
@@ -221,12 +227,16 @@ public sealed class OwnStateCheck
 /// than 60 ticks a second) the queue grows past <see cref="Target"/>. It drains for free by dropping idle inputs while
 /// the character rests, otherwise slowly: every <see cref="DrainEvery"/>th tick merges one extra input, so the character
 /// covers a little less ground than predicted spread thin enough for the player's game to ease it out unseen (a burst of
-/// merges after a stall would add up to a visible jump). Over <see cref="Cap"/> every tick merges one, over
+/// merges after a stall would add up to a visible jump). A merge puts the server a tick of travel behind (83 cm at boost
+/// speed), so those merges wait while the character moves faster than <see cref="MergeSpeed"/>, doubled for every two
+/// ticks the queue is deeper than one over <see cref="Target"/> (walking merges from 3 over, boosting never), and never
+/// past <see cref="FastCap"/> (8 ticks, 133 ms, of extra delay at most). Over <see cref="Cap"/> every tick merges one, over
 /// <see cref="HardCap"/> the queue is merged down at once. Not thread-safe; the caller locks.
 /// </summary>
 public sealed class OwnInputBuffer
 {
-	public const int Target = 4, DrainEvery = 8, Cap = 60, HardCap = 180, GuessTicks = 10, RewindTicks = 2, Window = 600;
+	public const int Target = 4, DrainEvery = 8, FastCap = 12, Cap = 60, HardCap = 180, GuessTicks = 10, RewindTicks = 2, Window = 600;
+	public const float MergeSpeed = 3;
 
 	private readonly Dictionary<uint, OwnInput> _queued = new();
 	private readonly Dictionary<uint, OwnInput> _guessed = new();
@@ -238,7 +248,11 @@ public sealed class OwnInputBuffer
 	private bool _jumpOwed;
 	private OwnToggles _togglesOwed;
 
-	public long Applied, Real, Guessed, Late, Rewound, Skipped, Merged;
+	public long Applied, Real, Guessed, Late, Rewound, Skipped, Merged, PutOff;
+
+	/// <summary>The last <see cref="Take"/> found more inputs waiting than <see cref="Target"/> and left them for the
+	/// player's game to skip a tick (paced players only).</summary>
+	public bool Surplus;
 
 	/// <summary>The input for the next tick is here (no guess needed).</summary>
 	public bool HasNext => _started && _queued.ContainsKey(_next);
@@ -297,9 +311,13 @@ public sealed class OwnInputBuffer
 	/// <summary>
 	/// One server tick: the input to apply and the newest sequence it covers (the ack), or null before the first input.
 	/// <paramref name="resting"/>: the character stands still, so dropping an idle input changes nothing.
+	/// <paramref name="speed"/>: how fast it moves against what it stands on (m/s), or 0 to merge at any speed.
+	/// <paramref name="paced"/>: the player's game skips a tick when asked, so the queue is not merged down below
+	/// <see cref="FastCap"/> (<see cref="Surplus"/> says when to ask).
 	/// </summary>
-	public (OwnInput Input, uint Ack)? Take(bool resting)
+	public (OwnInput Input, uint Ack)? Take(bool resting, float speed = 0, bool paced = false)
 	{
+		Surplus = false;
 		if (!_started) return null;
 		var input = Pop();
 		int depth = Depth;
@@ -311,6 +329,8 @@ public sealed class OwnInputBuffer
 				Pop();
 				Skipped++;
 			}
+			else if (paced && depth <= FastCap) Surplus = true;
+			else if (depth <= FastCap && speed > MergeSpeed * Math.Pow(2, (depth - Target - 1) / 2.0)) PutOff++;
 			else if (++_drainTicks % DrainEvery == 0) extra = 1;
 		}
 		for (int i = 0; i < extra; i++)
@@ -533,4 +553,213 @@ public static class OwnMotionRules
 public static class OwnMotionInbox
 {
 	public static readonly ConcurrentQueue<OwnPose> Poses = new();
+}
+
+/// <summary>
+/// Server side, per player whose game skips ticks (<see cref="OwnInputs.PaceFlag"/>): when to ask it. The queue has to
+/// stay over <see cref="OwnInputBuffer.Target"/> for <see cref="SurplusTicks"/> ticks in a row; then as many skips are
+/// asked as it never dropped below over the target (at most <see cref="MaxAsk"/>), and nothing more for
+/// <see cref="AskEveryMs"/> (a round trip and more, so skips already on their way are not asked for twice).
+/// Not thread-safe; the caller locks.
+/// </summary>
+public sealed class SkipAsker
+{
+	public const int SurplusTicks = 30, MaxAsk = 8;
+	public const long AskEveryMs = 1500;
+
+	private int _ticks, _lowest = int.MaxValue;
+	private long _askedMs = long.MinValue / 2;
+
+	public long Asked;
+
+	/// <summary>After each tick: whether the buffer left a surplus (<see cref="OwnInputBuffer.Surplus"/>) and its depth.
+	/// Returns the number of skips to ask for now.</summary>
+	public int Observe(bool surplus, int depth, long nowMs)
+	{
+		if (!surplus)
+		{
+			_ticks = 0;
+			_lowest = int.MaxValue;
+			return 0;
+		}
+		_ticks++;
+		_lowest = Math.Min(_lowest, depth);
+		if (_ticks < SurplusTicks || nowMs - _askedMs < AskEveryMs) return 0;
+		int n = Math.Clamp(_lowest - OwnInputBuffer.Target, 1, MaxAsk);
+		_askedMs = nowMs;
+		_ticks = 0;
+		_lowest = int.MaxValue;
+		Asked += n;
+		return n;
+	}
+}
+
+/// <summary>
+/// Player side: the ticks the server asked this game to skip and when one is taken. A skip shows as the character
+/// holding still for a tick, so it is taken while the character stands (no input, slow), or while it walks on the ground
+/// once the oldest ask is <see cref="WalkAfterMs"/> old and at most one in <see cref="WalkEveryTicks"/> ticks; never
+/// while blocked (boosting, charging the boost, a jump due, or standing on a body that moves: <see cref="FrameAllows"/>).
+/// An ask not taken within <see cref="AskLifetimeMs"/> is dropped: the server's queue had a surplus then, and a skip
+/// taken much later would run it dry. Not thread-safe.
+/// </summary>
+public sealed class SkipPlanner
+{
+	public const int MaxWanted = 8, WalkEveryTicks = 10;
+	public const long WalkAfterMs = 3000;
+
+	/// <summary>Past <see cref="WalkAfterMs"/>, so a walking player still gets a window to take its asks.</summary>
+	public const long AskLifetimeMs = 5000;
+
+	/// <summary>The body under the character counts as still below these (m/s, rad/s).</summary>
+	public const float StillSpeed = 0.05f, StillSpin = 0.01f;
+
+	private readonly Queue<long> _asks = new();
+	private uint _lastSkipSeq;
+	private bool _skipped;
+
+	public long Asked, Taken, Expired;
+
+	public int Wanted => _asks.Count;
+
+	/// <summary>A skip holds the character still for a tick; on a body that moves (a flying ship's deck, a lander) the
+	/// deck would move on without it. Static ground, planets and stations, or a ship at rest, are fine.</summary>
+	public static bool FrameAllows(bool onDynamicBody, float bodySpeed, float bodySpin) => !onDynamicBody || bodySpeed < StillSpeed && bodySpin < StillSpin;
+
+	public void Ask(long nowMs)
+	{
+		Asked++;
+		Expire(nowMs);
+		if (_asks.Count < MaxWanted) _asks.Enqueue(nowMs);
+	}
+
+	public void Reset()
+	{
+		_asks.Clear();
+		_skipped = false;
+	}
+
+	private void Expire(long nowMs)
+	{
+		while (_asks.Count > 0 && nowMs - _asks.Peek() > AskLifetimeMs)
+		{
+			_asks.Dequeue();
+			Expired++;
+		}
+	}
+
+	/// <summary>True when this tick (input <paramref name="seq"/> about to be made) is skipped.</summary>
+	public bool TryTake(bool standing, bool walking, bool blocked, uint seq, long nowMs)
+	{
+		Expire(nowMs);
+		if (_asks.Count == 0 || blocked) return false;
+		bool walkOk = walking && nowMs - _asks.Peek() > WalkAfterMs && (!_skipped || Seq.Diff(seq, _lastSkipSeq) >= WalkEveryTicks);
+		if (!standing && !walkOk) return false;
+		_asks.Dequeue();
+		Taken++;
+		_lastSkipSeq = seq;
+		_skipped = true;
+		return true;
+	}
+}
+
+/// <summary>
+/// Both sides: the body a character's motion is compared against (a ship it stands on), chosen from that side's own
+/// contacts so both choose alike: kept for <see cref="HoldTicks"/> calls after the contact goes (a step, a jump), so the
+/// frame does not flip with every footfall. Not thread-safe; the caller locks.
+/// </summary>
+public sealed class FrameHold<TKey, TFrame> where TKey : notnull where TFrame : class
+{
+	public const int HoldTicks = 60;
+
+	private readonly Dictionary<TKey, (TFrame Frame, int Ticks)> _held = new();
+
+	/// <summary><paramref name="support"/>: what the character stands on this tick (a dynamic body), or null.
+	/// <paramref name="alive"/>: whether a held frame still exists.</summary>
+	public TFrame? Choose(TKey key, TFrame? support, Func<TFrame, bool> alive)
+	{
+		if (support != null)
+		{
+			_held[key] = (support, 0);
+			return support;
+		}
+		if (_held.TryGetValue(key, out var held) && held.Ticks < HoldTicks && alive(held.Frame))
+		{
+			_held[key] = (held.Frame, held.Ticks + 1);
+			return held.Frame;
+		}
+		_held.Remove(key);
+		return null;
+	}
+
+	public void Forget(TKey key) => _held.Remove(key);
+
+	/// <summary>Drops every held frame whose key is not in <paramref name="keep"/> (characters gone, a world left).</summary>
+	public void KeepOnly(IReadOnlySet<TKey> keep)
+	{
+		List<TKey>? drop = null;
+		foreach (var key in _held.Keys)
+			if (!keep.Contains(key)) (drop ??= new()).Add(key);
+		if (drop != null) foreach (var key in drop) _held.Remove(key);
+	}
+
+	public void Clear() => _held.Clear();
+
+	public int Count => _held.Count;
+}
+
+/// <summary>
+/// Player side: the jetpack fuel the player's game predicts. The replicated stats lag a round trip; each tick's burn is
+/// recorded by input and the burns after the input the stats are known to be from are taken off them. Only a stat the
+/// server is seen burning is predicted: some worlds' jetpacks burn nothing, and a script or a refill sets a stat at once
+/// (a drop no bigger than the burn of the ticks since the last change counts as burning).
+/// </summary>
+public sealed class FuelLedger
+{
+	public const int Ring = 256;
+
+	private readonly (uint Seq, float Flight, float Boost)[] _burns = new (uint, float, float)[Ring];
+	private (float Flight, float Boost) _base = (float.NaN, float.NaN);
+	private uint _baseSeq, _changedSeq;
+
+	public bool FlightBurns, BoostBurns;
+
+	/// <summary>Unanswered inputs since the replicated stats' value.</summary>
+	public int Unanswered(uint seq) => Seq.Diff(seq, _baseSeq);
+
+	public void Reset()
+	{
+		_base = (float.NaN, float.NaN);
+		FlightBurns = BoostBurns = false;
+	}
+
+	/// <summary>The burn of the tick that ran input <paramref name="seq"/>.</summary>
+	public void Record(uint seq, float flight, float boost) => _burns[seq % Ring] = (seq, flight, boost);
+
+	/// <summary>The predicted fuel left after input <paramref name="seq"/>, from the replicated stats; a change in them is
+	/// taken as the server's value after input <paramref name="ack"/> (the newest answered).
+	/// <paramref name="flightTick"/>/<paramref name="boostTick"/>: one tick's burn of each.</summary>
+	public (float Flight, float Boost) Left(uint seq, float flight, float boost, uint ack, float flightTick, float boostTick)
+	{
+		if (flight != _base.Flight || boost != _base.Boost)
+		{
+			int since = Math.Clamp(Seq.Diff(seq, _changedSeq), 1, 30);
+			FlightBurns |= flight < _base.Flight && _base.Flight - flight <= 2 * since * flightTick + 1e-3f;
+			BoostBurns |= boost < _base.Boost && _base.Boost - boost <= 2 * since * boostTick + 1e-3f;
+			_changedSeq = seq;
+			_base = (flight, boost);
+			_baseSeq = ack;
+		}
+		float flightLeft = flight, boostLeft = boost;
+		if (_baseSeq != 0 && Seq.Diff(seq, _baseSeq) is > 0 and < Ring)
+			for (uint s = _baseSeq + 1; s != seq + 1; s++)
+			{
+				var burn = _burns[s % Ring];
+				if (burn.Seq == s)
+				{
+					flightLeft -= burn.Flight;
+					boostLeft -= burn.Boost;
+				}
+			}
+		return (flightLeft, boostLeft);
+	}
 }

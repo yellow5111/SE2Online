@@ -33,4 +33,20 @@ public static class TickPacer
 	/// <summary>Backlog limit in frames for a CatchUpMs setting.</summary>
 	public static int BacklogFrames(int catchUpMs, double hz) => Math.Max(1, (int)Math.Round(catchUpMs * hz / 1000.0));
 
+	/// <summary>
+	/// Relative due time (100 ns units, negative as SetWaitableTimer wants) for sleeping on the timer until <paramref name="spin"/>
+	/// before a deadline <paramref name="ahead"/> timer ticks away; 0 when the wait is short enough to spin outright.
+	/// </summary>
+	public static long TimerDue(long ahead, long spin, long frequency) => ahead > spin ? -((ahead - spin) * 10_000_000 / frequency) : 0;
+
+	/// <summary>LoopPriority setting to a thread priority; null for Normal (the game's own) or anything else.</summary>
+	public static System.Threading.ThreadPriority? LoopPriority(string? name) => name?.ToLowerInvariant() switch
+	{
+		"abovenormal" => System.Threading.ThreadPriority.AboveNormal,
+		"highest" => System.Threading.ThreadPriority.Highest,
+		_ => null
+	};
+
+	public static bool IsLoopPriority(string? name) => name?.ToLowerInvariant() is "normal" or "abovenormal" or "highest";
+
 }

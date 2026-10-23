@@ -9,6 +9,9 @@ namespace Y51_SE2Online.Core;
 
 public sealed class MpOptions
 {
+	/// <summary>A copy to change without touching the options a running session holds.</summary>
+	internal MpOptions Copy() => (MpOptions)MemberwiseClone();
+
 	public int MaxPlayers { get; internal set; } = 8;
 
 	public bool FriendsOnly { get; internal set; } = true;
@@ -128,7 +131,7 @@ public sealed class MpOptions
 
 	public bool AudioFix { get; private set; } = true;
 
-	public bool OnePilot { get; private set; } = true;
+	public bool OnePilot { get; internal set; } = true;
 
 	public bool BuildFix { get; private set; } = true;
 

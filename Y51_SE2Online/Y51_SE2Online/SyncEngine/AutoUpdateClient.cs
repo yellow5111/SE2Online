@@ -27,7 +27,14 @@ internal static class AutoUpdateClient
 #if PULSAR
     public static bool Eligible => false;
 #else
-    public static bool Eligible => MpMenu.Settings.AutoUpdate && MpPlugin.PulsarDataDir == null && !PluginPaths.InMemory && !Dedicated.DedicatedRuntime.Requested;
+    public static bool Eligible => MpMenu.Settings.AutoUpdate && MpPlugin.PulsarDataDir == null && !PluginPaths.InMemory && !Dedicated.DedicatedRuntime.Requested && !TestLaunch;
+
+    // A game started by a test rig (self-tests, scripted host or join) keeps the build it was given: an update would swap
+    // the DLL under test for the release.
+    private static bool TestLaunch => MpPlugin.LaunchArgs.Any(a => a.StartsWith(MpOptions.Prefix, StringComparison.OrdinalIgnoreCase)
+        && a.Substring(MpOptions.Prefix.Length) is var option && (option.StartsWith("selftest", StringComparison.OrdinalIgnoreCase)
+        || option.StartsWith("autojoin", StringComparison.OrdinalIgnoreCase) || option.StartsWith("autohost", StringComparison.OrdinalIgnoreCase)
+        || option.StartsWith("uishot", StringComparison.OrdinalIgnoreCase)));
 #endif
 
     private static string DllDir => Path.GetDirectoryName(typeof(AutoUpdateClient).Assembly.Location);

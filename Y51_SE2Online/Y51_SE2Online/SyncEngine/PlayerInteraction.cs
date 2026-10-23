@@ -196,7 +196,8 @@ internal static class PlayerInteraction
 internal static class FactionPopups
 {
     private static readonly HashSet<string> Shown = new();
-    private static bool _open;
+    private static IObservableDisposable? _open;
+    private static string? _openKey;
 
     internal static void Info(string title, string text) => MpMenu.Queue(() =>
         JoinStatusUi.FindShared(MpPlugin.App)?.ShowDialog(new OneOptionDialogViewModel(new OneOptionDialogDefinition
@@ -226,23 +227,40 @@ internal static class FactionPopups
             }
         }
         Shown.IntersectWith(pending.Select(p => p.Key));
-        if (_open) return;
+        // Handled elsewhere (the Factions screen, another officer, the host): its popup goes too.
+        if (_open != null && !Shown.Contains(_openKey!)) Close();
+        if (_open != null) return;
         var next = pending.FirstOrDefault(p => !Shown.Contains(p.Key));
         if (next.Key == null) return;
         var shared = JoinStatusUi.FindShared(MpPlugin.App);
         if (shared == null) return;
         Shown.Add(next.Key);
-        _open = true;
-        shared.ShowDialog(new TwoOptionsDialogViewModel(new TwoOptionsDialogDefinition
+        _openKey = next.Key;
+        var dialog = shared.ShowDialog(new TwoOptionsDialogViewModel(new TwoOptionsDialogDefinition
         {
             Title = OnlineUi.Raw(next.Title), Content = OnlineUi.Raw(next.Text),
             ConfirmOption = OnlineUi.Raw("Accept"), CancelOption = OnlineUi.Raw("Decline")
         })
         {
-            ConfirmAction = () => { _open = false; SocialUi.Send(next.Yes); },
-            CancelAction = () => { _open = false; SocialUi.Send(next.No); },
+            ConfirmAction = () => Answer(next.Key, next.Yes),
+            CancelAction = () => Answer(next.Key, next.No),
             // Esc leaves it pending; the Factions screen still lists it.
-            EscapeAction = () => _open = false
+            EscapeAction = () => _open = null
         });
+        _open = dialog;
+        dialog.OnDisposed += _ => { if (_open == dialog) _open = null; };
+    }
+
+    private static void Answer(string key, SocialRequest request)
+    {
+        _open = null;
+        if (Shown.Contains(key)) SocialUi.Send(request);
+    }
+
+    private static void Close()
+    {
+        var dialog = _open;
+        _open = null;
+        try { dialog?.Dispose(); } catch (Exception ex) { GameLog.Instance.WarnOnce("faction-popup-close", "faction popup: could not close a handled request's popup: " + ex.Message); }
     }
 }

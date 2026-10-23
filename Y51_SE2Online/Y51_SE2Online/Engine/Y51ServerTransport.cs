@@ -97,9 +97,46 @@ internal sealed class Y51ServerTransport : Y51PeerTransport, IServerPeerTranspor
 
 	void IServerPeerTransport.BuildContexts(ref ServiceLocatorContext.Builder services) => BuildThisPeerContext(ref services);
 
-	protected override void AfterDispatch() => _tracker.ProcessRemoved();
+	protected override void AfterDispatch()
+	{
+		_tracker.ProcessRemoved();
+		ReleaseLostBatches();
+	}
 
-	private readonly Dictionary<ulong, (Entity[] Roots, long AtMs)> _batchRoots = new();
+	// The game waits for every player to confirm a staged batch before that spawn completes (world areas, stations at a
+	// fast travel destination, encounters, respawn ships): one batch a player never confirms (its game failed to build it,
+	// the frame that carried it could not be read) held them for everyone, and fast travel looped forever (F22). A batch
+	// counts as lost when newer ones were confirmed after it for LostMs, or after GiveUpMs in any case.
+	private const long LostMs = 60_000, GiveUpMs = 300_000;
+	private ulong _newestAcked;
+	private long _lostCheckMs;
+	public long BatchesReleased;
+
+	private void ReleaseLostBatches()
+	{
+		long now = MpClock.NowMs();
+		if (now < _lostCheckMs || _batchRoots.Count == 0) return;
+		_lostCheckMs = now + 5000;
+		List<ulong>? lost = null;
+		foreach (var (id, batch) in _batchRoots)
+			// Not before the player confirmed anything: a big world's first batches can take longer than GiveUpMs to build on
+			// a slow PC, and releasing them would send updates for objects that game does not have yet.
+			if ((now - batch.AtMs > GiveUpMs && _newestAcked > 0) || (now - batch.AtMs > LostMs && _newestAcked > id)) (lost ??= new()).Add(id);
+		if (lost == null) return;
+		if (_released.Count > 1024) _released.Clear();
+		foreach (ulong id in lost)
+		{
+			// A slow game may still be building it: its confirmation, when it comes, refreshes those objects then.
+			if (_batchRoots.Remove(id, out var roots)) _released[id] = roots;
+			if (!_batches.Remove(id, out var tcs)) continue;
+			BatchesReleased++;
+			tcs.SetResult();
+			tcs.Dispose();
+		}
+		GameLog.Instance.Warn($"engine {Name}: the player never confirmed {lost.Count} object batch(es) (oldest #{System.Linq.Enumerable.Min(lost)}, newest confirmed #{_newestAcked}); the server stops waiting for them so spawns and fast travel go on");
+	}
+
+	private readonly Dictionary<ulong, (Entity[] Roots, long AtMs)> _batchRoots = new(), _released = new();
 
 	public override void Dispose()
 	{
@@ -113,6 +150,7 @@ internal sealed class Y51ServerTransport : Y51PeerTransport, IServerPeerTranspor
 	{
 		if (message is OopTransport.BatchAck ack)
 		{
+			if (ack.BatchNumber > _newestAcked) _newestAcked = ack.BatchNumber;
 			if (_batches.Remove(ack.BatchNumber, out var tcs))
 			{
 				BatchesAcked++;
@@ -121,6 +159,7 @@ internal sealed class Y51ServerTransport : Y51PeerTransport, IServerPeerTranspor
 				tcs.SetResult();
 				tcs.Dispose();
 			}
+			else if (_released.Remove(ack.BatchNumber, out var late) && late.Roots.Length > 0) RefreshSyncProperties(late.Roots, late.AtMs);
 			return;
 		}
 		GameLog.Instance.WarnOnce("engine-server-msg-" + message.GetType().Name, $"engine {Name}: a player sent {message.GetType().Name}, which only the server sends; ignored");
@@ -130,11 +169,57 @@ internal sealed class Y51ServerTransport : Y51PeerTransport, IServerPeerTranspor
 
 	protected override bool AcceptData(int typeId, Entity target, bool removal) => Y51Replication.ClientMayWrite(PeerClientId, typeId, target, _writes, FramesIn);
 
+	// A player's request whose arguments did not survive the trip arrives with nulls and faults inside the game's own code;
+	// this names the request and the argument, once per kind.
+	private static void NoteNullArguments(IAsyncStateMachine machine)
+	{
+		try
+		{
+			foreach (var field in ArgumentFields.GetValue(machine.GetType(), t => System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Where(
+				t.GetFields(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public), f => !f.Name.StartsWith('<') && !f.FieldType.IsValueType))))
+			{
+				object? value = field.GetValue(machine);
+				int nullItems = 0;
+				if (value is System.Collections.IList list) foreach (object? item in list) if (item == null) nullItems++;
+				if (value != null && nullItems == 0) continue;
+				string story = machine.GetType().DeclaringType?.Name + "." + machine.GetType().Name;
+				GameLog.Instance.WarnOnce("story-null-" + story + field.Name, $"engine: a player's {story} arrived with {(value == null ? "no " + field.Name : nullItems + " empty entries in " + field.Name)} ({field.FieldType.Name})");
+			}
+		}
+		catch (Exception ex) { GameLog.Instance.WarnOnce("story-null-check", "engine: could not check a story's arguments: " + ex.Message); }
+	}
+
+	private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Type, System.Reflection.FieldInfo[]> ArgumentFields = new();
+
+	private static int _groupNotes;
+
+	// F16 diagnosis: what RequestCreateNewGroup will find on this server (the first few per run).
+	private void NoteGroupRequest(IAsyncStateMachine machine, ClientId sender)
+	{
+		if (System.Threading.Interlocked.Increment(ref _groupNotes) > 5) return;
+		try
+		{
+			var t = HarmonyLib.Traverse.Create(machine);
+			var panel = t.Field("<>4__this").GetValue<Keen.Game2.Simulation.StreamedUI.Terminal.ControlPanel.StreamedControlPanelSessionComponent>();
+			var grid = t.Field("gridModel").GetValue<Keen.Game2.Simulation.StreamedUI.Terminal.ControlPanel.ControlPanelGridModel>();
+			var context = t.Field("context").GetValue<Keen.Game2.Simulation.StreamedUI.Terminal.ControlPanel.ControlPanelListModel>();
+			var blocks = t.Field("blockModels").GetValue<System.Collections.IList>();
+			var rec = ReplicationEventContext.ForRemoteClient(Session, sender);
+			var entity = HarmonyLib.Traverse.Create(panel).Method("AsEntity", new[] { typeof(Keen.VRage.Multiplayer.SecureIds.EntityId), typeof(object), typeof(ReplicationEventContext) }).GetValue(grid.EntityId, context, rec) as Entity;
+			object? groups = entity?.TryGet<Keen.Game2.Simulation.WorldObjects.CubeBlocks.CubeGridGroupsComponent>();
+			var config = HarmonyLib.Traverse.Create(panel).Field("_configuration").GetValue();
+			GameLog.Instance.Info($"engine: group request: panel {(panel == null ? "null" : "set")}, grid model {(grid == null ? "null" : grid.EntityId.ToString())}, list {(context == null ? "null" : "set")}, {blocks?.Count ?? -1} blocks, grid entity {entity?.ToString() ?? "null"}, groups component {(groups == null ? "null" : "set")}, configuration {(config == null ? "null" : "set")}, text manager {(Keen.VRage.Library.Utils.Singleton<Keen.VRage.Library.Localization.TextManager>.Instance == null ? "null" : "set")}");
+		}
+		catch (Exception ex) { GameLog.Instance.Info("engine: group request check failed: " + ex); }
+	}
+
 	protected override IAsyncStateMachine RestoreStoryStateMachine(ClientId sender, StoryId storyId, StateMachineEnvelope envelope)
 	{
 		var plan = OopTransport.PlanFor(envelope);
 		var machine = plan.Restore(envelope, storyId, _server.ReplicationComponent);
 		plan.CompleteServerRequest(machine, ReplicationEventContext.ForRemoteClient(Session, sender));
+		NoteNullArguments(machine);
+		if (machine.GetType().Name.Contains("RequestCreateNewGroup")) NoteGroupRequest(machine, sender);
 		KeenNetcode.ServerAccess.CheckRestoredStory(sender, ref machine);
 		return machine;
 	}

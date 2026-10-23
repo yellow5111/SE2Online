@@ -126,18 +126,15 @@ internal static partial class ServerAccess
 	private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport,
 		System.Collections.Generic.Dictionary<Keen.VRage.Multiplayer.NetworkStories.StoryId, Type>> _sentStories = new();
 
-	// Also runs for a peer's story this side hosted and sends back under the peer's id; those entries are never asked for
-	// again, so the table is emptied past 4096 (an entry missing there only skips the check for that story).
+	// Only this side's own stories: TransformStoryInternal also sends the peer's stories back to it (MoveTo.Client), and
+	// those never return here. With them left out the table holds at most what Keen has in flight to that peer.
 	private static void MoveStoryPostfix(Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport __instance, Keen.VRage.Multiplayer.NetworkStories.StoryProgress story,
 		Keen.VRage.Multiplayer.NetworkStories.StoryId id)
 	{
-		if (story is not Keen.VRage.Multiplayer.NetworkStories.StoryProgress.Move move) return;
+		if (story is not Keen.VRage.Multiplayer.NetworkStories.StoryProgress.Move move
+			|| !ReturningStories.Records(id.IsFromServer, __instance is Keen.VRage.Multiplayer.Transport.OutOfProcess.Server.OutOfProcessServerPeerTransport)) return;
 		var sent = _sentStories.GetOrCreateValue(__instance);
-		lock (sent)
-		{
-			if (sent.Count > 4096) sent.Clear();
-			sent[id] = move.StateMachine.GetType();
-		}
+		lock (sent) sent[id] = move.StateMachine.GetType();
 	}
 
 	private static bool ReturningStoryPrefix(Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport __instance, Keen.VRage.Multiplayer.NetworkStories.IStoryData story, ref bool __result)
@@ -159,13 +156,13 @@ internal static partial class ServerAccess
 	internal static Exception? ReturningStoryRefusal(Keen.VRage.Multiplayer.ClientId peer, Type? sent, Keen.VRage.Multiplayer.NetworkStories.StateMachineEnvelope back)
 	{
 		if (ReturningStoriesOff || sent == null) return null;
-		Type? came;
-		try { came = Type.GetType(back.StateMachineTypeName); }
-		catch (Exception ex) when (ex is ArgumentException or System.IO.IOException or TypeLoadException or BadImageFormatException) { came = null; }
-		if (came == sent) return null;
+		// Compared by name, as the game writes it (AssemblyQualifiedName): a name the peer chose is never resolved here.
+		if (!ReturningStories.Refuses(sent.AssemblyQualifiedName, back.StateMachineTypeName)) return null;
 		Refused++;
 		if (LogDue(peer, "returning-story")) GameLog.Instance.Info($"access: refused ClientId {peer.Id}'s answer to {sent.DeclaringType?.Name}.{StoryName(sent)}: it came back as another story ({back.StateMachineTypeName}; further ones within 5 s not logged)");
-		return new InvalidOperationException("Access denied: the answer is another story");
+		// A cancellation, not a fault: the server's own story usually runs unawaited, and the game's monitor for those sends
+		// any other exception to the crash handler, so a refused answer closed the server.
+		return new System.Threading.Tasks.TaskCanceledException("Access denied: the answer is another story");
 	}
 
 	private static void StoryPrefix(Keen.VRage.Multiplayer.Transport.OutOfProcess.OutOfProcessPeerTransport __instance, Keen.VRage.Multiplayer.NetworkStories.IStoryData story,
@@ -204,6 +201,13 @@ internal static partial class ServerAccess
 	// for one that faults, so the client's request fails the way a failed validator fails it.
 	private static void RestoredStoryPostfix(Keen.VRage.Multiplayer.ClientId sender, ref System.Runtime.CompilerServices.IAsyncStateMachine __result)
 	{
+		// For everyone, admins too: GetTile would fault on the missing block. Only here, after the transport completed the
+		// server request in the restored machine (it writes into the machine's own fields).
+		if (__result != null && sender != Keen.VRage.Multiplayer.ClientId.Server && ToolbarRequests.NamesNoHintBlock(__result))
+		{
+			__result = new CancelledStory("a toolbar hint for a block the player's game could not name");
+			return;
+		}
 		if (!Enforcing || !_hostingStory || sender == Keen.VRage.Multiplayer.ClientId.Server || __result == null) return;
 		string? refused;
 		try { refused = StoryRefusal(sender, __result); }
@@ -215,7 +219,7 @@ internal static partial class ServerAccess
 		if (refused == null) return;
 		Refused++;
 		if (LogDue(sender, "story")) GameLog.Instance.Info($"access: refused ClientId {sender.Id}'s {__result.GetType().DeclaringType?.Name}.{StoryName(__result.GetType())} ({refused}; further ones within 5 s not logged)");
-		__result = new RefusedStory(refused);
+		if (!AnswersFalse(__result)) __result = new RefusedStory(refused);
 	}
 
 	private static string? StoryRefusal(Keen.VRage.Multiplayer.ClientId sender, System.Runtime.CompilerServices.IAsyncStateMachine story)
@@ -257,6 +261,14 @@ internal static partial class ServerAccess
 	}
 
 	private static string StoryName(Type type) => type.Name.StartsWith('<') && type.Name.IndexOf('>') is > 1 and var end ? type.Name[1..end] : type.Name;
+
+	// A cancellation reaches the player's game as a skipped story, which its unawaited requests treat as nothing to show.
+	private sealed class CancelledStory(string reason) : System.Runtime.CompilerServices.IAsyncStateMachine
+	{
+		public void MoveNext() => throw new System.Threading.Tasks.TaskCanceledException("Access denied: " + reason);
+
+		public void SetStateMachine(System.Runtime.CompilerServices.IAsyncStateMachine stateMachine) { }
+	}
 
 	private sealed class RefusedStory(string reason) : System.Runtime.CompilerServices.IAsyncStateMachine
 	{
@@ -381,7 +393,7 @@ internal static partial class ServerAccess
 
 	/// <summary>Whether this identity may use the entity a terminal screen or request names. Never throws: a check that
 	/// cannot decide allows, because an exception here faults the player's request and their game.</summary>
-	internal static bool MayUse(ReplicationEventContext? context, IdentityId identity, Entity entity)
+	internal static bool MayUse(ReplicationEventContext? context, IdentityId identity, Entity entity, bool basicUse = false)
 	{
 		try
 		{
@@ -398,7 +410,8 @@ internal static partial class ServerAccess
 				var grid = block.Grid.Entity;
 				// Armor and other blocks without their own access settings follow their grid.
 				if (entity.TryGet<BlockPermissionsComponent>() == null || grid.TryGet<OwnershipComponent>() == null) return MayUseGrid(permissions, identity, grid);
-				var use = Singleton<DefinitionManager>.Instance.GetConfiguration<PermissionsConfiguration>().AdvancedUse;
+				var configuration = Singleton<DefinitionManager>.Instance.GetConfiguration<PermissionsConfiguration>();
+				var use = basicUse ? configuration.BasicUse : configuration.AdvancedUse;
 				return permissions.CanUseBlockAction(entity, grid, identity, use);
 			}
 			if (entity.TryGet<CubeGridComponent>() != null) return MayUseGrid(permissions, identity, entity);

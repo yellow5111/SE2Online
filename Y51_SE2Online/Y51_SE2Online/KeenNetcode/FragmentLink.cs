@@ -102,6 +102,18 @@ internal sealed class FragmentLink<TPeer> where TPeer : notnull
 		backlog.Frames.Enqueue((channel, frame));
 	}
 
+	/// <summary>Bytes waiting here for the peer (Steam's send buffer was full): what a sender should count as still in flight.</summary>
+	public int PendingBytes(TPeer peer)
+	{
+		lock (_sync)
+		{
+			if (!_backlog.TryGetValue(peer, out var backlog)) return 0;
+			long bytes = 0;
+			foreach (var (_, frame) in backlog.Frames) bytes += frame.Length;
+			return (int)Math.Min(int.MaxValue, bytes);
+		}
+	}
+
 	/// <summary>Sends what waited for Steam's send buffer and drops stalled assemblies; call every network poll.</summary>
 	public void Flush()
 	{

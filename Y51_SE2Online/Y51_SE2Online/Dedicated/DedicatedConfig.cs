@@ -17,6 +17,8 @@ public sealed class DedicatedConfig
     /// <summary>Steam Workshop item (id or link) the world starts from: a Workshop world, or a mod that ships worlds (StartContent then names one).</summary>
     public string StartWorkshop { get; set; } = "";
     [JsonIgnore] public ulong StartWorkshopId { get; private set; }
+    // The name (and SessionName's below) a server.json without the key has always run with: kept, so an older file keeps its
+    // world. New servers get "Default SE2 Online World" / "Default SE2 Online Server" from server.example.json.
     public string WorldName { get; set; } = "Y51 Dedicated World";
     public bool? EnableAutosave { get; set; } = true;
     public bool? PlayMission { get; set; }
@@ -54,6 +56,10 @@ public sealed class DedicatedConfig
     public int CatchUpMs { get; set; } = 1000;
     /// <summary>Headless: the game's worker threads; 0 keeps the game's own count (up to 15).</summary>
     public int WorkerThreads { get; set; }
+    /// <summary>Headless: wait for each tick on a high-resolution timer; false uses Thread.Sleep, whose wake-ups can run tens of ms late.</summary>
+    public bool PreciseTimer { get; set; } = true;
+    /// <summary>Headless: priority of the server loop thread (Normal, AboveNormal or Highest) within the above-normal process.</summary>
+    public string LoopPriority { get; set; } = "AboveNormal";
     /// <summary>Opt-in JSONL server frame and network profile (relative to this file's folder); empty is off.</summary>
     public string ProfileFile { get; set; } = "";
     [JsonIgnore] public string ConfigPath { get; private set; }
@@ -68,6 +74,18 @@ public sealed class DedicatedConfig
         PropertyNameCaseInsensitive = true, WriteIndented = true, IncludeFields = true,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
     };
+
+    // Reading takes a file with options this build does not know (a newer version's server.json after a rollback): they
+    // are named in the log and ignored, never a reason not to start.
+    private static readonly JsonSerializerOptions Lenient = new(Json) { UnmappedMemberHandling = JsonUnmappedMemberHandling.Skip };
+
+    /// <summary>The option paths in a server.json this build has no setting for (one level into Network, AutoRestart...).</summary>
+    internal static List<string> UnknownOptions(string text)
+        => System.Text.Json.Nodes.JsonNode.Parse(text) is System.Text.Json.Nodes.JsonObject file
+            ? JsonDefaults.UnknownKeys(file, (System.Text.Json.Nodes.JsonObject)JsonSerializer.SerializeToNode(new DedicatedConfig(), Json)!, FreeForm)
+            : new List<string>();
+
+    private static readonly HashSet<string> FreeForm = new(StringComparer.OrdinalIgnoreCase) { "SessionSettings", "DefinitionSettings" };
 
     private static readonly HashSet<string> NotAdded = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -85,14 +103,25 @@ public sealed class DedicatedConfig
     public static List<string> AddNewOptions(string path)
     {
         var defaults = (System.Text.Json.Nodes.JsonObject)JsonSerializer.SerializeToNode(new DedicatedConfig(), Json)!;
-        return JsonDefaults.UpgradeFile(path, defaults, NotAdded, text => JsonSerializer.Deserialize<DedicatedConfig>(text, Json));
+        return JsonDefaults.UpgradeFile(path, defaults, NotAdded, text => JsonSerializer.Deserialize<DedicatedConfig>(text, Lenient));
     }
 
     public static DedicatedConfig Read(string path)
     {
         path = Path.GetFullPath(path);
-        var config = JsonSerializer.Deserialize<DedicatedConfig>(File.ReadAllText(path), Json)
+        string text = File.ReadAllText(path);
+        var config = JsonSerializer.Deserialize<DedicatedConfig>(text, Lenient)
             ?? throw new ArgumentException("Dedicated configuration is empty.");
+        // An unknown option is a newer version's setting (warned, ignored), unless it looks like a typo of a known one: then
+        // the server does not start, rather than run with that setting (a password, a port) left at its default.
+        var known = (System.Text.Json.Nodes.JsonObject)JsonSerializer.SerializeToNode(new DedicatedConfig(), Json)!;
+        foreach (string option in UnknownOptions(text))
+        {
+            string name = option[(option.LastIndexOf('.') + 1)..];
+            if (JsonDefaults.LikelyTypo(name, JsonDefaults.KnownKeysAt(known, option)) is { } meant)
+                throw new ArgumentException($"{Path.GetFileName(path)}: '{option}' is not an option; did you mean '{meant}'? Fix the name (or remove it) and start again.");
+            GameLog.Instance.Warn($"dedicated: unknown option {option} in {Path.GetFileName(path)} ignored (a newer version's setting)");
+        }
         config.ConfigPath = path;
         if (!string.IsNullOrWhiteSpace(config.SaveId) && !string.IsNullOrWhiteSpace(config.StartContent))
             throw new ArgumentException("Choose SaveId or StartContent, not both.");
@@ -111,6 +140,7 @@ public sealed class DedicatedConfig
         if (config.SaveIntervalSeconds < 0 || (config.SaveIntervalSeconds > 0 && config.SaveIntervalSeconds < 30))
             throw new ArgumentException("SaveIntervalSeconds must be 0 or at least 30.");
         if (config.CatchUpMs is < 0 or > 10_000) throw new ArgumentException("CatchUpMs must be between 0 and 10000.");
+        if (!TickPacer.IsLoopPriority(config.LoopPriority)) throw new ArgumentException("LoopPriority must be Normal, AboveNormal or Highest.");
         if (config.WorkerThreads is < 0 or > 256) throw new ArgumentException("WorkerThreads must be 0 (the game's own count) or between 1 and 256.");
         if (config.ShutdownCountdownSeconds is < 0 or > 600)
             throw new ArgumentException("ShutdownCountdownSeconds must be between 0 and 600.");

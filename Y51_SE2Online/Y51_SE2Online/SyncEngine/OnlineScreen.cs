@@ -95,6 +95,7 @@ public sealed partial class OnlineScreen : ScreenView
     private readonly TextBox _motd = new() { Watermark = "No message", MaxLength = Motd.MaxText, FontSize = 22, MinHeight = 100, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap };
     private readonly OnlineToggle _buildGhosts = new OnlineToggle("Build previews (players see where others are about to place blocks)");
     private readonly OnlineToggle _clientMovement = new OnlineToggle("Responsive movement", "Each player's game predicts their own character: instant at any ping. The server still has the last word.");
+    private readonly OnlineToggle _onePilot = new OnlineToggle("One pilot per ship", "Only the player who sat down first in one of a ship's cockpits flies it; anyone else in its seats rides along.");
     private readonly OnlineToggle _ownReplication = new OnlineToggle("SE2 Online replication", "SE2 Online's own engine carries the world to players (its own connection lanes and ordering). Off uses the game's own netcode. Applies from the next session.");
     private readonly OnlineToggle _voice = new OnlineToggle("Proximity voice chat (talk to and hear players near you)");
     private readonly OnlineToggle _openMic = new OnlineToggle("Open microphone: transmit whenever you speak instead of holding push to talk");
@@ -247,7 +248,7 @@ public sealed partial class OnlineScreen : ScreenView
         var s = MpMenu.Settings;
         _name.Text = s.PlayerName; _sessionName.Text = s.SessionName; _description.Text = s.Description; _country.Text = s.Country;
         _limit.S.Value = Math.Clamp(s.MaxPlayers, OnlineSettings.MinPlayers, OnlineSettings.PlayerLimit); ReadVisibility(s);
-        _directIp.IsChecked = s.AllowDirectIp; _waterSync.IsChecked = s.WaterSync; _buildGhosts.IsChecked = s.BuildGhosts; _clientMovement.IsChecked = s.ClientMovement; _ownReplication.IsChecked = s.OwnReplication;
+        _directIp.IsChecked = s.AllowDirectIp; _waterSync.IsChecked = s.WaterSync; _buildGhosts.IsChecked = s.BuildGhosts; _clientMovement.IsChecked = s.ClientMovement; _ownReplication.IsChecked = s.OwnReplication; _onePilot.IsChecked = s.OnePilot;
         _bind.Text = s.BindAddress; _port.Text = s.ListenPort.ToString(CultureInfo.InvariantCulture); _publicAddress.Text = s.PublicAddress;
         _team.IsChecked = s.TeamGrids; _research.IsChecked = s.SharedResearch; _turrets.IsChecked = s.Pvp; _nametags.IsChecked = s.Nametags;
         _range.S.Value = Math.Clamp(s.NametagRange, 50, 10000); _spawn.IsChecked = s.SpawnNearHost;
@@ -279,7 +280,7 @@ public sealed partial class OnlineScreen : ScreenView
         {
             ServersDirectory = MpMenu.Settings.ServersDirectory, SessionsDirectory = MpMenu.Settings.SessionsDirectory,
             PlayerName = _name.Text ?? "", SessionName = _sessionName.Text ?? "", Description = _description.Text ?? "", Country = _country.Text ?? "", MaxPlayers = limit,
-            FriendsOnly = _visibility == FriendsOnly, Advertise = _visibility == Public, AdvertiseChosen = true, AllowDirectIp = _directIp.IsChecked == true, WaterSync = _waterSync.IsChecked == true, BuildGhosts = _buildGhosts.IsChecked == true, ClientMovement = _clientMovement.IsChecked == true, OwnReplication = _ownReplication.IsChecked == true,
+            FriendsOnly = _visibility == FriendsOnly, Advertise = _visibility == Public, AdvertiseChosen = true, AllowDirectIp = _directIp.IsChecked == true, WaterSync = _waterSync.IsChecked == true, BuildGhosts = _buildGhosts.IsChecked == true, ClientMovement = _clientMovement.IsChecked == true, OwnReplication = _ownReplication.IsChecked == true, OnePilot = _onePilot.IsChecked == true,
             BindAddress = _bind.Text ?? "", ListenPort = port, PublicAddress = _publicAddress.Text ?? "",
             TeamGrids = _team.IsChecked == true, SharedResearch = _research.IsChecked == true, Pvp = _turrets.IsChecked == true, Nametags = _nametags.IsChecked == true, NametagRange = range,
             SpawnNearHost = _spawn.IsChecked == true, AutoReconnect = _reconnect.IsChecked == true, CheckForUpdates = _updates.IsChecked == true, AutoUpdate = _autoUpdate.IsChecked == true, InterpolationMs = smoothing, StateBudgetKiB = bandwidth,

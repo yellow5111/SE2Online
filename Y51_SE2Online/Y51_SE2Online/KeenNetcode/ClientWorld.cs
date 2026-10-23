@@ -30,6 +30,9 @@ internal sealed class ClientWorld
 
 	private GameSessionID? _preparedFor;
 
+	// The server's mod list could not be read for the join under way, so it loads with this game's own mods.
+	private bool _modsUnread;
+
 	private readonly System.Threading.CancellationTokenSource _stop = new();
 
 	/// <summary>Set while this plugin itself calls into Keen's join (its prefix lets that one through).</summary>
@@ -38,6 +41,14 @@ internal sealed class ClientWorld
 	private string? _lostReason;
 
 	private long _lostAtMs;
+
+	private long _rejoinDueMs, _rejoinTryMs;
+
+	private long _playingSinceMs;
+
+	// Automatic rejoins after lost connections (Sync/RejoinPolicy.cs). A loss that came back on every join reloaded a big
+	// world again and again until the game crashed (F20). Static: every rejoin is a new ClientWorld.
+	private static readonly RejoinPolicy s_rejoin = new();
 
 	private bool _left;
 
@@ -67,7 +78,10 @@ internal sealed class ClientWorld
 	{
 		if (Current == null)
 		{
-			Progress.SetRejoin(o.Rejoin, o.Rejoin);
+			// Only an automatic rejoin keeps counting; a join the player started (or Retry) begins again at zero.
+			s_rejoin.JoinStarting();
+			s_orphanJoinEnded = false;
+			Progress.SetRejoin(o.Rejoin && !o.KeenAttached, o.Rejoin && !o.KeenAttached);
 			s_ui = new JoinStatusUi(log);
 			Current = new ClientWorld(log, o);
 		}
@@ -76,11 +90,30 @@ internal sealed class ClientWorld
 
 	public static void Reset()
 	{
+		s_orphanJoinEnded = false;
 		if (Current != null)
 		{
 			Current._retired = true;
 			Current._stop.Cancel();
 			Current._session?.Detach();
+			// Back at the main menu nothing may keep the last world reachable into the next load: these statics can hold
+			// its session or entities until the next world replaces them, and a rejoin then loads a big world while the old
+			// one is still in memory.
+			if (MpPlugin.App is not { } app || app.Client == null && app.Server == null)
+			{
+				// Each on its own: one that throws must not keep the others, or leaving the mode, from happening.
+				foreach (var (what, reset) in new (string, Action)[]
+				{
+					("client clock", ClientClock.Reset), ("animation timing", AnimPlayout.Reset), ("motion smoothing", MotionSmoothing.Reset),
+					("own motion", KeenNetcode.OwnMotion.ResetClient), ("replication transport", Y51_SE2Online.Engine.Y51Replication.ResetClient),
+					("flora colliders", FloraPhysicsRecovery.Reset),
+				})
+				{
+					try { reset(); }
+					catch (Exception ex) { GameLog.Instance.Warn($"client: clearing the last world's {what} failed ({ex.GetType().Name}: {ex.Message})"); }
+				}
+				GameLog.Instance.Info($"client: left the server's world ({MemoryInUse(collect: true)})");
+			}
 		}
 		Current = null;
 		// Water sync belongs to the session that turned it on (the next world, or single player, starts without it).
@@ -122,6 +155,9 @@ internal sealed class ClientWorld
 	{
 		_log.Info($"client: joining {session} with the game's own netcode");
 		_lostReason = null;
+		System.Threading.Volatile.Write(ref _lossReported, null);
+		System.Threading.Volatile.Write(ref _joinEnded, null);
+		_lossSeen = false;
 		_left = false;
 		_leftAfterReject = false;
 		_pendingJoin = session;
@@ -136,17 +172,28 @@ internal sealed class ClientWorld
 		Progress.Set(JoinStage.Failed, MpClock.NowMs(), why);
 	}
 
+	/// <summary>Net thread: only records the loss (the first one counts); MainTick decides what it does.</summary>
 	public static void ConnectionLost(ClientSession session, string reason)
 	{
 		var current = Current;
 		if (current == null || current._session != session) return;
-		current._lostReason = string.IsNullOrWhiteSpace(reason) ? "connection closed" : reason;
-		current._lostAtMs = MpClock.NowMs();
-		Progress.Set(JoinStage.Lost, current._lostAtMs, current._lostReason);
+		System.Threading.Interlocked.CompareExchange(ref current._lossReported, string.IsNullOrWhiteSpace(reason) ? "connection closed" : reason, null);
 	}
 
 	/// <summary>Main thread, every frame (GameAppComponent.GameUpdate prefix).</summary>
 	private bool _backToMenu;
+
+	// Written by other threads, read and acted on only in MainTick: a loss, a failed load and a late load are decided one
+	// after another on the main thread instead of racing (the net thread's loss, the game's ended join).
+	private string? _lossReported, _joinEnded;
+
+	private bool _lossSeen;
+
+	// An automatic rejoin was handed to the session controller and this world is still the current one.
+	private bool _rejoinGone;
+
+	// The connect timeout already left the world; going back to the menu needs no second Disconnect.
+	private bool _menuAsked;
 
 	private bool _leftAfterReject;
 
@@ -177,6 +224,7 @@ internal sealed class ClientWorld
 			else if (error != null) Progress.Set(JoinStage.Failed, now, error);
 			else
 			{
+				_modsUnread = mods == null;
 				// Without this the client keeps whatever mods the last single-player world loaded.
 				app.GameData.SetRequiredProjects(WorkshopMods.ToModList(mods ?? new List<WorldMod>()));
 				Joining = true;
@@ -192,32 +240,108 @@ internal sealed class ClientWorld
 			try
 			{
 				loading.GetAwaiter().GetResult();
+				string? lost = System.Threading.Volatile.Read(ref _lossReported);
 				if (Progress.Stage < JoinStage.Loading) Progress.Set(JoinStage.Loading, now);
+				// The connect timeout can call a join failed (or a rejoin lost) whose load then finishes: the world is up, so
+				// it is a join again, unless its connection was lost meanwhile.
+				else if (app.Client != null && RejoinPolicy.AfterLateLoad(Progress.Stage, lost != null) is { } late)
+				{
+					_backToMenu = false;
+					if (late == JoinStage.Lost)
+					{
+						_lossSeen = true;
+						SetLost(lost!, now);
+					}
+					else
+					{
+						_lostAtMs = 0;
+						_rejoinDueMs = 0;
+						Progress.Set(JoinStage.Loading, now);
+					}
+				}
 			}
 			catch (Exception ex)
 			{
-				string why = _session?.RejectReason
-					?? (KeenNet.ClientRejectReason is { } keen ? "The server refused the connection (" + keen + ")." : "Joining failed: " + ex.Message);
+				string? refusal = Refusal();
+				string why = refusal
+					?? (_modsUnread && ex.Message.Contains("Cannot locate value for definition")
+						? "This server uses a mod your game did not load: its mod list could not be read before joining. Press Retry to read it again."
+						: "Joining failed: " + ex.Message);
 				_log.Warn("client: Keen join ended: " + ex.Message);
-				if (Progress.Stage != JoinStage.Rejected) Progress.Set(JoinStage.Failed, now, why);
 				// The game unloads the main menu before it loads the host's world; a join that fails after that left the
 				// player on a frozen 0% loading screen.
 				_backToMenu = true;
+				Decide(JoinEvent.LoadFault, now, app.Client != null, refusal != null, why, "the rejoin failed: " + ex.GetBaseException().Message);
 			}
+		}
+		if (System.Threading.Interlocked.Exchange(ref _joinEnded, null) is { } ended)
+		{
+			_backToMenu = true;
+			string? refusal = Refusal();
+			Decide(JoinEvent.JoinEnded, now, app.Client != null, refusal != null, refusal ?? "Joining failed: " + ended, "the rejoin failed: " + ended);
+		}
+		if (!_lossSeen && System.Threading.Volatile.Read(ref _lossReported) is { } loss)
+		{
+			_lossSeen = true;
+			string? refusal = Refusal();
+			Decide(JoinEvent.Loss, now, app.Client != null, refusal != null, refusal ?? loss, loss);
+		}
+		// The session change of an automatic rejoin failed (the old session never closed): networking is stopped, so the
+		// player decides; the rejoin never started and does not count.
+		if (_rejoinGone && MpPlugin.Controller?.State == OnlineSessionState.Failed)
+		{
+			_rejoinGone = false;
+			s_rejoin.RejoinFailed();
+			_log.Warn("client: the automatic rejoin could not start: " + MpPlugin.Controller.Error);
+			Progress.Set(JoinStage.Failed, now, "Rejoining failed: " + MpPlugin.Controller.Error + " Press Retry to join again.");
 		}
 		// The server dropped this player (a long server hitch outlasts the ping timeout): its game session cannot resume, so
 		// leave the world and join again, as the loss notice says. Nothing did, and the player sat on "Rejoining..." forever.
-		if (_lostAtMs > 0 && _o.Rejoin && Progress.Stage == JoinStage.Lost && now - _lostAtMs > 3000)
+		if (_lostAtMs > 0 && RejoinsByItself && Progress.Stage == JoinStage.Lost)
 		{
-			_lostAtMs = 0;
-			_log.Info("client: the connection to the server is lost; leaving its world and joining again");
-			MpMenu.Retry();
+			if (_rejoinDueMs == 0) ScheduleRejoin(now);
+			// Not while the game is still loading or unloading a world: stopping SE2 Online's session in the middle of the
+			// game's own join made the server refuse it, and that refusal closed the game (F20).
+			else if (now >= _rejoinTryMs && RejoinPolicy.Next(now, _rejoinDueMs, app._isTransitioning.IsSet) is var step && step != RejoinStep.Wait)
+			{
+				if (step == RejoinStep.GiveUp)
+				{
+					_lostAtMs = 0;
+					_log.Warn($"client: the game's world transition did not end within {RejoinPolicy.TransitionWaitMs / 1000} s after the connection was lost; not rejoining by itself");
+					Progress.Set(JoinStage.Failed, now, $"{_lostReason ?? "connection closed"}\nThe game did not finish loading or leaving the world, so it cannot rejoin by itself. Press Retry, or leave and join again.");
+				}
+				else
+				{
+					// The menu drops a retry it cannot run now (a session still busy): tried again shortly, not given up.
+					_rejoinTryMs = now + 2000;
+					var world = this;
+					var log = _log;
+					// Marked when the rejoin really goes (the menu drops a retry it cannot run now); counted when its join starts.
+					MpMenu.RetryThen(() =>
+					{
+						world._lostAtMs = 0;
+						world._rejoinGone = true;
+						s_rejoin.Rejoining();
+						log.Info($"client: the connection to the server is lost; leaving its world and joining again (rejoin {s_rejoin.Rejoins + 1} of {RejoinPolicy.Attempts}, {MemoryInUse(collect: false)})");
+					});
+				}
+			}
 		}
+		if (Progress.Stage == JoinStage.Playing && _playingSinceMs == 0)
+		{
+			_playingSinceMs = now;
+			_log.Info($"client: in the server's world{(s_rejoin.Rejoins > 0 ? $" again after rejoin {s_rejoin.Rejoins}" : "")} ({MemoryInUse(collect: false)})");
+		}
+		if (Progress.Stage == JoinStage.Playing && _playingSinceMs > 0 && s_rejoin.Stable(now - _playingSinceMs))
+			_log.Info($"client: in the world for {RejoinPolicy.StableMs / 60000} min without a loss; automatic rejoins start again at zero");
 		if (_backToMenu && !app._isTransitioning.IsSet && app.Client == null && app.Server == null)
 		{
 			_backToMenu = false;
-			_log.Info("client: join failed; back to the main menu");
-			app.Disconnect();
+			if (!_menuAsked)
+			{
+				_log.Info("client: join failed; back to the main menu");
+				app.Disconnect();
+			}
 		}
 		// The server ended this player's session while in its world (kicked, banned, refused after a settings change): leave
 		// the world the way the Leave button does, which also stops SE2 Online's link from dialling the server again. The
@@ -233,9 +357,16 @@ internal sealed class ClientWorld
 		if (Progress.Stage == JoinStage.Connecting && _session?.Accept == null && _connectingSinceMs > 0 && now - _connectingSinceMs > ConnectTimeoutMs)
 		{
 			_connectingSinceMs = 0;
-			FailJoin($"No answer from the server within {ConnectTimeoutMs / 1000} s. It may still be starting, be offline, or be blocked by a firewall.");
-			if (!app._isTransitioning.IsSet && (app.Client != null || app.Server != null)) app.Disconnect();
-			else _backToMenu = true;
+			string timeout = $"No answer from the server within {ConnectTimeoutMs / 1000} s. It may still be starting, be offline, or be blocked by a firewall.";
+			_log.Warn("client: " + timeout);
+			// Set either way: a loss reported after this keeps the timeout's reason.
+			_backToMenu = true;
+			Decide(JoinEvent.Timeout, now, app.Client != null, refused: false, timeout, $"the rejoin failed: no answer from the server within {ConnectTimeoutMs / 1000} s");
+			if (!app._isTransitioning.IsSet && (app.Client != null || app.Server != null))
+			{
+				_menuAsked = true;
+				app.Disconnect();
+			}
 		}
 		// Keen loads the host's world itself: the bar follows the bytes it receives, then Keen building the world (its
 		// session counts as loaded after the first full tick), then the player's character arriving.
@@ -269,6 +400,128 @@ internal sealed class ClientWorld
 		if (_session != null && Progress.Stage == JoinStage.Playing) SelfTest.Client(_session, _log);
 		if (Progress.Stage == JoinStage.Playing) SelfTest.Leave(app, _log);
 #endif
+	}
+
+	/// <summary>
+	/// The game's own join, started without anyone awaiting it (a Steam invite, a rejoin), ends when the server refuses
+	/// the connection; the game's monitor for such tasks rethrows that into the crash handler and the game closes (F20,
+	/// a refusal in the middle of an automatic rejoin). A refused join goes back to the main menu with its reason instead.
+	/// </summary>
+	internal static void InstallJoinGuard(HarmonyLib.Harmony harmony)
+	{
+		var monitor = HarmonyLib.AccessTools.TypeByName("Keen.VRage.Library.Threading.SkipWaitMonitor") ?? throw new MissingMemberException("SkipWaitMonitor");
+		harmony.Patch(HarmonyLib.AccessTools.Method(monitor, "ProcessException"), prefix: new HarmonyLib.HarmonyMethod(typeof(ClientWorld), nameof(ProcessExceptionPrefix)));
+		harmony.Patch(HarmonyLib.AccessTools.Method(monitor, "ThrowAndDiscard"), prefix: new HarmonyLib.HarmonyMethod(typeof(ClientWorld), nameof(ThrowAndDiscardPrefix)));
+	}
+
+	private static void ProcessExceptionPrefix(ref System.Runtime.ExceptionServices.ExceptionDispatchInfo? ____exception)
+	{
+		if (IsRefusedJoin(____exception)) ____exception = null;
+	}
+
+	private static void ThrowAndDiscardPrefix(ref System.Runtime.ExceptionServices.ExceptionDispatchInfo? exception)
+	{
+		if (IsRefusedJoin(exception)) exception = null;
+	}
+
+	private static bool IsRefusedJoin(System.Runtime.ExceptionServices.ExceptionDispatchInfo? info)
+	{
+		// The game's own join (GameAppComponent.LoadNetworkClientAsync) ended: refused, the server shutting down, the
+		// connection failing or its hello timing out. Any of them reached the crash handler from that unawaited task.
+		if (info?.SourceException is not { } ex || ex.StackTrace?.Contains("GameAppComponent.LoadNetworkClientAsync", StringComparison.Ordinal) != true) return false;
+		// Only a join SE2 Online runs or is leaving (a rejoin stops the session first); a vanilla join keeps the game's own handling.
+		if (Current == null && MpPlugin.Controller?.Busy != true && !MpPlugin.Online) return false;
+		string why = ex.GetBaseException().Message;
+		GameLog.Instance.Warn($"client: the game's join ended ({ex.GetType().Name}: {why}); back to the main menu instead of closing the game");
+		// Only a join the game started and SE2 Online rides along with (Keen's own task, watched by this monitor) belongs to
+		// the current join session; SE2 Online's own joins are awaited in MainTick. Anything else (a join Keen started while
+		// a session change was under way) is no join of ours: MainTick decides for the first, ReturnOrphanJoin for the rest.
+		if (Current is { _o.KeenAttached: true } world) System.Threading.Interlocked.CompareExchange(ref world._joinEnded, why, null);
+		else s_orphanJoinEnded = true;
+		return true;
+	}
+
+	private static volatile bool s_orphanJoinEnded;
+
+	/// <summary>Main thread (MpPlugin.Tick): a join that ended with no join session of ours goes back to the main menu.</summary>
+	internal static void ReturnOrphanJoin(Keen.Game2.GameAppComponent app)
+	{
+		if (!s_orphanJoinEnded || Current != null || MpPlugin.Controller?.Busy == true || app._isTransitioning.IsSet) return;
+		s_orphanJoinEnded = false;
+		if (app.Client != null || app.Server != null) return;
+		GameLog.Instance.Info("client: a join that was not ours to finish ended; back to the main menu");
+		app.Disconnect();
+	}
+
+	/// <summary>The player left (Leave, or exit to the menu): an automatic rejoin asked for and not yet started is dropped,
+	/// so the player's next join counts from zero.</summary>
+	internal static void PlayerLeft() => s_rejoin.RejoinFailed();
+
+	/// <summary>SE2 Online's automatic rejoin handles this player's lost connection (Keen's reconnect prompt must not too).</summary>
+	internal static bool OwnsLoss => MpPlugin.Online && Current is { RejoinsByItself: true, _retired: false };
+
+	// A join the game started by itself (Steam invite, Join Game) that SE2 Online rides along with cannot be dialled again by
+	// SE2 Online (its session never issues a join of its own), so the game's own reconnect prompt handles its losses.
+	private bool RejoinsByItself => _o.Rejoin && !_o.KeenAttached;
+
+	/// <summary>Keen saw this player's connection drop (its reconnect prompt is skipped): the loss counts at once instead of
+	/// after SE2 Online's own ping timeout. Any thread; the first reported loss wins.</summary>
+	internal static void KeenLost(string reason)
+	{
+		if (Current is { } current) System.Threading.Interlocked.CompareExchange(ref current._lossReported, reason, null);
+	}
+
+	// The server's own reason when it refused this player (a refusal or kick never rejoins by itself).
+	private string? Refusal() => _session?.RejectReason ?? (KeenNet.ClientRejectReason is { } keen ? "The server refused the connection (" + keen + ")." : null);
+
+	/// <summary>Main thread: applies <see cref="RejoinPolicy.Decide"/> for one event. Lost schedules the next automatic rejoin
+	/// (waiting longer each time, up to the cap); Failed waits for the player.</summary>
+	private void Decide(JoinEvent e, long now, bool worldUp, bool refused, string failed, string lost)
+	{
+		var stage = Progress.Stage;
+		var to = RejoinPolicy.Decide(e, stage, worldUp, _backToMenu, refused, RejoinsByItself, s_rejoin.Rejoins);
+		if (to == JoinStage.Lost)
+		{
+			if (stage != JoinStage.Lost) SetLost(lost, now);
+		}
+		else if (to == JoinStage.Failed && (e != JoinEvent.Loss || stage != JoinStage.Failed))
+		{
+			Progress.Set(JoinStage.Failed, now, failed);
+			// No automatic rejoin of a failed join (a loss reported just before it may have scheduled one).
+			_lostAtMs = 0;
+		}
+		else if (e == JoinEvent.Loss) _log.Info($"client: connection lost ({lost}) after the join {(stage == JoinStage.Rejected ? "was refused" : stage == JoinStage.Failed ? "failed" : "ended")}; no rejoin");
+	}
+
+	private void SetLost(string reason, long now)
+	{
+		_lostReason = reason;
+		_lostAtMs = now;
+		_rejoinDueMs = 0;
+		Progress.Set(JoinStage.Lost, now, reason);
+	}
+
+	private void ScheduleRejoin(long now)
+	{
+		string reason = _lostReason ?? "connection closed";
+		if (s_rejoin.DelayAfterLoss() is not long delay)
+		{
+			_lostAtMs = 0;
+			_log.Warn($"client: lost the connection {s_rejoin.Rejoins + 1} times in a row ({reason}); not rejoining by itself ({MemoryInUse(collect: false)})");
+			Progress.SetRejoin(true, false);
+			Progress.Set(JoinStage.Lost, now, $"Lost {s_rejoin.Rejoins + 1} times in a row (last: {reason}). Retry joins again. If this keeps happening, send your game log to the server's admin.");
+			return;
+		}
+		_rejoinDueMs = now + delay;
+		_log.Info($"client: connection lost ({reason}); rejoining in {delay / 1000} s (attempt {s_rejoin.Rejoins + 1} of {RejoinPolicy.Attempts})");
+		Progress.Set(JoinStage.Lost, now, $"{reason}\nRejoining in {delay / 1000} s (attempt {s_rejoin.Rejoins + 1} of {RejoinPolicy.Attempts}).");
+	}
+
+	// For the log: a rejoin that does not give the last world's memory back shows here.
+	private static string MemoryInUse(bool collect)
+	{
+		using var me = System.Diagnostics.Process.GetCurrentProcess();
+		return $"game memory {me.PrivateMemorySize64 / 1073741824.0:0.0} GB, managed {GC.GetTotalMemory(collect) / 1073741824.0:0.0} GB";
 	}
 
 	/// <summary>The world being joined runs missions (read from the server before joining).</summary>
@@ -306,6 +559,13 @@ internal sealed class ClientWorld
 	}
 
 	private async System.Threading.Tasks.Task<(string? Error, List<WorldMod>? Mods)> PrepareMods(GameSessionID session)
+	{
+		try { return await PrepareModsCore(session); }
+		catch (OperationCanceledException) { return (WorkshopMods.Cancelled, null); }
+		catch (Exception ex) { return ("Could not read the server's mod list (" + ex.GetBaseException().Message + ").", null); }
+	}
+
+	private async System.Threading.Tasks.Task<(string? Error, List<WorldMod>? Mods)> PrepareModsCore(GameSessionID session)
 	{
 		var mods = await KeenMods.QueryAsync(session, _stop.Token);
 		JoinMissions = mods != null && KeenMods.LastMissions;

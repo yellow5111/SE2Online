@@ -93,8 +93,12 @@ internal static class KeenNet
 	/// <summary>Address and name of this dedicated server (server.json); Keen's default is any address, port 27015.</summary>
 	public static (System.Net.IPEndPoint Endpoint, string Name)? DedicatedListen;
 
+	/// <summary>The session the game's own client last joined (a lobby, a dedicated server's address, ...).</summary>
+	public static volatile GameSessionID? LastJoined;
+
 	private static bool JoinInitPrefix(GameSessionClientComponent __instance, GameSessionClientObjectBuilder ob)
 	{
+		LastJoined = ob.SessionToJoin;
 		IGameSession session;
 		if (ob.SessionToJoin is LocalSessionID local)
 		{
@@ -260,6 +264,17 @@ internal static class KeenNet
 	/// <summary>Whether Steam still holds a connected session with this player (only over Steam; false for loopback and direct IP).</summary>
 	public static bool SteamSessionConnected(bool host, GameServiceUser user) => SteamSession(host, user, out _) == ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_Connected;
 
+	/// <summary>
+	/// The game's own connection to that peer is still up: its Steam session, or for a direct IP join its TCP connection.
+	/// A direct IP join had no answer here, so every Pong later than 30 s behind a queued stream dropped the player (F20).
+	/// </summary>
+	public static bool SessionConnected(bool host, GameServiceUser user)
+	{
+		if (SteamSessionConnected(host, user)) return true;
+		if (host) return (_server?._comms as LocalServerSession)?.DirectConnected(user) == true;
+		return ((ClientComms as FramedSession)?.Inner ?? ClientComms) is DirectIpClientSession direct && direct.IsConnected(user);
+	}
+
 	private static ESteamNetworkingConnectionState SteamSession(bool host, GameServiceUser user, out SteamNetConnectionRealTimeStatus_t status)
 	{
 		status = default;
@@ -287,9 +302,10 @@ internal static class KeenNet
 		}
 	}
 
-	// ponytail: no pending-bytes query yet (Steam returns LimitExceeded once its send buffer is full, MpTransport retries);
-	// add SteamNetworkingMessages.GetSessionConnectionInfo if bulk sends starve the replication channel.
-	public static int PendingReliableBytes(bool host, GameServiceUser user) => 0;
+	// What waits in the large-message layer once Steam's send buffer is full. It was always 0, so a join stream went into
+	// that one in-order queue whole and the player's pings sat behind all of it on a slow link (F20's first loss).
+	// ponytail: Steam's own buffer is not counted; add SteamNetworkingMessages.GetSessionConnectionInfo if that matters.
+	public static int PendingReliableBytes(bool host, GameServiceUser user) => (host ? _serverFramed : ClientComms as FramedSession)?.PendingBytes(user) ?? 0;
 
 	/// <summary>SE2 Online's join check passed: the player's parked hello goes on to Keen's handshake.</summary>
 	public static void Admit(ulong steamId)
@@ -517,8 +533,8 @@ internal static class KeenNet
 		_client = __instance;
 		// Keen gives up on the server's hello after 30 s; SE2 Online's join check may wait for the host's world (2 min cap).
 		var stage = Y51_SE2Online.SyncEngine.ClientWorld.Progress.Stage;
-		if (!__instance._readyForSnapshotRequest.Task.IsCompleted && Environment.TickCount64 - _clientSince < 120000
-			&& stage is not (Sync.JoinStage.Rejected or Sync.JoinStage.Failed or Sync.JoinStage.Idle))
+		if (!__instance._readyForSnapshotRequest.Task.IsCompleted && Environment.TickCount64 - _clientSince < Sync.RejoinPolicy.HandshakeHoldMs
+			&& Sync.RejoinPolicy.HoldsHandshake(stage))
 		{
 			__instance._handshakeStartTick = Environment.TickCount64;
 		}

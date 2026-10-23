@@ -108,6 +108,27 @@ internal static class AccessProbe
 				GameLog.Instance.Info($"selftest: access: sent deposit all into the nearest inventory {near} {Vector3D.Distance(near.Data.GetWorldTransform().Position, at):0.0} m away (expect it to run if the player may use it and stands within reach)");
 			}
 			else GameLog.Instance.Info("selftest: access: no inventory block for the deposit cases");
+			// Seats: sitting in another player's cockpit follows the seat's use access (a team-shared one seats), getting out always works.
+			var seat = session.GetEntitiesOfType<Keen.Game2.Simulation.WorldObjects.CubeBlocks.Pilotable.SeatComponent>()
+				.Where(e => TeamPermissions.OwnerOf(e) is long o && o != own && Sync.PlayerIdentities.IsHuman(o) && e.Get<Keen.Game2.Simulation.WorldObjects.CubeBlocks.Pilotable.SeatComponent>().Pilot == null)
+				.Where(e => Vector3D.Distance(e.Data.GetWorldTransform().Position, at) < 150)
+				.OrderBy(e => Vector3D.Distance(e.Data.GetWorldTransform().Position, at)).FirstOrDefault();
+			if (me != null && seat != null)
+			{
+				var component = seat.Get<Keen.Game2.Simulation.WorldObjects.CubeBlocks.Pilotable.SeatComponent>();
+				// Block access lives on the server; a player's game knows only whether the grid builds for it (team sharing).
+				bool canSit = permissions?.CanCopy(seat.Get<CubeBlockComponent>().Grid.Entity, new Keen.Game2.Simulation.GameSystems.Ownership.IdentityId(own)) ?? true;
+				bool sat;
+				try { sat = await component.TrySetPilotAsync(me); } catch (Exception ex) { sat = false; GameLog.Instance.Info("selftest: access: seat request faulted: " + ex.GetBaseException().Message.Split('\n')[0]); }
+				GameLog.Instance.Info($"selftest: access: sitting in another player's {seat.GetComposition()?.DebugNameShort} ({(canSit ? "team-shared" : "not shared to build; the server decides by its use access")}): {(canSit ? (sat ? "PASS" : "FAIL") : "INFO")} seated {sat}");
+				if (sat)
+				{
+					await Keen.VRage.Library.Threading.Task.Delay(TimeSpan.FromSeconds(2));
+					bool left = await component.TryClearPilotAsync();
+					GameLog.Instance.Info($"selftest: access: getting out again: {(left ? "PASS" : "FAIL")} left {left}");
+				}
+			}
+			else GameLog.Instance.Info("selftest: access: no free seat of another player for the seat cases");
 			GameLog.Instance.Info("selftest: access: done");
 		}
 		catch (Exception ex) { GameLog.Instance.Info("selftest: access: FAIL " + ex.GetType().Name + ": " + ex.Message); }

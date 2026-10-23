@@ -11,6 +11,7 @@ using Keen.Game2.Simulation.GameSystems.Ownership;
 using Keen.Game2.Simulation.GameSystems.Permissions;
 using Keen.Game2.Simulation.RuntimeSystems.Saves;
 using Keen.Game2.Simulation.WorldObjects.Characters;
+using Keen.Game2.Simulation.WorldObjects.CubeBlocks.Pilotable;
 using Keen.Game2.Simulation.WorldObjects.CubeGrids;
 using Keen.VRage.Core.Game.Components;
 using Keen.VRage.DCS.Components;
@@ -35,6 +36,7 @@ namespace Y51_SE2Online.KeenNetcode;
 /// </summary>
 internal static partial class ServerAccess
 {
+	internal static readonly bool SeatOff = Off("seats");
 	private static readonly bool SpawnOff = Off("spawn requests"), CopyOff = Off("grid copies"), SaveOff = Off("save requests"), DepositOff = Off("deposit all"), OwnerOff = Off("default owner");
 
 	private const long AutosaveEveryMs = 300_000;
@@ -48,6 +50,40 @@ internal static partial class ServerAccess
 			Patch(harmony, "deposit all", AccessTools.Method(typeof(InProcessGameServerSessionComponent), "TryDepositAllNonEssentialItemsImpl"), prefix: nameof(DepositPrefix));
 		}
 		if (!OwnerOff) Patch(harmony, "default owner", AccessTools.Method(typeof(OwnershipSessionComponent), nameof(OwnershipSessionComponent.GetDefaultOwner)), prefix: nameof(DefaultOwnerPrefix));
+		Patch(harmony, "refused seats", AccessTools.Method(typeof(SeatComponent), nameof(SeatComponent.CanSeat)), prefix: nameof(CanSeatPrefix));
+	}
+
+	// A refused seat story still runs and answers false, as for a seat that is taken: the player's game then undoes its
+	// own seating. A faulted one left the player's seat action in progress for good (no seat could be used again).
+	private static readonly ConcurrentDictionary<(SeatComponent Seat, Entity? Pilot), long> _refusedSeats = new();
+
+	/// <summary>True when the refused <paramref name="story"/> was turned into one that answers false.</summary>
+	internal static bool AnswersFalse(IAsyncStateMachine story)
+	{
+		var type = story.GetType();
+		if (type.DeclaringType != typeof(SeatComponent) || Field<SeatComponent>(story, "<>4__this") is not { } seat) return false;
+		switch (StoryName(type))
+		{
+			case "SetPilotStory":
+				long now = MpClock.NowMs();
+				foreach (var (key, at) in _refusedSeats)
+					if (now - at > 5000) _refusedSeats.TryRemove(key, out _);
+				_refusedSeats[(seat, Field<SkipOnReplicationFail<Entity>>(story, "pilot").Value)] = now;
+				return true;
+			case "TryClearPilotStory":
+				// The seat's own entity is never its pilot: the story answers false and clears nothing.
+				AccessTools.Field(type, "pilot").SetValue(story, new SkipOnReplicationFail<Entity>(seat.Entity));
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	private static bool CanSeatPrefix(SeatComponent __instance, Entity pilot, ref bool __result)
+	{
+		if (_refusedSeats.IsEmpty || !_refusedSeats.TryRemove((__instance, pilot), out long at) || MpClock.NowMs() - at > 5000) return true;
+		__result = false;
+		return false;
 	}
 
 	// The player whose signals are being replayed on the server, on either transport (Keen's: ProcessMessage of that
@@ -93,6 +129,14 @@ internal static partial class ServerAccess
 			if (_lastAutosave.TryGetValue(caller, out long last) && now - last < AutosaveEveryMs) return $"an autosave {(now - last) / 1000} s after the last one it asked for (one per {AutosaveEveryMs / 60_000} min)";
 			_lastAutosave[caller] = now;
 			return null;
+		}
+		// Taking someone out of a seat needs the seat's use access, as sitting down does (SeatGuard, at CanSeat); the game
+		// checks only that the seat is taken. Getting out of a seat oneself is always allowed.
+		if (owner == typeof(SeatComponent) && name == "TryClearPilotStory" && !SeatOff && Field<SeatComponent>(story, "<>4__this") is { } seat)
+		{
+			var pilot = Field<SkipOnReplicationFail<Entity>>(story, "pilot").Value;
+			bool leaving = pilot != null && TeamPermissions.OwnerOf(pilot) == caller;
+			if (!leaving && !MayUse(null, new IdentityId(caller), seat._block.Entity)) return "a seat the player may not use";
 		}
 		if (owner == typeof(BlueprintHelpers) && name == "SerializeGrid" && !CopyOff)
 		{

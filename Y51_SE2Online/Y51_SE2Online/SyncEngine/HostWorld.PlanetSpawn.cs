@@ -244,7 +244,7 @@ internal sealed partial class HostWorld
             highest = Math.Max(highest, SurfaceRadius(p, Vector3.Normalize(dir + (a * (float)Math.Cos(s) + b * (float)Math.Sin(s)) * (float)(reach / groundRadius))));
         }
         // The box centre (not the grid origin, which can sit far off the hull) goes over the site.
-        bool piloted = RespawnCockpit(keep) != null;
+        bool piloted = FindCockpit(keep) != null;
         var position = site.Ground - (Vector3D)Vector3.Transform(new Vector3(box.Center.X, 0, box.Center.Z), orientation) + site.Up * RespawnShips.LanderOriginHeight(highest - groundRadius, box.Min.Y, piloted);
         var rotation = orientation * Quaternion.Conjugate(old.Orientation);
         var pins = new List<(Entity Grid, WorldTransform At)>();

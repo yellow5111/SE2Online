@@ -156,14 +156,23 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		Optional("shared discoveries", () => SharedDiscoveries.Install(_harmony));
 		Optional("motion playback", () => MotionSmoothing.Install(_harmony));
 		Optional("flora collider recovery", () => KeenNetcode.FloraPhysicsRecovery.Install(_harmony));
+#if !PULSAR
+		Optional("hand drill claims log", () => KeenNetcode.DrillProbe.Install(_harmony));
+		Optional("swapped story answer probe", () => KeenNetcode.SwapStoryProbe.Install(_harmony));
+		Optional("paste twice probe", () => KeenNetcode.PasteTwiceProbe.Install(_harmony));
+#endif
 		Optional("fresh grids kept from trash removal", () => KeenNetcode.FreshGridGuard.Install(_harmony));
+		Optional("stuck fast travel cancelled", () => KeenNetcode.FastTravelGuard.Install(_harmony));
 		Optional("turrets look past targets their own grid blocks", () => TurretRelations.InstallRetarget(_harmony));
 		Optional("missions and contracts for players", () => ClientWorld.InstallMissions(_harmony));
 		Optional("4.0 crash guards", () => KeenGuards.Install(_harmony));
+		Optional("refused joins go back to the menu", () => ClientWorld.InstallJoinGuard(_harmony));
 		Optional("projection block references", () => ProjectionRefs.Install(_harmony));
 		Optional("ghost block delete ownership", () => GhostBlocks.Install(_harmony));
 		Optional("resilient replication", () => ResilientReplication.Install(_harmony));
 		Optional("story closures for players' requests", () => KeenNetcode.StoryClosures.Install(_harmony));
+		Optional("cockpit toolbars for players", () => KeenNetcode.ToolbarRequests.Install(_harmony));
+		Optional("log noise: repeated not-serializable notes", () => KeenNetcode.LogNoise.Install(_harmony));
 		Optional("SE2 Online replication engine", () => Engine.Y51Replication.Install(_harmony));
 		Optional("death ragdolls follow the server", () => Engine.ClientRagdolls.Install(_harmony));
 		Optional("corpses follow the server", () => Engine.CorpseMotion.Install(_harmony));
@@ -174,6 +183,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		Optional("leaving a joined world", () => LeaveDetect.Install(_harmony));
 		Optional("server-side access checks", () => ServerAccess.Install(_harmony));
 		Optional("tool reach for remote players", () => ToolReach.Install(_harmony));
+		Optional("hand drill on planet boulders for remote players", () => DrillReach.Install(_harmony));
 		Optional("one pilot per ship", () => OnePilot.Install(_harmony));
 		Optional("streaming radius", () => Streaming.Install(_harmony));
 		Optional("seat guard (sitting while seated)", () => SeatGuard.Install(_harmony));
@@ -200,6 +210,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			MpMenu.Install(_harmony);
 			Optional("GPS sharing", GpsShareUi.Install);
 			Optional("sound range", () => SoundRange.Install(_harmony));
+			Optional("full antenna and player names on the HUD", () => HudNameWidth.Install(_harmony));
 			Optional("flora sector fix", () => FloraSectorSpawnFix.Install(_harmony));
 			Optional("host-only saves", () => HostOnlySaves.Install(_harmony));
 			Optional("trade UI", TradeUi.Install);
@@ -310,19 +321,25 @@ public sealed class MpPlugin : IPlugin, IDisposable
 	public static void Tick(Keen.Game2.GameAppComponent app)
 	{
 		App = app;
+		long started = ServerProfiler.Now;
 		KytheraVeh.Tick();
 		if (app.Server == null) _observedWorld = null;
 		Controller?.Tick(MpClock.NowMs());
+		ServerProfiler.Lap(ServerSection.Online, started);
 		DedicatedRuntime.Tick(app);
+		started = ServerProfiler.Now;
 		NetSession.Current?.Client?.ApplyRulesOffers();
 		ClientWorld.Current?.MainTick(app);
+		ClientWorld.ReturnOrphanJoin(app);
 		HostWorld.Current?.MainTick(app);
 		KeenNet.ApplyLobby();
+		ServerProfiler.Lap(ServerSection.Online, started);
 #if !PULSAR
 		if (_steamReady || DedicatedRuntime.Requested) OwnMotionProbe.FakeLag();
 #endif
 		Instance?.AttachToKeenJoin(app);
 		Instance?.AutoJoin(app);
+		RunParkedJoin();
 #if !PULSAR
 		if (_steamReady) UiShots.Tick(app);
 		MotionProbe.Tick(app);
@@ -372,6 +389,8 @@ public sealed class MpPlugin : IPlugin, IDisposable
 	private bool _autoJoined;
 
 	// -y51online:autojoin:<address[:port]> joins that server once the main menu is up (desktop shortcuts, tests).
+	private bool AutoJoinPending => !_autoJoined && LaunchArgs.Any(a => a.StartsWith(MpOptions.Prefix + "autojoin:", StringComparison.OrdinalIgnoreCase));
+
 	private void AutoJoin(Keen.Game2.GameAppComponent app)
 	{
 #if !PULSAR
@@ -400,13 +419,44 @@ public sealed class MpPlugin : IPlugin, IDisposable
 	// downloads the host's mods, which the game's own join never does, and its join session must exist for the host to admit us.
 	private static bool KeenJoinPrefix(Keen.VRage.Core.Services.GameSessions.GameSessionID sessionID, ref Keen.VRage.Library.Threading.Task __result)
 	{
-		if (ClientWorld.Joining || Instance == null || Controller == null || Controller.Busy) return true;
+		if (ClientWorld.Joining || Instance == null || Controller == null) return true;
+		// With SE2 Online's rejoin off, the game's own reconnect stays the game's own, as before.
+		if (Controller.Current is { Rejoin: false } && App is { } app && KeenNetcode.LeaveDetect.KeenReconnecting(app, sessionID)) return true;
+		// While a session change is under way the game's own join used to run unwatched, and its end (refused, failed) went
+		// to the game's crash monitor; it waits for the change to finish and goes through SE2 Online like any other.
+		if (Controller.Busy)
+		{
+			_parkedJoin = sessionID;
+			GameLog.Instance.Info($"session: the game asked to join {sessionID} while a session change is under way; it joins once that is done");
+		}
+		else RequestKeenJoin(sessionID);
+		__result = Keen.VRage.Library.Threading.TaskExtensions.StripResult(Keen.VRage.Library.Threading.Task.FromResult(true));
+		return false;
+	}
+
+	private static Keen.VRage.Core.Services.GameSessions.GameSessionID? _parkedJoin;
+
+	private static void RequestKeenJoin(Keen.VRage.Core.Services.GameSessions.GameSessionID sessionID)
+	{
 		var options = MpOptions.Parse(new[] { MpOptions.Prefix + "join:wait" });
 		options.KeenSession = sessionID;
 		GameLog.Instance.Info($"session: the game asked to join {sessionID}; SE2 Online takes the join over");
-		Controller.Request(options, MpClock.NowMs());
-		__result = Keen.VRage.Library.Threading.TaskExtensions.StripResult(Keen.VRage.Library.Threading.Task.FromResult(true));
-		return false;
+		Controller!.Request(options, MpClock.NowMs());
+	}
+
+	/// <summary>Main thread: a game join parked while the controller was busy goes once it is free.</summary>
+	private static void RunParkedJoin()
+	{
+		if (System.Threading.Volatile.Read(ref _parkedJoin) == null || Controller == null || Controller.Busy) return;
+		// A failed change keeps its error on screen: the parked join is dropped, not run over it.
+		if (Controller.State == OnlineSessionState.Failed)
+		{
+			if (System.Threading.Interlocked.Exchange(ref _parkedJoin, null) is { } dropped) GameLog.Instance.Info($"session: the game's join of {dropped} is dropped (the session change failed: {Controller.Error})");
+			return;
+		}
+		// A launch-option join goes first.
+		if (Instance?.AutoJoinPending == true) return;
+		if (System.Threading.Interlocked.Exchange(ref _parkedJoin, null) is { } parked) RequestKeenJoin(parked);
 	}
 
 	// The game's own join (Steam invite, "Join Game", join code) started a network client without SE2 Online: ride along
@@ -417,6 +467,8 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		if (KeenNet.ClientServer is not { } server || KeenNet.SteamIdOf(server) is not ulong host) return;
 		var options = MpOptions.Parse(new[] { "-y51online:join:" + host });
 		options.KeenAttached = true;
+		// What a Retry dials (the session never dials while attached): a dedicated server's address or the host's lobby.
+		options.KeenSession = KeenNet.LastJoined;
 		_log.Info($"session: the game joined server {host} by itself; SE2 Online joins along");
 		Controller.Attach(options);
 	}
@@ -451,6 +503,8 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			{
 				NetSession.Current?.Stop("mode setup failed", 0);
 				if (NetworkingStopped) _plugin.ResetMode();
+				// An automatic rejoin whose join never started does not count; the player's next join starts from zero.
+				ClientWorld.PlayerLeft();
 				throw;
 			}
 		}
