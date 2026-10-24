@@ -6,16 +6,15 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Templates;
 using Avalonia.Layout;
+using Avalonia.Media;
+using Avalonia.Media.Immutable;
 using Avalonia.Styling;
 using Avalonia.Threading;
-using Keen.Game2.Simulation.WorldObjects.Items;
-using Keen.VRage.Core.Game.Definitions;
-using Keen.VRage.Library.Definitions;
-using Keen.VRage.Library.Utils;
-using Keen.VRage.Multiplayer.Data;
 using Keen.VRage.UI.AvaloniaInterface.Utilities;
 using Keen.VRage.UI.Screens;
+using Keen.VRage.UI.Shared.Controls.BeveledBorder;
 using Y51_SE2Online.Core;
+using Y51_SE2Online.NetHost;
 using Y51_SE2Online.Sync;
 
 namespace Y51_SE2Online.SyncEngine;
@@ -26,164 +25,182 @@ public sealed class AdminScreenViewModel : ScreenViewModel
     private long _next;
     public AdminScreenViewModel()
     {
-        KeepsOtherScreensVisible = false; AllowsInputFromLowerScreens = false; InitializeInputContext();
+        // The world keeps rendering behind the docked column. Esc closes through the screen's default closing action.
+        KeepsOtherScreensVisible = true; AllowsInputFromLowerScreens = false; InitializeInputContext();
         OnTick += () => { if (MpClock.NowMs() < _next) return; _next = MpClock.NowMs() + 500; Refresh?.Invoke(); };
     }
     public void Close() => SignalWantsClose();
 }
 
-public sealed class AdminScreen : ScreenView
+/// <summary>The admin panel: a column docked on the right of the screen, one page per area, each shown only with its keys.</summary>
+public sealed partial class AdminScreen : ScreenView
 {
-    private sealed record Entry(Guid Id, string Name);
-    private static Entry[] _prefabs, _items;
+    private const double ColumnWidth = 640, FrameHeight = 1080, MinBackdropOpacity = 0.8;
+    private static readonly IBrush LiveBrush = new SolidColorBrush(Color.FromRgb(0x3D, 0xD6, 0x8C));
+    private static readonly IBrush IdleBrush = new SolidColorBrush(Color.FromArgb(0x99, 0xC8, 0xCC, 0xD4));
 
-    private readonly TextBlock _status = OnlineUi.Text("", "SubTitle");
-    private readonly TextBlock _message = OnlineUi.Text("", "SubtleNotice", 21);
-    private readonly TextBlock _pvp, _raid, _pcu, _sun;
-    private readonly OnlineToggle _bypass = new OnlineToggle("Access bypass for me");
-    private bool _syncingBypass;
-    private readonly TextBox _dayInput = OnlineUi.Input("Day length (minutes)", 6);
-    private readonly TextBox _pcuInput = OnlineUi.Input("PCU per player", 9);
-    private readonly TextBox _motdInput = new() { Watermark = "Message of the day ({player}, {server}, {online}, {max})", MaxLength = Core.Motd.MaxText, FontSize = 22, MinHeight = 120, AcceptsReturn = true, TextWrapping = Avalonia.Media.TextWrapping.Wrap };
-    private readonly TextBlock _motd = OnlineUi.Text("", "SubtleNotice", 22);
+    private sealed record PageDef(string Name, Control Body, Func<AdminState, bool> Show, Button Tab);
+
+    private readonly Border _pill = new() { CornerRadius = new CornerRadius(12), Padding = new Thickness(12, 2), VerticalAlignment = VerticalAlignment.Center };
+    private readonly TextBlock _pillText = new() { FontSize = 16, FontWeight = FontWeight.Bold, LetterSpacing = 2, Foreground = Brushes.Black };
+    private readonly TextBlock _server = OnlineUi.Text("", "SubTitle", 22);
+    private readonly TextBlock _who = Hint("");
+    private readonly TextBlock _message = Hint(""), _note = Hint("");
     private readonly ContentControl _page = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
-    private readonly TextBox _prefabSearch = OnlineUi.Input("Search prefabs", 64), _itemSearch = OnlineUi.Input("Search items", 64);
-    private readonly TextBox _amount = OnlineUi.Input("100", 6);
-    private static readonly AccessPlayer Me = new(0, "Me", OnlineRole.Player, true, 0);
-    private readonly ComboBox _giveTo = new()
-    {
-        ItemsSource = new[] { Me }, SelectedIndex = 0, MinHeight = 40, MinWidth = 240, FontSize = 20, VerticalAlignment = VerticalAlignment.Center,
-        ItemTemplate = new FuncDataTemplate<AccessPlayer>((p, _) => p == null ? null : OnlineUi.Text(p.Name, size: 20, inheritForeground: true))
-    };
-    private readonly (Slider S, Control Row) _sunAngle = OnlineUi.Slider(0, 359, 1, v => v + "°", 360);
-    private bool _sunSyncing, _sunQueued;
-    private long _sunTouchedMs;
-    private double _sunStateDeg = double.NaN;
-    private readonly (Slider S, Control Row) _distance = OnlineUi.Slider(5, 500, 5, v => v + " m", 260);
-    private readonly TextBox _zoneName = OnlineUi.Input("Safe zone name", 64);
-    private readonly (Slider S, Control Row) _zoneRadius = OnlineUi.Slider(10, 2000, 10, v => v + " m", 260), _resize = OnlineUi.Slider(10, 2000, 10, v => v + " m", 260);
-    private readonly ListBox _prefabList = OnlineUi.List("AdminPrefabs"), _itemList = OnlineUi.List("AdminItems"), _zoneList = OnlineUi.List("AdminSafeZones"), _playerList = OnlineUi.List("AdminPlayers");
-    private readonly Button[] _tabs;
-    private readonly Control[] _pages;
-    private readonly Button _spawn, _give, _createZone, _resizeZone, _deleteZone, _teleport, _bring;
+    private readonly Control _nothing = OnlineUi.EmptyState("Nothing to show", "Your group has no admin panel pages here.");
+    private readonly List<PageDef> _pages = new();
+    private readonly List<Action<AdminState>> _gates = new();
+    private readonly BeveledBorder _surface = new() { IsHitTestVisible = false, Opacity = 0.92 }, _frame = new() { IsHitTestVisible = false, IsVisible = false };
+    private readonly Border _edge = new() { BorderThickness = new Thickness(2, 0, 0, 0), IsHitTestVisible = false }, _rule = new() { Height = 1, IsVisible = false, Margin = new Thickness(0, 12, 0, 0) };
+    private readonly Grid _dock = new();
+    private bool _native;
+    private AdminState _state = new();
     private AdminScreenViewModel _model;
-    private bool _closed;
-    private string _zoneSignature, _playerSignature, _prefabFilter, _itemFilter;
+    private int _current;
+    private bool _closed, _built;
+    private string _lastMessage;
 
     public AdminScreen()
     {
-        _prefabList.ItemTemplate = new FuncDataTemplate<Entry>((e, _) => e == null ? null : OnlineUi.ListCells("*", e.Name));
-        _itemList.ItemTemplate = new FuncDataTemplate<Entry>((e, _) => e == null ? null : OnlineUi.ListCells("*", e.Name));
-        _zoneList.ItemTemplate = new FuncDataTemplate<SafeZoneInfo>((z, _) => z == null ? null : OnlineUi.ListCells("*,200", z.Name, z.Radius.ToString("0", CultureInfo.InvariantCulture) + " m"));
-        _playerList.ItemTemplate = new FuncDataTemplate<AccessPlayer>((p, _) => p == null ? null : OnlineUi.ListCells("*,160", p.Name, p.Role.ToString()));
+        AddPage("Players", PlayersPage(), s => CanAny(s, "admin.players.", "admin.teleport.", "admin.spawn.item_others"));
+        AddPage("Entities", EntitiesPage(), s => s.Can("admin.entities.list"));
+        AddPage("Cleanup", CleanupPage(), s => s.Can("admin.cleanup") || s.Can("cleanup.run") || s.Can("cleanup.configure"));
+        AddPage("Spawn", SpawnPage(), s => CanAny(s, "admin.spawn."));
+        AddPage("Zones", ZonesPage(), s => CanAny(s, "admin.safezone."));
+        AddPage("World", WorldPage(), s => CanAny(s, "admin.world."));
+        AddPage("Me", MePage(), s => s.Can("admin.creative.tools") || s.Can("admin.creative.godmode") || s.Can("admin.access_bypass"));
+        AddPage("Server", ServerPage(), s => s.Can("admin.players.view_bans") || s.Can("admin.players.unban") || s.Can("admin.whitelist") || s.Dedicated);
+        AddPage("Perms", PermsPage(), s => s.Can("admin.players.set_group") || s.Can("command.perms"));
+        Styles.Add(new Style(s => s.OfType<Button>().Class("OnlineNavigation").Class("Selected")) { Setters = { new Setter(Button.BorderThicknessProperty, new Thickness(3)), new Setter(Button.BorderBrushProperty, new VRageDynamicResource("Primary")), new Setter(Button.FontWeightProperty, FontWeight.Bold) } });
+        // SE2's TextBlock theme is one line with "..."; Is<> also reaches the AccessText inside buttons and check boxes.
+        Styles.Add(new Style(s => s.Is<TextBlock>()) { Setters = { new Setter(TextBlock.TextWrappingProperty, TextWrapping.Wrap), new Setter(TextBlock.TextTrimmingProperty, TextTrimming.None) } });
 
-        var creativeOn = OnlineUi.Button("Enable creative tools", () => Send(new AdminRequest(AdminAction.Creative, Value: true)), "AdminCreativeOn", true);
-        var creativeOff = OnlineUi.Button("Disable creative tools", () => Send(new AdminRequest(AdminAction.Creative, Value: false)), "AdminCreativeOff", true);
-        var tools = OnlineUi.Section("CREATIVE TOOLS",
-            OnlineUi.Text("Creative tools apply to you only. Blocks you place and blueprints you paste are built instantly without resources, your hand welder welds without components, creative-only blocks appear in the block menu, and whole grids can be deleted.", null, 24),
-            OnlineUi.Row(creativeOn, creativeOff),
-            OnlineUi.Text("Paste blueprints with the game's normal blueprint screen while creative tools are on. Welding speed is world-wide and stays survival. Creative tools end when you stop being an admin. Blocks built with them give their components back when ground, as in the game's creative mode.", "SubtleNotice", 22),
-            OnlineUi.Text("The game's F12 debug menu is limited to admins on this server.", "SubtleNotice", 22));
-        _bypass.IsCheckedChanged += (_, _) => { if (!_syncingBypass) Send(new AdminRequest(AdminAction.AccessBypass, Value: _bypass.IsChecked)); };
-        var bypass = OnlineUi.Section("ACCESS BYPASS",
-            OnlineUi.Text("Nobody, the host and admins included, can use, open, sit in or build on grids and blocks they do not own or have faction or everyone access to. Turn this on to bypass that for yourself only, for this session.", null, 24),
-            _bypass);
-        _pvp = OnlineUi.Text("", "SubTitle");
-        _raid = OnlineUi.Text("", "SubTitle");
-        _pcu = OnlineUi.Text("", "SubTitle");
-        var pvp = OnlineUi.Section("PVP",
-            OnlineUi.Text("With PvP on, players can damage each other and turrets attack players outside their faction. With PvP off, nobody can hurt another player. Offline players' characters cannot die either way, except to other players while PvP is on.", null, 24),
-            _pvp,
-            OnlineUi.Row(OnlineUi.Button("PvP on", () => Send(new AdminRequest(AdminAction.Pvp, Value: true)), "AdminPvpOn", true),
-                OnlineUi.Button("PvP off", () => Send(new AdminRequest(AdminAction.Pvp, Value: false)), "AdminPvpOff", true)),
-            OnlineUi.Text("Admins, the host and the server console can change these (console: pvp on|off, raid on|off).", "SubtleNotice", 22),
-            _raid,
-            OnlineUi.Text("Offline raid protection: while a grid's owner and every member of their faction are offline, other players' weapons, explosives and grinders cannot damage it.", null, 24),
-            OnlineUi.Row(OnlineUi.Button("Raid protection on", () => Send(new AdminRequest(AdminAction.OfflineRaidProtection, Value: true)), "AdminRaidOn", true),
-                OnlineUi.Button("Raid protection off", () => Send(new AdminRequest(AdminAction.OfflineRaidProtection, Value: false)), "AdminRaidOff", true)),
-            _pcu,
-            OnlineUi.Row(_pcuInput,
-                OnlineUi.Button("Set PCU limit", () => { if (int.TryParse(_pcuInput.Text, out int limit) && limit > 0) Send(new AdminRequest(AdminAction.PcuLimit, Size: limit)); }, "AdminPcuSet", true),
-                OnlineUi.Button("No limit", () => Send(new AdminRequest(AdminAction.PcuLimit, Size: 0)), "AdminPcuOff", true),
-                OnlineUi.Button("World default", () => Send(new AdminRequest(AdminAction.PcuLimit, Size: -1)), "AdminPcuDefault", true)));
+        var titleRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        titleRow.Children.Add(OnlineUi.Text("ADMIN", "Header", 46));
+        var close = OnlineUi.SmallButton("Close (Esc)", () => _model?.Close(), "AdminClose");
+        close.VerticalAlignment = VerticalAlignment.Center; Grid.SetColumn(close, 1); titleRow.Children.Add(close);
+        _pill.Child = _pillText; _pill.VerticalAlignment = VerticalAlignment.Top;
+        var serverRow = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,12,*") };
+        serverRow.Children.Add(_pill); Grid.SetColumn(_server, 2); serverRow.Children.Add(_server);
+        var header = new StackPanel { Spacing = 6 };
+        header.Children.Add(titleRow); header.Children.Add(serverRow); header.Children.Add(_who); header.Children.Add(_rule);
 
-        var motd = OnlineUi.Section("MESSAGE OF THE DAY",
-            OnlineUi.Text("Shown to every player once they spawn, as a popup and in chat. {player}, {server}, {online} and {max} are filled in.", null, 24),
-            _motd, _motdInput,
-            OnlineUi.Row(OnlineUi.Button("Set message", () => Send(new AdminRequest(AdminAction.Motd, Name: _motdInput.Text ?? "")), "AdminMotdSet", true),
-                OnlineUi.Button("Clear", () => Send(new AdminRequest(AdminAction.Motd, Name: "")), "AdminMotdClear", true)));
-        _sun = OnlineUi.Text("", "SubTitle");
-        // Absolute angle, so repeated sends while dragging can't add up; sent at most every 150 ms.
-        _sunAngle.S.PropertyChanged += (_, e) =>
-        {
-            if (e.Property != Avalonia.Controls.Primitives.RangeBase.ValueProperty || _sunSyncing) return;
-            _sunTouchedMs = MpClock.NowMs();
-            if (_sunQueued) return;
-            _sunQueued = true;
-            DispatcherTimer.RunOnce(() => { _sunQueued = false; Send(new AdminRequest(AdminAction.SunSet, Size: _sunAngle.S.Value)); }, TimeSpan.FromMilliseconds(150));
-        };
-        _dayInput.Width = 260;
-        var sun = OnlineUi.Section("SUN",
-            OnlineUi.Text("The sun turns once per day. Stop it to keep the light where it is, set how long a full day lasts, or move the sun to change the time of day for everyone. Changes are saved with the world.", null, 24),
-            _sun,
-            OnlineUi.Row(OnlineUi.Button("Rotation on", () => Send(new AdminRequest(AdminAction.SunRotation, Value: true)), "AdminSunOn", true),
-                OnlineUi.Button("Rotation off", () => Send(new AdminRequest(AdminAction.SunRotation, Value: false)), "AdminSunOff", true)),
-            OnlineUi.Row(_dayInput,
-                OnlineUi.Button("Set day length", () => { double day = Number(_dayInput, 0); if (day >= 1 && day <= 10080) Send(new AdminRequest(AdminAction.SunPeriod, Size: day)); }, "AdminSunDay", true)),
-            OnlineUi.Row(OnlineUi.Text("Sun position", "SubTitle"), _sunAngle.Row),
-            OnlineUi.Text("Server console: sun on|off, sun day <minutes>, sun move <degrees>, sun set <0-360> (both glide smoothly). server.json: SunRotation, SunPeriodMinutes.", "SubtleNotice", 22));
+        var nav = new WrapPanel { Margin = new Thickness(0, 14, 0, 8) };
+        foreach (var page in _pages) nav.Children.Add(page.Tab);
+        var footer = new StackPanel { Spacing = 4 };
+        footer.Children.Add(_note); footer.Children.Add(_message);
+        var footerScroll = new ScrollViewer { Content = footer, MaxHeight = 160, Margin = new Thickness(0, 10, 0, 0), HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
 
-        _spawn = OnlineUi.Button("Spawn in front of me", () => { if (_prefabList.SelectedItem is Entry e) Send(new AdminRequest(AdminAction.SpawnPrefab, Name: e.Id.ToString(), Size: _distance.S.Value)); }, "AdminSpawnPrefab", true);
-        _prefabSearch.TextChanged += (_, _) => RefreshCatalogs();
-        var spawn = Page(_prefabSearch, _prefabList, OnlineUi.Row(OnlineUi.Text("Distance", "SubTitle"), _distance.Row, _spawn));
+        var layout = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto") };
+        layout.Children.Add(header);
+        Grid.SetRow(nav, 1); layout.Children.Add(nav);
+        Grid.SetRow(_page, 2); layout.Children.Add(_page);
+        Grid.SetRow(footerScroll, 3); layout.Children.Add(footerScroll);
 
-        _give = OnlineUi.Button("Give", () => { if (_itemList.SelectedItem is Entry e) Send(new AdminRequest(AdminAction.SpawnItem, (_giveTo.SelectedItem as AccessPlayer)?.SteamId ?? 0, Name: e.Id.ToString(), Size: Number(_amount, 1))); }, "AdminGiveItem", true);
-        _itemSearch.TextChanged += (_, _) => RefreshCatalogs();
-        var items = Page(_itemSearch, _itemList, OnlineUi.Row(OnlineUi.Text("Amount", "SubTitle"), _amount, OnlineUi.Text("To", "SubTitle"), _giveTo, _give));
-
-        _createZone = OnlineUi.Button("Create at my position", () => Send(new AdminRequest(AdminAction.CreateSafeZone, Name: _zoneName.Text ?? "", Size: _zoneRadius.S.Value)), "AdminCreateSafeZone", true);
-        _resizeZone = OnlineUi.Button("Resize", () => { if (_zoneList.SelectedItem is SafeZoneInfo z) Send(new AdminRequest(AdminAction.DeleteSafeZone, z.NetId, Size: _resize.S.Value)); }, "AdminResizeSafeZone");
-        _deleteZone = OnlineUi.Button("Delete", () => { if (_zoneList.SelectedItem is SafeZoneInfo z) SocialUi.Confirm("Delete safe zone", "Delete '" + z.Name + "'?", () => AdminAccess.Send(new AdminRequest(AdminAction.DeleteSafeZone, z.NetId))); }, "AdminDeleteSafeZone");
-        _zoneName.Width = 420; _distance.S.Value = 25; _zoneRadius.S.Value = 100; _resize.S.Value = 100;
-        _zoneList.SelectionChanged += (_, _) => { if (_zoneList.SelectedItem is SafeZoneInfo z) _resize.S.Value = Math.Clamp(z.Radius, 10, 2000); };
-        var zones = Page(OnlineUi.Row(_zoneName, OnlineUi.Text("Radius", "SubTitle"), _zoneRadius.Row, _createZone), _zoneList, OnlineUi.Row(_resize.Row, _resizeZone, _deleteZone));
-
-        _teleport = OnlineUi.Button("Teleport to player", () => { if (_playerList.SelectedItem is AccessPlayer p) Send(new AdminRequest(AdminAction.TeleportTo, p.SteamId)); }, "AdminTeleportTo", true);
-        _bring = OnlineUi.Button("Bring player to me", () => { if (_playerList.SelectedItem is AccessPlayer p) Send(new AdminRequest(AdminAction.Bring, p.SteamId)); }, "AdminBring", true);
-        var players = Page(OnlineUi.Text("Kick, ban and promote players from the Players screen (" + MpMenu.Settings.PlayersKey + ").", "SubtleNotice", 22), _playerList, OnlineUi.Row(_teleport, _bring));
-
-        _pages = new Control[] { OnlineUi.Scroll(OnlineUi.Stack(tools, bypass, pvp, motd, sun)), spawn, items, zones, players };
-        string[] names = { "Creative", "Spawn", "Items", "Safe zones", "Players" };
-        _tabs = new Button[names.Length];
-        for (int i = 0; i < names.Length; i++) { int index = i; _tabs[i] = OnlineUi.Button(names[i], () => Select(index), "Admin" + names[i].Replace(" ", "")); _tabs[i].Classes.Add("OnlineNavigation"); }
-        Styles.Add(new Style(s => s.OfType<Button>().Class("OnlineNavigation").Class("Selected")) { Setters = { new Setter(Button.BorderThicknessProperty, new Thickness(3)), new Setter(Button.BorderBrushProperty, new VRageDynamicResource("Primary")), new Setter(Button.FontWeightProperty, Avalonia.Media.FontWeight.Bold) } });
-        foreach (var list in new[] { _prefabList, _itemList, _zoneList, _playerList }) list.SelectionChanged += (_, _) => RefreshActions();
-        var connection = OnlineUi.Stack(_status, _message); connection.Spacing = 6;
-        Content = OnlineUi.Shell(this, "ADMIN", OnlineUi.Row(_tabs), connection, _page, OnlineUi.Row());
+        // Fallback look until ApplyNativeLook finds the game's panel resources: PrimaryPanel black, denser than its usual 60 %.
+        _surface.Classes.Add("PrimaryPanel");
+        _edge.Bind(Border.BorderBrushProperty, new VRageDynamicResource("Primary"));
+        _dock.Children.Add(_surface); _dock.Children.Add(_frame); _dock.Children.Add(_edge);
+        _dock.Children.Add(new Border { Padding = new Thickness(24, 18, 16, 18), Child = layout });
+        var column = new Grid { Width = ColumnWidth, Height = FrameHeight };
+        column.Children.Add(_dock);
+        Loaded += (_, _) => ApplyNativeLook();
+        // Only the column scales with the screen height and sits on the right edge, at any aspect ratio; the rest of the
+        // screen has no control at all, so it takes no clicks.
+        Content = new Viewbox { Name = "AdminDock", Stretch = Stretch.Uniform, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Stretch, Child = column };
         OnDisposing += _ => { _closed = true; if (_model != null) _model.Refresh -= QueueRefresh; };
+        _built = true;
         Select(0);
     }
 
-    private static Control Page(Control top, Control list, Control bottom)
+    /// <summary>
+    /// The look of SE2's terminal dialogs (PreciseTransferScreen, TradeTransferScreen): Border-Background under a 2 px
+    /// Decorative-Border-Brush bevel, the terminal header's Gray-906 rule, Tab-Stroke-Active on the open tab, and the
+    /// player's own UI background opacity. Read once the column is in the window, where the game's global styles are.
+    /// </summary>
+    private void ApplyNativeLook()
     {
-        var grid = new Grid { RowDefinitions = new RowDefinitions("Auto,*,Auto") };
-        top.Margin = new Thickness(0, 0, 0, 12); grid.Children.Add(top);
-        Grid.SetRow(list, 1); grid.Children.Add(list);
-        bottom.Margin = new Thickness(0, 12, 0, 0); Grid.SetRow(bottom, 2); grid.Children.Add(bottom);
-        return OnlineUi.Panel(grid);
+        if (_native) return;
+        try
+        {
+            if (Find("Border-Background") is not { } panel) return;
+            _native = true;
+            var bevel = this.TryFindResource("Radius-Medium", out object r) && r is CornerRadius radius ? radius : new CornerRadius(5);
+            _surface.Classes.Remove("PrimaryPanel");
+            _surface.Background = panel; _surface.BorderThickness = default; _surface.Bevel = bevel;
+            // Never lighter than 80 %: unlike the terminal, the column is read over the live world.
+            _surface.Opacity = this.TryFindResource("DynamicUIBackgroundOpacity", out object o) && o is IConvertible value ? Math.Clamp(value.ToDouble(CultureInfo.InvariantCulture), MinBackdropOpacity, 1) : _surface.Opacity;
+            _dock.Margin = new Thickness(0, 12, 12, 12);
+            if (Find("Decorative-Border-Brush") is { } border)
+            {
+                _frame.BorderBrush = border; _frame.BorderThickness = new Thickness(2); _frame.Bevel = bevel;
+                _frame.IsVisible = true; _edge.IsVisible = false;
+            }
+            if (Find("Gray-906") is { } rule) { _rule.Background = rule; _rule.IsVisible = true; }
+            if (Find("Tab-Stroke-Active") is { } tab)
+                Styles.Add(new Style(s => s.OfType<Button>().Class("OnlineNavigation").Class("Selected")) { Setters = { new Setter(Button.BorderBrushProperty, tab) } });
+        }
+        catch (Exception e) { GameLog.Instance.Warn("admin panel: the game's panel look is not available: " + e.Message); }
     }
 
-    private static double Number(TextBox box, double fallback)
-        => double.TryParse(box.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double value) && double.IsFinite(value) ? value : fallback;
+    private IBrush Find(string key)
+        => !this.TryFindResource(key, out object value) ? null : value as IBrush ?? (value is Color color ? new ImmutableSolidColorBrush(color) : null);
 
-    private static void Send(AdminRequest request) => MpMenu.Admin(request);
+    private void AddPage(string name, Control body, Func<AdminState, bool> show)
+    {
+        int index = _pages.Count;
+        _pages.Add(new PageDef(name, body, show, Nav(name, () => Select(index), "Admin" + name)));
+    }
+
+    private static Button Nav(string label, Action action, string name)
+    {
+        var button = OnlineUi.SmallButton(label, action, name);
+        button.FontSize = 18; button.MinWidth = 0; button.MinHeight = 38; button.Padding = new Thickness(12, 4); button.Margin = new Thickness(0, 0, 6, 6);
+        button.Classes.Add("OnlineNavigation");
+        return button;
+    }
+
+    private static void Mark(Button button, bool selected) { if (selected) button.Classes.Add("Selected"); else button.Classes.Remove("Selected"); }
 
     private void Select(int index)
     {
-        _page.Content = _pages[index];
-        for (int i = 0; i < _tabs.Length; i++) { if (i == index) _tabs[i].Classes.Add("Selected"); else _tabs[i].Classes.Remove("Selected"); }
+        _current = index;
+        for (int i = 0; i < _pages.Count; i++) Mark(_pages[i].Tab, i == index);
         RefreshControls();
     }
+
+    /// <summary>Any key, or for an entry ending in '.', any key under it.</summary>
+    private static bool CanAny(AdminState s, params string[] keys)
+        => keys.Any(k => k.EndsWith('.') ? s.Role == OnlineRole.Host || s.Grants.Any(g => g == "*" || g.StartsWith(k, StringComparison.Ordinal)) : s.Can(k));
+
+    private static string Key(AdminAction action, ulong target = 0, int minutes = 0, double size = 0)
+        => AdminRules.KeyFor(new AdminRequest(action, target, Minutes: minutes, Size: size));
+
+    private bool Owner => _state.Role == OnlineRole.Host || Array.IndexOf(_state.Grants, "*") >= 0;
+    private static ulong MySteam => NetSession.Current?.LocalIdentity ?? 0;
+
+    /// <summary>Shows <paramref name="control"/> only with what <paramref name="show"/> needs; enables it while <paramref name="enabled"/> holds.</summary>
+    private T Gate<T>(T control, Func<AdminState, bool> show, Func<bool> enabled = null) where T : Control
+    {
+        _gates.Add(s => { control.IsVisible = show(s); if (enabled != null) control.IsEnabled = AdminAccess.InSession && enabled(); });
+        return control;
+    }
+
+    private T Gate<T>(T control, string key, Func<bool> enabled = null) where T : Control => Gate(control, s => s.Can(key), enabled);
+
+    /// <summary>A button that sends what <paramref name="make"/> returns (null sends nothing), shown only with <paramref name="key"/>.</summary>
+    private Button Act(string label, string key, Func<AdminRequest> make, Func<bool> enabled = null)
+        => Gate(OnlineUi.SmallButton(label, () => { if (make() is { } request) Send(request); }, "Admin" + label.Replace(" ", "")), key, enabled);
+
+    private static void Send(AdminRequest request) => MpMenu.Admin(request);
+
+    private AdminRequest Note(string text)
+    {
+        _note.Text = text; _note.IsVisible = !string.IsNullOrWhiteSpace(text);
+        return null;
+    }
+
+    private void Copy(string text) => TopLevel.GetTopLevel(this)?.Clipboard?.SetTextAsync(text);
 
     protected override void OnDataContextChanged(EventArgs e)
     {
@@ -195,93 +212,133 @@ public sealed class AdminScreen : ScreenView
 
     private void QueueRefresh() => Dispatcher.UIThread.Post(() => { if (!_closed) RefreshControls(); });
 
-    private static Entry[] Catalog<T>(Func<T, string> name, Func<IEnumerable<T>> source)
-    {
-        try { return source().Select(d => new Entry(((Definition)(object)d).Guid, name(d))).Where(e => !string.IsNullOrWhiteSpace(e.Name)).GroupBy(e => e.Id).Select(g => g.First()).OrderBy(e => e.Name).ToArray(); }
-        catch (Exception ex) { GameLog.Instance.Warn("admin panel: listing definitions failed: " + ex.Message); return Array.Empty<Entry>(); }
-    }
-
-    private static IEnumerable<PrefabDefinition> ServerPrefabs()
-    {
-        var manager = Singleton<DefinitionManager>.Instance;
-        var list = new List<PrefabDefinition>();
-        foreach (var binding in manager.GetDefinitionsOfType<PrefabBindingDefinition>())
-            if (manager.TryGetDefinition(binding.ServerComposite, out PrefabDefinition prefab)) list.Add(prefab);
-        return list;
-    }
-
-    private static IEnumerable<ItemDefinition> Items()
-    {
-        var list = new List<ItemDefinition>();
-        foreach (var item in Singleton<DefinitionManager>.Instance.GetDefinitionsOfTypeAndDescendants<ItemDefinition>()) list.Add(item);
-        return list;
-    }
-
-    private static string ItemName(ItemDefinition item)
-    {
-        string text = null;
-        try { text = item.DisplayName.EvaluateText(); } catch (Exception) { }
-        return string.IsNullOrWhiteSpace(text) || text.Contains('{') ? item.DebugNameShort : text + "  (" + item.DebugNameShort + ")";
-    }
-
-    private void RefreshCatalogs()
-    {
-        _prefabs ??= Catalog(p => p.DebugNameShort.Replace("_Server", ""), ServerPrefabs);
-        _items ??= Catalog<ItemDefinition>(ItemName, Items);
-        if (_prefabFilter != _prefabSearch.Text) { _prefabFilter = _prefabSearch.Text; _prefabList.ItemsSource = Filter(_prefabs, _prefabFilter); }
-        if (_itemFilter != _itemSearch.Text) { _itemFilter = _itemSearch.Text; _itemList.ItemsSource = Filter(_items, _itemFilter); }
-        static Entry[] Filter(Entry[] all, string text) => all.Where(e => string.IsNullOrWhiteSpace(text) || e.Name.Contains(text.Trim(), StringComparison.OrdinalIgnoreCase)).Take(300).ToArray();
-    }
-
     private void RefreshControls()
     {
-        if (_spawn == null) return;
-        var state = AdminAccess.State;
-        _status.Text = AdminAccess.InSession ? (AdminAccess.Hosting ? "Hosting " : "Admin on ") + (string.IsNullOrWhiteSpace(state.ServerName) ? AdminAccess.ServerName : state.ServerName) : "Not in a multiplayer session";
-        _message.Text = state.Message; _message.IsVisible = !string.IsNullOrWhiteSpace(state.Message);
-        _pvp.Text = state.Pvp ? "PvP is ON" : "PvP is OFF (listed as PvE)";
-        _raid.Text = "Offline raid protection is " + (state.OfflineRaidProtection ? "ON" : "OFF");
-        if (_bypass.IsChecked != state.AccessBypass) { _syncingBypass = true; _bypass.IsChecked = state.AccessBypass; _syncingBypass = false; }
-        _pcu.Text = "PCU limit per player: " + (state.PcuLimit <= 0 || state.PcuLimit == int.MaxValue ? "unlimited" : state.PcuLimit.ToString("N0"));
-        _motd.Text = string.IsNullOrWhiteSpace(state.Motd) ? "No message of the day." : "Current: " + state.Motd;
-        _sun.Text = "Sun rotation is " + (state.SunRotation ? "ON" : "OFF") + (state.SunPeriodMinutes > 0 ? ", one full day every " + AccessList.DayLength(state.SunPeriodMinutes) : "");
-        // Follow the host only when it reports a new angle, and not right after a drag, so a reply built before the
-        // world applied the change doesn't pull the slider back.
-        if (state.SunDegrees != _sunStateDeg && MpClock.NowMs() - _sunTouchedMs > 2000)
-        {
-            _sunStateDeg = state.SunDegrees;
-            _sunSyncing = true; _sunAngle.S.Value = Math.Round(state.SunDegrees) % 360; _sunSyncing = false;
-        }
-        if (_page.Content == _pages[1] || _page.Content == _pages[2]) RefreshCatalogs();
-        string zones = string.Join("|", state.SafeZones.Select(z => z.NetId + z.Name + z.Radius));
-        if (zones != _zoneSignature)
-        {
-            uint selected = (_zoneList.SelectedItem as SafeZoneInfo)?.NetId ?? 0;
-            _zoneSignature = zones; _zoneList.ItemsSource = state.SafeZones;
-            _zoneList.SelectedItem = state.SafeZones.FirstOrDefault(z => z.NetId == selected);
-        }
-        var players = state.Players.Where(p => p.Connected && p.SteamId != 0).ToArray();
-        string roster = string.Join("|", players.Select(p => p.SteamId + p.Name));
-        if (roster != _playerSignature)
-        {
-            ulong selected = (_playerList.SelectedItem as AccessPlayer)?.SteamId ?? 0;
-            _playerSignature = roster; _playerList.ItemsSource = players;
-            _playerList.SelectedItem = players.FirstOrDefault(p => p.SteamId == selected);
-            ulong recipient = (_giveTo.SelectedItem as AccessPlayer)?.SteamId ?? 0;
-            var choices = new[] { Me }.Concat(players).ToArray();
-            _giveTo.ItemsSource = choices; _giveTo.SelectedItem = choices.FirstOrDefault(p => p.SteamId == recipient) ?? Me;
-        }
+        if (!_built) return;
+        _state = AdminAccess.State;
+        var s = _state;
+        bool live = AdminAccess.InSession;
+        _pillText.Text = live ? "LIVE" : "OFFLINE"; _pill.Background = live ? LiveBrush : IdleBrush;
+        string name = string.IsNullOrWhiteSpace(s.ServerName) ? AdminAccess.ServerName : s.ServerName;
+        _server.Text = !live ? "Not in a multiplayer session" : AdminAccess.Hosting ? "Hosting " + name : name;
+        _who.Text = live ? $"{s.Group} / rank {s.Rank} / {s.Players.Count(p => p.Connected)} online" : "";
+        if (s.Message != _lastMessage) { _lastMessage = s.Message; Note(""); }
+        _message.Text = s.Message; _message.IsVisible = !string.IsNullOrWhiteSpace(s.Message);
+
+        foreach (var page in _pages) page.Tab.IsVisible = page.Show(s);
+        if (!_pages[_current].Tab.IsVisible && _pages.FindIndex(p => p.Tab.IsVisible) is int first and >= 0) { _current = first; for (int i = 0; i < _pages.Count; i++) Mark(_pages[i].Tab, i == first); }
+        var body = _pages[_current].Tab.IsVisible ? _pages[_current].Body : _nothing;
+        if (_page.Content != body) _page.Content = body;
+        RefreshPages();
         RefreshActions();
     }
 
     private void RefreshActions()
     {
-        if (_spawn == null) return;
-        bool admin = AdminAccess.InSession && AdminAccess.LocalRole != OnlineRole.Player;
-        _spawn.IsEnabled = admin && _prefabList.SelectedItem is Entry;
-        _give.IsEnabled = admin && _itemList.SelectedItem is Entry;
-        _createZone.IsEnabled = admin;
-        _resizeZone.IsEnabled = _deleteZone.IsEnabled = admin && _zoneList.SelectedItem is SafeZoneInfo;
-        _teleport.IsEnabled = _bring.IsEnabled = admin && _playerList.SelectedItem is AccessPlayer;
+        if (!_built) return;
+        foreach (var gate in _gates) gate(_state);
+        RefreshPageActions();
+    }
+
+    // Compact building blocks for the 640 px column.
+    private static TextBlock Info(string text)
+    {
+        var block = OnlineUi.Text(text, null, 18);
+        block.HorizontalAlignment = HorizontalAlignment.Left; block.TextAlignment = TextAlignment.Left;
+        return block;
+    }
+
+    private static TextBlock Hint(string text)
+    {
+        var block = OnlineUi.Text(text, "SubtleNotice", 17);
+        block.HorizontalAlignment = HorizontalAlignment.Left; block.TextAlignment = TextAlignment.Left;
+        return block;
+    }
+
+    private static TextBlock Label(string text) => OnlineUi.Text(text, "SubTitle", 19);
+
+    private static StackPanel Stack(double spacing, params Control[] controls)
+    {
+        var stack = new StackPanel { Spacing = spacing };
+        foreach (var control in controls) stack.Children.Add(control);
+        return stack;
+    }
+
+    private static WrapPanel Flow(params Control[] controls)
+    {
+        var row = new WrapPanel();
+        foreach (var control in controls) { control.Margin = new Thickness(0, 0, 10, 8); control.VerticalAlignment = VerticalAlignment.Center; row.Children.Add(control); }
+        return row;
+    }
+
+    private static Control Section(string title, params Control[] parts)
+    {
+        var stack = Stack(10, OnlineUi.Text(title, "SubTitle", 22));
+        foreach (var part in parts) stack.Children.Add(part);
+        return OnlineUi.Panel(stack, new Thickness(18));
+    }
+
+    private static Control Page(params Control[] parts) => OnlineUi.Scroll(Stack(14, parts));
+
+    /// <summary>A text box at least <paramref name="width"/> wide; text and watermark wrap instead of being cut.</summary>
+    private static TextBox Box(string watermark, int length, double width = 0)
+    {
+        var box = new TextBox { Watermark = watermark, MaxLength = length, FontSize = 20, MinHeight = 42, MinWidth = width, TextWrapping = TextWrapping.Wrap };
+        ScrollViewer.SetHorizontalScrollBarVisibility(box, Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled);
+        return box;
+    }
+
+    /// <summary>A list as tall as its rows, scrolling past <paramref name="maxHeight"/>.</summary>
+    private static ListBox List(string name, double maxHeight)
+    {
+        var list = OnlineUi.List(name);
+        list.MinHeight = 48; list.MaxHeight = maxHeight;
+        return list;
+    }
+
+    /// <summary>A list row: the name in full on top, the other values wrapped on a dimmer line under it.</summary>
+    private static StackPanel Row(string name, params string[] details)
+    {
+        var row = new StackPanel { Spacing = 2, MinHeight = 40, Margin = new Thickness(6, 4) };
+        row.Children.Add(RowText(name, "Bright", 19));
+        string rest = string.Join(" / ", details.Where(d => !string.IsNullOrWhiteSpace(d)));
+        if (rest.Length > 0) row.Children.Add(RowText(rest, null, 16, .8));
+        return row;
+    }
+
+    private static TextBlock RowText(string text, string style, double size, double opacity = 1)
+    {
+        var block = OnlineUi.Text(text ?? "", style, size, true);
+        block.HorizontalAlignment = HorizontalAlignment.Left; block.TextAlignment = TextAlignment.Left; block.Opacity = opacity;
+        return block;
+    }
+
+    private static ComboBox Combo<T>(Func<T, string> text, double width = 240) where T : class => new()
+    {
+        MinHeight = 40, MinWidth = width, FontSize = 19, VerticalAlignment = VerticalAlignment.Center,
+        ItemTemplate = new FuncDataTemplate<T>((x, _) => x == null ? null : OnlineUi.Text(text(x), size: 19, inheritForeground: true))
+    };
+
+    private static double Number(TextBox box, double fallback)
+        => double.TryParse(box.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double value) && double.IsFinite(value) ? value : fallback;
+
+    /// <summary>A switch mirroring a server-side state; a flip is not undone by state sent before the server applied it.</summary>
+    private sealed class StateToggle
+    {
+        public readonly OnlineToggle Toggle;
+        private bool _syncing;
+        private long _touchedMs;
+
+        public StateToggle(string label, string help, Action<bool> send)
+        {
+            Toggle = new OnlineToggle(label, help) { ColumnDefinitions = new ColumnDefinitions("*,12,Auto") };
+            Toggle.IsCheckedChanged += (_, _) => { if (_syncing) return; _touchedMs = MpClock.NowMs(); send(Toggle.IsChecked); };
+        }
+
+        public void Sync(bool value)
+        {
+            if (Toggle.IsChecked == value || MpClock.NowMs() - _touchedMs < 2500) return;
+            _syncing = true; Toggle.IsChecked = value; _syncing = false;
+        }
     }
 }

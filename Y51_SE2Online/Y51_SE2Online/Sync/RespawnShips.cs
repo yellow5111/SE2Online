@@ -8,7 +8,24 @@ namespace Y51_SE2Online.Sync;
 /// <param name="Grid">For a prefab that holds more than the ship (a planet contract): the one grid to keep.</param>
 /// <param name="Space">Offered as a space respawn ship near the world spawn.</param>
 /// <param name="Ion">Ion thrust: full only in thin air, so landers need a planet with an air density of at most <see cref="RespawnShips.IonAirDensity"/>.</param>
-public sealed record RespawnShip(Guid Prefab, string Key, string Name, string Detail, double Lift = 0, string? Grid = null, bool Space = true, bool Ion = true);
+/// <param name="Blueprint">A blueprint ship: the folder holding its grid.json.vrb (no encounter prefab).</param>
+/// <param name="Preview">The blueprint's folder name under Content\Ships, for the spawn screen's picture ("" for none).</param>
+public sealed record RespawnShip(Guid Prefab, string Key, string Name, string Detail, double Lift = 0, string? Grid = null, bool Space = true, bool Ion = true,
+    string? Blueprint = null, string Preview = "", SpawnPlace[]? Places = null);
+
+/// <summary>Where a respawn ship can be offered.</summary>
+public enum SpawnPlace : byte { Space, Moon, Atmosphere, Airless }
+
+/// <summary>A respawn ship from a blueprint the host ships (server.json Network.RespawnBlueprints).</summary>
+public sealed class RespawnBlueprint
+{
+    public string Name { get; set; } = "";
+    /// <summary>The blueprint folder (grid.json.vrb inside): a folder name under the plugin's Content\Ships, or a full path.</summary>
+    public string Path { get; set; } = "";
+    /// <summary>Where it is offered: "space", "moon", "atmosphere" (planets with air), "airless" (planets without air, not moons).</summary>
+    public List<string> Offer { get; set; } = new();
+    public string Detail { get; set; } = "";
+}
 
 /// <summary>The ships players can take on spawn or respawn: vanilla 2.4 cargo encounters that pass the survival checklist.</summary>
 public static class RespawnShips
@@ -66,6 +83,76 @@ public static class RespawnShips
 
     public static RespawnShip[] Offered(IReadOnlyCollection<string>? allowed)
         => allowed is { Count: > 0 } ? Catalog.Where(s => allowed.Contains(s.Key, StringComparer.OrdinalIgnoreCase)).ToArray() : Catalog;
+
+    public const int MaxBlueprints = 16;
+
+    /// <summary>"none" in the vanilla list turns every respawn ship off, the blueprint ships too (as before 0.18).</summary>
+    public static bool AllOff(IReadOnlyCollection<string>? vanilla) => vanilla?.Contains(None, StringComparer.OrdinalIgnoreCase) == true;
+
+    /// <summary>The vanilla encounter ships are offered when the switch is on, or when a host named them before 0.18.</summary>
+    public static bool OfferVanilla(bool vanillaSwitch, IReadOnlyCollection<string>? vanilla) => !AllOff(vanilla) && (vanillaSwitch || vanilla is { Count: > 0 });
+
+    /// <summary>The spawn card tag for where a ship is offered.</summary>
+    public static string Tag(RespawnShip ship)
+    {
+        var places = ship.Places ?? (ship.Space ? new[] { SpawnPlace.Space } : new[] { SpawnPlace.Atmosphere });
+        bool space = places.Contains(SpawnPlace.Space) || places.Contains(SpawnPlace.Moon), planets = places.Contains(SpawnPlace.Atmosphere) || places.Contains(SpawnPlace.Airless);
+        return space && planets ? "Anywhere" : planets ? "Planets" : places.Contains(SpawnPlace.Moon) ? "Space & moons" : "Space";
+    }
+
+    public static List<RespawnBlueprint> DefaultBlueprints() => new()
+    {
+        new() { Name = "Banana Boat", Path = "SE1 Banana Boat", Offer = new() { "space", "moon" }, Detail = "Ion ship with a survival kit, reactor, refinery, assembler, O2/H2 generator and gravity generator" },
+        new() { Name = "Atmospheric Lander", Path = "SE1 Atmospheric Lander", Offer = new() { "atmosphere" }, Detail = "Atmospheric lander with a survival kit, reactor, refinery, assembler, O2/H2 generator, ore detector and landing gear" },
+    };
+
+    public static bool TryPlace(string? word, out SpawnPlace place) => Enum.TryParse(word, true, out place) && Enum.IsDefined(place) && !int.TryParse(word, out _);
+
+    /// <summary>A planet's kind for the respawn ships: air first (Caligo is a moon with full air, where ion thrust is
+    /// zero), then the generator's moon flag.</summary>
+    public static SpawnPlace Classify(bool moon, double airDensity) => airDensity > MinAirDensity ? SpawnPlace.Atmosphere : moon ? SpawnPlace.Moon : SpawnPlace.Airless;
+
+    /// <summary>At or below this air density atmospheric thrust is zero and ion thrust full (ThrustClassesConfiguration).</summary>
+    public const double MinAirDensity = 0.2;
+
+    /// <summary>The blueprint ships offered at a place, in the host's order.</summary>
+    public static RespawnShip[] ForPlace(IEnumerable<RespawnBlueprint>? blueprints, SpawnPlace place)
+        => (blueprints ?? Enumerable.Empty<RespawnBlueprint>()).Select(Ship).Where(s => s?.Places?.Contains(place) == true).ToArray()!;
+
+    /// <summary>A blueprint as a respawn ship; null for an entry without a name, path or place.</summary>
+    public static RespawnShip? Ship(RespawnBlueprint? b)
+    {
+        if (b == null || string.IsNullOrWhiteSpace(b.Name) || string.IsNullOrWhiteSpace(b.Path)) return null;
+        var places = (b.Offer ?? new()).Select(w => TryPlace(w, out var p) ? p : (SpawnPlace?)null).Where(p => p != null).Select(p => p!.Value).Distinct().ToArray();
+        if (places.Length == 0) return null;
+        string folder = b.Path.TrimEnd('/', '\\');
+        string preview = System.IO.Path.GetFileName(folder);
+        return new RespawnShip(Guid.Empty, "bp:" + b.Name.Trim(), b.Name.Trim(), string.IsNullOrWhiteSpace(b.Detail) ? "Respawn ship with a medbay" : b.Detail.Trim(),
+            Space: places.Contains(SpawnPlace.Space), Ion: false, Blueprint: b.Path, Preview: SafePreview(preview), Places: places);
+    }
+
+    /// <summary>A preview name a client may look up in its own Content\Ships: one plain folder name, never a path.</summary>
+    public static string SafePreview(string? name)
+        => name is { Length: > 0 and <= 64 } && name.Trim() == name && name != "." && name != ".." && name.All(c => char.IsLetterOrDigit(c) || c is ' ' or '-' or '_' or '.') ? name : "";
+
+    public static string? ValidateBlueprints(IReadOnlyCollection<RespawnBlueprint>? blueprints)
+    {
+        if (blueprints == null) return "RespawnBlueprints must be a list (empty for none).";
+        if (blueprints.Count > MaxBlueprints) return $"At most {MaxBlueprints} respawn blueprints.";
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var b in blueprints)
+        {
+            if (b == null || string.IsNullOrWhiteSpace(b.Name) || b.Name.Length > 48) return "Each respawn blueprint needs a Name of at most 48 characters.";
+            if (!names.Add(b.Name.Trim())) return $"Respawn blueprint '{b.Name}' is listed twice.";
+            if (Candidates.Any(s => string.Equals(s.Name, b.Name.Trim(), StringComparison.OrdinalIgnoreCase) || string.Equals(s.Key, b.Name.Trim(), StringComparison.OrdinalIgnoreCase)))
+                return $"Respawn blueprint '{b.Name}' has the name of a vanilla respawn ship; choose another name.";
+            if (string.IsNullOrWhiteSpace(b.Path)) return $"Respawn blueprint '{b.Name}' needs a Path (a folder under Content\\Ships or a full path).";
+            if (b.Offer == null || b.Offer.Count == 0) return $"Respawn blueprint '{b.Name}' needs Offer: any of space, moon, atmosphere, airless.";
+            foreach (string w in b.Offer)
+                if (!TryPlace(w, out _)) return $"Respawn blueprint '{b.Name}': unknown place '{w}'. Use space, moon, atmosphere or airless.";
+        }
+        return null;
+    }
 
     public static string? Validate(IReadOnlyCollection<string>? allowed, int cooldownMinutes)
     {

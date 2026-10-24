@@ -9,6 +9,7 @@ public sealed partial class HostSession
 	private void HandleTrade(RemoteClient c, byte[] data)
 	{
 		if (c.Status != ClientStatus.Synced || c.Player == null || data.Length > 512) return;
+		if (!Allowed(PeerAlias.SteamOf(c.Peer.Value), "trade.players")) { Reply(c.Peer, "Your group may not trade with players."); return; }
 		_world.OnTrade(c.Player.ClientId, data);
 	}
 

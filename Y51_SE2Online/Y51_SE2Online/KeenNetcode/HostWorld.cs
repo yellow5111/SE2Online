@@ -22,7 +22,7 @@ namespace Y51_SE2Online.SyncEngine;
 /// admitting it to Keen's handshake. Feature partials (social, admin, GPS, trade, ...) hang off this class like they
 /// did off the 2.4 engine; they run on the server session's own update (<see cref="SessionUpdatePostfix"/>).
 /// </summary>
-internal sealed partial class HostWorld : IHostWorld
+internal sealed partial class HostWorld : IHostWorld, IPingWorld
 {
 	private readonly IMpLog _log;
 
@@ -62,6 +62,12 @@ internal sealed partial class HostWorld : IHostWorld
 		public bool ShipPending;
 
 		public volatile Entity[]? ShipRoots;
+
+		/// <summary>The pending ship comes from a blueprint: its roots are the ship's own grids, not an encounter.</summary>
+		public bool ShipBlueprint;
+
+		/// <summary>Counts ship spawns; a spawn that finishes for an older request is deleted, not handed over.</summary>
+		public long ShipRequest;
 
 		public long ShipDeadline;
 
@@ -196,7 +202,7 @@ internal sealed partial class HostWorld : IHostWorld
 			if (_bringAtMs == 0) { _bringAtMs = now + 45000; return; }
 			if (now < _bringAtMs) return;
 			var before = CharacterOf(client.ClientId).Data.GetWorldTransform().Position;
-			_log.Info($"selftest: bring ClientId {client.ClientId} from {before.X:0}, {before.Y:0}, {before.Z:0}: " + Admin(session, SyncProtocol.HostClientId, new AdminRequest(AdminAction.Bring, client.Peer!.Value.Value)));
+			_log.Info($"selftest: bring ClientId {client.ClientId} from {before.X:0}, {before.Y:0}, {before.Z:0}: " + Admin(session, null, SyncProtocol.HostClientId, new AdminRequest(AdminAction.Bring, client.Peer!.Value.Value)));
 			_brought = CharacterOf(client.ClientId);
 			_bringCheckMs = now + 1000;
 		}
@@ -238,7 +244,6 @@ internal sealed partial class HostWorld : IHostWorld
 
 	public void ConfigureIdentities(HostSettings settings)
 	{
-		TeamPermissions.Enabled = settings.Grids == GridPermissionMode.Team;
 		_research = settings.Research;
 		IdentitiesOn = settings.Identities;
 	}
@@ -423,6 +428,7 @@ internal sealed partial class HostWorld : IHostWorld
 		PublishPcu(session);
 		if (NetHost.NetSession.Current?.Options is { } streamingOptions) KeenNetcode.Streaming.Tick(session, streamingOptions.StreamingRadiusMeters, _identityOf.Count, _log);
 		UpdateGps(session);
+		UpdatePings();
 		UpdateHacks(session);
 		UpdateTrades(session);
 		UpdateWater(session);

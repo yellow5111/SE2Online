@@ -65,7 +65,7 @@ public sealed class PlayersScreen : ScreenView
     public PlayersScreen()
     {
         OnDisposing += _ => { _closed = true; if (_model != null) _model.Refresh -= QueueRefresh; };
-        _players.ItemTemplate = new FuncDataTemplate<AccessPlayer>((p, _) => p == null ? null : OnlineUi.ListCells("*,150,110,200", p.Name, RoleText(p.Role), p.PingMs >= 0 && p.Connected ? p.PingMs + " ms" : "", p.Connected ? "Connected" : "Away"));
+        _players.ItemTemplate = new FuncDataTemplate<AccessPlayer>((p, _) => p == null ? null : OnlineUi.ListCells("*,150,110,200", p.Name, RoleText(p), p.PingMs >= 0 && p.Connected ? p.PingMs + " ms" : "", p.Connected ? "Connected" : "Away"));
         _friends.ItemTemplate = new FuncDataTemplate<FriendHost>((p, _) => p == null ? null : OnlineUi.ListCells("*,230", p.Name, p.Presence != null ? "Hosting" : "Steam friend"));
         _bans.ItemTemplate = new FuncDataTemplate<BanRow>((b, _) => b == null ? null : OnlineUi.ListCells("*,190,*", Display(b.Ban.Name, b.Ban.SteamId), b.Remaining, b.Ban.Reason));
         _whitelist.ItemTemplate = new FuncDataTemplate<AccessEntry>((w, _) => w == null ? null : OnlineUi.ListCells("*,300", Display(w.Name, w.SteamId), w.SteamId.ToString()));
@@ -87,7 +87,7 @@ public sealed class PlayersScreen : ScreenView
 
         var roster = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*") };
         roster.Children.Add(_count);
-        var headers = OnlineUi.Cells("*,150,110,200", "PLAYER", "ROLE", "PING", "CONNECTION"); Grid.SetRow(headers, 1); roster.Children.Add(headers);
+        var headers = OnlineUi.Cells("*,150,110,200", "PLAYER", "GROUP", "PING", "CONNECTION"); Grid.SetRow(headers, 1); roster.Children.Add(headers);
         Grid.SetRow(_players, 2); roster.Children.Add(_players);
         _emptyPlayers.VerticalAlignment = VerticalAlignment.Center; _emptyPlayers.HorizontalAlignment = HorizontalAlignment.Center; _emptyPlayers.IsHitTestVisible = false;
         Grid.SetRow(_emptyPlayers, 2); roster.Children.Add(_emptyPlayers);
@@ -128,7 +128,8 @@ public sealed class PlayersScreen : ScreenView
     private bool Admin => AdminAccess.LocalRole != OnlineRole.Player && AdminAccess.InSession;
     private bool Listed(ulong id) => _state.Whitelist.Any(w => w.SteamId == id);
     private static string Display(string name, ulong id) => string.IsNullOrWhiteSpace(name) ? id.ToString() : name;
-    private static string RoleText(OnlineRole role) => role switch { OnlineRole.Host => "Host", OnlineRole.Admin => "Admin", _ => "Player" };
+    private static string RoleText(AccessPlayer p) => p.Group ?? p.Role switch { OnlineRole.Host => "Host", OnlineRole.Admin => "Admin", _ => "Player" };
+    private bool Owner => AdminAccess.Hosting || Array.IndexOf(_state.Grants, "*") >= 0;
 
     private void Select(int index)
     {
@@ -202,12 +203,12 @@ public sealed class PlayersScreen : ScreenView
         bool session = AdminAccess.InSession, hosting = AdminAccess.Hosting;
         _status.Text = !session ? OnlineUi.SessionStatus()
             : hosting ? $"You are hosting {_state.ServerName}" + (NetSession.Current?.IsDedicated == true ? " (dedicated)" : "")
-            : $"{(_state.Dedicated ? "Dedicated server" : "Session")} {AdminAccess.ServerName}  /  you are {(AdminAccess.LocalRole == OnlineRole.Admin ? "an admin" : "a player")}";
+            : $"{(_state.Dedicated ? "Dedicated server" : "Session")} {AdminAccess.ServerName}  /  your group: {_state.Group} (rank {_state.Rank})";
         if (session) _status.Text += "  /  PvP " + (_state.Pvp ? "on" : "off");
         _message.Text = new[] { MpPlugin.Controller?.Error, NetSession.Current?.Failure, _state.Message, MpMenu.Message }.FirstOrDefault(m => !string.IsNullOrWhiteSpace(m)) ?? "";
         _message.IsVisible = !string.IsNullOrWhiteSpace(_message.Text);
         var players = session ? _state.Players : ClientWorld.Current?.SessionPlayers.Select(p => new AccessPlayer(0, p.Name, OnlineRole.Player, p.Connected, -1)).ToArray() ?? Array.Empty<AccessPlayer>();
-        string signature = string.Join("|", players.Select(p => p.SteamId + ":" + p.Name + ":" + p.Role + ":" + p.Connected + ":" + p.PingMs / 10));
+        string signature = string.Join("|", players.Select(p => p.SteamId + ":" + p.Name + ":" + p.Role + ":" + p.Group + p.Rank + ":" + p.Connected + ":" + p.PingMs / 10));
         if (signature != _signature)
         {
             var selected = Selected;
@@ -245,26 +246,33 @@ public sealed class PlayersScreen : ScreenView
         if (_kick == null) return;
         bool busy = MpMenu.Busy, hosting = AdminAccess.Hosting, admin = Admin;
         var p = Selected;
-        bool target = admin && p != null && p.SteamId != 0 && p.Role != OnlineRole.Host;
-        bool canTouchAdmin = hosting || p?.Role != OnlineRole.Admin;
-        _kick.IsEnabled = _ban.IsEnabled = !busy && target && p.Connected && canTouchAdmin;
-        _ban.IsEnabled = !busy && target && canTouchAdmin;
-        _admin.IsEnabled = !busy && target && canTouchAdmin;
+        bool canKick = admin && _state.Can("admin.players.kick"), canBan = admin && _state.Can("admin.players.ban"), canGroup = admin && _state.Can("admin.players.set_group");
+        bool canList = admin && _state.Can("admin.whitelist"), canUnban = admin && _state.Can("admin.players.unban");
+        bool self = p != null && p.SteamId != 0 && p.SteamId == (NetSession.Current?.LocalIdentity ?? 0);
+        bool target = admin && p != null && p.SteamId != 0 && p.Role != OnlineRole.Host && !self;
+        bool outranks = Owner || (p != null && p.Rank < _state.Rank);
+        _kick.IsVisible = canKick; _ban.IsVisible = canBan; _admin.IsVisible = canGroup; _whitelistButton.IsVisible = canList;
+        _kick.IsEnabled = !busy && target && p.Connected && outranks;
+        _ban.IsEnabled = !busy && target && outranks;
+        _admin.IsEnabled = !busy && target && outranks && (p.Role == OnlineRole.Admin || _state.Groups.Any(g => string.Equals(g.Name, PermissionSet.AdminGroup, StringComparison.OrdinalIgnoreCase)));
         _admin.Content = p?.Role == OnlineRole.Admin ? "Remove admin" : "Make admin";
         _whitelistButton.IsEnabled = !busy && target;
         _whitelistButton.Content = p != null && Listed(p.SteamId) ? "Remove from whitelist" : "Add to whitelist";
-        _adminPanel.IsVisible = admin;
-        _reason.IsEnabled = _duration.IsEnabled = admin;
-        _whitelistOnly.IsEnabled = admin && !busy;
-        _unban.IsEnabled = admin && !busy && _bans.SelectedItem is BanRow;
-        _unlist.IsEnabled = admin && !busy && _whitelist.SelectedItem is AccessEntry;
-        _addId.IsEnabled = admin;
-        _addWhitelist.IsEnabled = admin && !busy && _lookup == null;
+        _adminPanel.IsVisible = _state.Can("admin.panel");
+        _reason.IsEnabled = _duration.IsEnabled = canKick || canBan;
+        _whitelistOnly.IsEnabled = canList && !busy;
+        _unban.IsVisible = canUnban;
+        _unban.IsEnabled = canUnban && !busy && _bans.SelectedItem is BanRow;
+        _unlist.IsEnabled = canList && !busy && _whitelist.SelectedItem is AccessEntry;
+        _addId.IsEnabled = canList;
+        _addWhitelist.IsEnabled = canList && !busy && _lookup == null;
         _invite.IsEnabled = !busy && hosting && NetSession.Current?.IsDedicated != true && MpPlugin.SteamAvailable && MpPlugin.Controller?.Current?.HostIp == null && _friends.SelectedItem is FriendHost;
-        _selected.Text = p == null ? "Select a player in the roster." : p.Name + "  /  " + RoleText(p.Role) + (p.SteamId != 0 ? "  /  " + p.SteamId : "");
+        _selected.Text = p == null ? "Select a player in the roster." : p.Name + "  /  " + RoleText(p) + (p.Group != null ? " (rank " + p.Rank + ")" : "") + (p.SteamId != 0 ? "  /  " + p.SteamId : "");
         _moderationNote.Text = !AdminAccess.InSession ? "Moderation is available in a multiplayer session."
-            : !admin ? "Only the host and admins can kick, ban or promote players."
-            : p?.Role == OnlineRole.Admin && !hosting ? "Only the host can demote, kick or ban an admin."
+            : !canKick && !canBan && !canGroup ? $"Your group ({_state.Group}) cannot kick, ban or change player groups."
+            : p != null && p.SteamId == 0 ? "Your group cannot see SteamIDs, so it cannot act on players here."
+            : self ? "You cannot kick, ban or regroup yourself."
+            : p != null && !outranks ? $"Only someone ranked above {p.Name} ({RoleText(p)}, rank {p.Rank}) can kick, ban or regroup them."
             : "Kicked players can rejoin. Banned players see the reason and remaining time when they try to connect.";
     }
 }

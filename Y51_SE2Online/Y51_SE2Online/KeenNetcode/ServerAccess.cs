@@ -5,6 +5,9 @@ using Keen.Game2.Simulation.GameSystems.Identities;
 using Keen.Game2.Simulation.GameSystems.Ownership;
 using Keen.Game2.Simulation.GameSystems.Permissions;
 using Keen.Game2.Simulation.GameSystems.Respawn;
+using Keen.Game2.Simulation.GameSystems.Player;
+using Keen.VRage.Core.Game.Data;
+
 using Keen.Game2.Simulation.RuntimeSystems.Validators;
 using Keen.Game2.Simulation.StreamedUI;
 using Keen.Game2.Simulation.StreamedUI.Respawn;
@@ -39,7 +42,9 @@ internal static partial class ServerAccess
 		Patch(harmony, "item transfers", AccessTools.Method(typeof(CommonValidators), nameof(CommonValidators.ValidateInteractedEntities)), prefix: nameof(InteractedPrefix));
 		Patch(harmony, "control panel", AccessTools.Method(typeof(StreamedControlPanelSessionComponent), nameof(StreamedControlPanelSessionComponent.Attach),
 			new[] { typeof(Entity), typeof(ControlPanelListModel), typeof(ReplicationEventContext) }), prefix: nameof(ControlPanelPrefix));
-		Patch(harmony, "medbays", AccessTools.Method(typeof(RespawnSessionComponent), nameof(RespawnSessionComponent.ActivateRespawnPoint)), prefix: nameof(ActivateRespawnPrefix));
+		Patch(harmony, "medbays", AccessTools.Method(typeof(RespawnSessionComponent), nameof(RespawnSessionComponent.ActivateRespawnPoint)), prefix: nameof(ActivateRespawnPrefix), postfix: nameof(ActivateRespawnPostfix));
+		Patch(harmony, "respawn requests (home, closest)", AccessTools.Method(typeof(RespawnSessionComponent), "TryRespawnAtType"), prefix: nameof(RespawnAtTypePrefix), finalizer: nameof(RespawnAtTypeFinalizer));
+		Patch(harmony, "automatic home base", AccessTools.Method(typeof(RespawnPointTrackerSessionComponent), "AddRespawnPoint"), prefix: nameof(AutoHomePrefix), postfix: nameof(AutoHomePostfix));
 		var toolbar = typeof(Keen.Game2.Simulation.WorldObjects.CubeBlocks.Toolbar.BlockToolbarServerComponent);
 		Patch(harmony, "button panels", System.Linq.Enumerable.FirstOrDefault(AccessTools.GetDeclaredMethods(toolbar), m => m.Name == "ActivateTile" && m.GetParameters().Length == 3), prefix: nameof(ToolbarPrefix));
 		// A press arrives through the one-argument overload, which the JIT inlines the three-argument one into.
@@ -49,7 +54,13 @@ internal static partial class ServerAccess
 			Patch(harmony, "button panel requests", AccessTools.Method(story, "MoveNext"), prefix: nameof(ToolbarStoryPrefix), finalizer: nameof(ToolbarStoryFinalizer));
 		Patch(harmony, "story caller (host's own)", AccessTools.Method(typeof(Keen.VRage.Multiplayer.Transport.InProcess.InProcessPeerTransportSessionComponent), "HostStory"),
 			prefix: nameof(InProcessStoryPrefix), finalizer: nameof(StoryFinalizer));
+		// The game's admin check answers yes for everyone. Both validators are patched, not only HasAdminAccess: a one-line
+		// method like that can be inlined into its callers, where a patch never runs. The validators are called through
+		// delegates (MoveTo.Server(ValidateAdminAccess)), so their patches always run.
 		Patch(harmony, "admin tools", AccessTools.Method(typeof(Keen.VRage.Game.Utilities.CoreValidators), nameof(Keen.VRage.Game.Utilities.CoreValidators.HasAdminAccess)), prefix: nameof(AdminPrefix));
+		Patch(harmony, "admin tools (game validator)", AccessTools.Method(typeof(Keen.VRage.Game.Utilities.CoreValidators), nameof(Keen.VRage.Game.Utilities.CoreValidators.ValidateAdminAccess)), prefix: nameof(ValidateAdminPrefix));
+		Patch(harmony, "admin tools (simulation validator)", AccessTools.Method(typeof(CommonValidators), nameof(CommonValidators.ValidateAdminAccess)), prefix: nameof(ValidateAdminPrefix));
+		Patch(harmony, "admin tools (simulation check)", AccessTools.Method(typeof(CommonValidators), nameof(CommonValidators.HasAdminAccess)), prefix: nameof(AdminPrefix));
 		var inventories = typeof(Keen.Game2.Simulation.StreamedUI.Terminal.Inventories.StreamedInventorySessionComponent);
 		var inventoryList = typeof(Keen.Game2.Simulation.StreamedUI.Terminal.Inventories.InventoryListModelStreamed);
 		Patch(harmony, "inventory lists", AccessTools.Method(inventories, "Attach", new[] { typeof(Entity), inventoryList, typeof(ReplicationEventContext) }), prefix: nameof(InventoryListPrefix));
@@ -99,6 +110,9 @@ internal static partial class ServerAccess
 	// The client started this story (it is not one of the server's own coming back from that client).
 	[ThreadStatic] private static bool _hostingStory;
 
+	// The player's story running now, once restored: the game admin tool it uses is named after it (game.admin.*).
+	[ThreadStatic] private static Type? _storyType;
+
 	/// <summary>
 	/// Kill switch for one check, for a server whose players hit a false refusal: -y51online:access-off:&lt;check&gt;.
 	/// </summary>
@@ -131,15 +145,16 @@ internal static partial class ServerAccess
 	/// SE2 Online's own transport hosts a player's story itself (not through the game's ProcessStory): the same caller
 	/// and argument checks apply while it is restored and runs its server part.
 	/// </summary>
-	internal static (Keen.VRage.Multiplayer.ClientId? Client, bool Hosting) EnterStory(Keen.VRage.Multiplayer.ClientId client)
+	internal static (Keen.VRage.Multiplayer.ClientId? Client, bool Hosting, Type? Story) EnterStory(Keen.VRage.Multiplayer.ClientId client)
 	{
-		var before = (_storyClient, _hostingStory);
+		var before = (_storyClient, _hostingStory, _storyType);
 		_storyClient = client;
 		_hostingStory = true;
+		_storyType = null;
 		return before;
 	}
 
-	internal static void LeaveStory((Keen.VRage.Multiplayer.ClientId? Client, bool Hosting) before) => (_storyClient, _hostingStory) = before;
+	internal static void LeaveStory((Keen.VRage.Multiplayer.ClientId? Client, bool Hosting, Type? Story) before) => (_storyClient, _hostingStory, _storyType) = before;
 
 	internal static void CheckRestoredStory(Keen.VRage.Multiplayer.ClientId sender, ref System.Runtime.CompilerServices.IAsyncStateMachine machine) => RestoredStoryPostfix(sender, ref machine);
 
@@ -156,7 +171,9 @@ internal static partial class ServerAccess
 			__result = new CancelledStory("a request naming an entity the player's game could not name");
 			return;
 		}
+		if (__result != null && _hostingStory) _storyType = __result.GetType();
 		if (!Enforcing || !_hostingStory || sender == Keen.VRage.Multiplayer.ClientId.Server || __result == null) return;
+		if (BlockUseRefused(sender, __result) || ToolbarUseRefused(sender, ref __result)) return;
 		string? refused;
 		try { refused = StoryRefusal(sender, __result); }
 		catch (Exception ex)
@@ -173,11 +190,20 @@ internal static partial class ServerAccess
 	private static string? StoryRefusal(Keen.VRage.Multiplayer.ClientId sender, System.Runtime.CompilerServices.IAsyncStateMachine story)
 	{
 		long caller = (long)IdentityOf(sender);
-		if (IsAdminIdentity(caller)) return null;
-		if (PasteOnce.HostGate((ushort)sender.Id, story) is { } paste) return paste;
-		if (RequestRefusal(sender, caller, story) is { } request) return request;
-		var arguments = StoryArguments.GetValue(story.GetType(), Arguments);
-		if (arguments.Initiator?.GetValue(story) is IdentityId initiator && (long)initiator != caller) return "an ownership transfer in another player's name";
+		var type = story.GetType();
+		// Building, removing, copying and giving grids away are allowed by default; a group can be denied them.
+		if (AdminRules.RequestKey(type.DeclaringType?.Name, StoryName(type)) is { } key && !HasClient(sender, key, unknownAllowed: true)) return "not allowed for the player's group (" + key + ")";
+		if (PasteOnce.PasteBlocks(story) is int blocks and > 0)
+		{
+			if (!HasClient(sender, "blueprint.paste", unknownAllowed: true)) return "not allowed for the player's group (blueprint.paste)";
+			double max = AdminAccess.Host is { } h && SteamOfCaller(h, sender) is var steam && steam != 0 ? h.Perms.Value(steam, "blueprint.max_blocks") : -1;
+			if (max >= 0 && blocks > max) return $"a blueprint of {blocks} blocks (the player's group may paste at most {max:0})";
+		}
+		if (!HasClient(sender, "bypass.paste_once") && PasteOnce.HostGate((ushort)sender.Id, story) is { } paste) return paste;
+		if (!HasClient(sender, "bypass.requests") && RequestRefusal(sender, caller, story) is { } request) return request;
+		var arguments = StoryArguments.GetValue(type, Arguments);
+		if (arguments.Initiator?.GetValue(story) is IdentityId initiator && (long)initiator != caller && !HasClient(sender, "bypass.ownership_initiator")) return "an ownership transfer in another player's name";
+		if (HasClient(sender, "bypass.foreign_character")) return null;
 		foreach (var field in arguments.Entities)
 		{
 			Entity? named = field.GetValue(story) switch
@@ -193,6 +219,37 @@ internal static partial class ServerAccess
 			if (named != null && IsForeignCharacter(named, caller)) return "another player's character";
 		}
 		return null;
+	}
+
+	/// <summary>Whether the player behind a connection has a permission: by ClientId, not identity, because with identities
+	/// off every player shares the host's identity. The server's own requests (no player) have none.</summary>
+	internal static bool HasClient(Keen.VRage.Multiplayer.ClientId client, string key, bool unknownAllowed = false)
+	{
+		var host = AdminAccess.Host;
+		if (host == null || client == Keen.VRage.Multiplayer.ClientId.Server) return unknownAllowed;
+		ulong steam = SteamOfCaller(host, client);
+		return steam == 0 ? unknownAllowed : host.Allowed(steam, key);
+	}
+
+	/// <summary>
+	/// The Steam account behind a request. The game's ClientId numbers remote connections for the whole process and changes
+	/// on every reconnect (SE2 Online's own ClientId is another number), so a remote player is found through their
+	/// connection; the co-op host's own game is the in-process client (ClientId 1). 0 when it is neither.
+	/// </summary>
+	internal static ulong SteamOfCaller(HostSession host, Keen.VRage.Multiplayer.ClientId client)
+	{
+		if (client.Id == 1) return host.SteamOfClient(SyncProtocol.HostClientId);
+		return Engine.Y51Replication.ServerOf(client) is { } connection ? Y51_SE2Online.Net.PeerAlias.SteamOf(connection.Peer.Value) : 0;
+	}
+
+	/// <summary>Whether the player behind an identity has a permission. Identities that are no player of this session
+	/// (NPCs, unknown) have none, unless <paramref name="unknownAllowed"/> (keys everyone has by default).</summary>
+	internal static bool HasIdentity(long identity, string key, bool unknownAllowed = false)
+	{
+		var host = AdminAccess.Host;
+		if (host == null || identity == 0) return unknownAllowed;
+		ulong steam = host.SteamOfIdentity(identity);
+		return steam == 0 ? unknownAllowed : host.Allowed(steam, key);
 	}
 
 	private sealed record StoryFields(System.Reflection.FieldInfo? Initiator, System.Reflection.FieldInfo[] Entities);
@@ -266,18 +323,19 @@ internal static partial class ServerAccess
 		return __exception;
 	}
 
-	private static Exception? StoryFinalizer(Exception? __exception, (Keen.VRage.Multiplayer.ClientId? Client, bool Hosting) __state)
+	private static Exception? StoryFinalizer(Exception? __exception, (Keen.VRage.Multiplayer.ClientId? Client, bool Hosting, Type? Story) __state)
 	{
-		(_storyClient, _hostingStory) = __state;
+		(_storyClient, _hostingStory, _storyType) = __state;
 		return __exception;
 	}
 
 	// The co-op host's own player reaches the server in process, not through a transport that names a client.
-	private static void InProcessStoryPrefix(out (Keen.VRage.Multiplayer.ClientId? Client, bool Hosting) __state)
+	private static void InProcessStoryPrefix(out (Keen.VRage.Multiplayer.ClientId? Client, bool Hosting, Type? Story) __state)
 	{
-		__state = (_storyClient, _hostingStory);
+		__state = (_storyClient, _hostingStory, _storyType);
 		_storyClient = Keen.VRage.Multiplayer.ClientId.Server;
 		_hostingStory = false;
+		_storyType = null;
 	}
 
 	// Button panels and every other block toolbar: pressing or clearing a tile needs the block's use access (2.4 checked
@@ -294,20 +352,47 @@ internal static partial class ServerAccess
 		}
 		if (client == Keen.VRage.Multiplayer.ClientId.Server) return true;
 		var who = IdentityOf(client);
-		if ((long)who != 0 && MayUse(null, who, __instance.Entity)) return true;
+		if ((long)who != 0 && MayUse(null, who, __instance.Entity, useKey: "use.toolbar")) return true;
 		Refused++;
 		GameLog.Instance.Info($"access: refused identity {(long)who} on {__instance.Entity.GetComposition()?.DebugNameShort} toolbar (no access)");
 		return false;
 	}
 
 	// SE2 4.0's admin check returns true for everyone, so any player could teleport, spawn ships, edit voxels with the
-	// voxel hand, make safe zones and use every other admin tool. On an SE2 Online server it means SE2 Online's own admin
-	// role: the host's own game, and players with the Admin role (access list).
+	// voxel hand, make safe zones and use every other admin tool. On an SE2 Online server each tool needs its game.admin.*
+	// permission (owners have all): the key is named after the story or signal that asks (AdminRules.GameAdminKey).
 	private static bool AdminPrefix(ReplicationEventContext context, ref bool __result)
 	{
 		if (!Enforcing) return true;
-		__result = context.IsLocal || context.IsFromServer || IsAdmin(context);
+		__result = context.IsLocal || context.IsFromServer || MayAdmin(context);
 		return false;
+	}
+
+	private static bool ValidateAdminPrefix(ReplicationEventContext context)
+	{
+		if (!Enforcing || context.IsLocal || context.IsFromServer || MayAdmin(context)) return false;
+		throw context.Throw("Access denied: game admin tools need " + GameAdminKey());
+	}
+
+	private static bool MayAdmin(ReplicationEventContext context)
+	{
+		string key = GameAdminKey();
+		bool allowed = HasClient(context.ClientId, key);
+		if (!allowed)
+		{
+			Refused++;
+			if (LogDue(context.ClientId, "admin-tool")) GameLog.Instance.Info($"access: refused identity {(long)IdentityOf(context)}'s game admin tool ({key}; further ones within 5 s not logged)");
+		}
+		return allowed;
+	}
+
+	/// <summary>The game admin key for what is running: the player's story, else the signal being replayed, else game.admin.debug.</summary>
+	private static string GameAdminKey()
+	{
+		if (_storyType is { } story) return AdminRules.GameAdminKey(story.DeclaringType?.Name, StoryName(story));
+		if (_signalName is { } signal) { var (declaring, member) = AdminRules.SplitSignal(signal); return AdminRules.GameAdminKey(declaring, member); }
+		GameLog.Instance.WarnOnce("admin-tool-unnamed", "access: a game admin check ran outside a known story or signal; treated as game.admin.debug");
+		return "game.admin.debug";
 	}
 
 	// Opening a container lists every inventory on its ship, and the client then asks for each one at once; one refused
@@ -328,32 +413,25 @@ internal static partial class ServerAccess
 		if (context != null) who = IdentityOf(context);
 		else if (_listOwners.TryGetValue(model, out var owner)) who = owner.Value;
 		else return true;
-		if (MayUse(context, who, entity)) return true;
+		if (MayUse(context, who, entity, useKey: "use.inventory")) return true;
 		Refused++;
 		return false;
-	}
-
-	private static bool IsAdmin(ReplicationEventContext context) => IsAdminIdentity((long)IdentityOf(context));
-
-	private static bool IsAdminIdentity(long identity)
-	{
-		var host = AdminAccess.Host;
-		if (host == null || identity == 0) return false;
-		var player = host.Players().FirstOrDefault(p => p.IdentityId == identity);
-		return player != null && host.IsAdminClient(player.ClientId);
 	}
 
 	private static bool Enforcing => AdminAccess.Hosting;
 
 	/// <summary>Whether this identity may use the entity a terminal screen or request names. Never throws: a check that
 	/// cannot decide allows, because an exception here faults the player's request and their game.</summary>
-	internal static bool MayUse(ReplicationEventContext? context, IdentityId identity, Entity entity, bool basicUse = false)
+	internal static bool MayUse(ReplicationEventContext? context, IdentityId identity, Entity entity, bool basicUse = false, string? useKey = null)
 	{
 		try
 		{
 			// No admin or host exemption: only a player's own access bypass (Admin Panel) lifts the rules. A request with no
-			// player behind it (the game's own server stories) is not a player's use.
-			if ((long)identity == 0 || AccessBypass.IsOn((long)identity)) return true;
+			// player behind it (the game's own server stories) is not a player's use. A group denied a kind of use
+			// (use.terminal, use.inventory...) may not do it anywhere, its own grids included.
+			if ((long)identity == 0) return true;
+			if (useKey != null && !HasIdentity((long)identity, useKey, unknownAllowed: true)) return false;
+			if (AccessBypass.IsOn((long)identity)) return true;
 			// NPC and unowned grids keep SE2's own rule, which is no check: stations' trade terminals, encounter loot and
 			// vehicles are there to be used, and SE2's owner-only answer refused them all.
 			if (!PlayerIdentities.IsHuman(TeamPermissions.OwnerOf(entity))) return true;
@@ -414,7 +492,7 @@ internal static partial class ServerAccess
 	private static void AsEntityPostfix(StreamedBaseSessionComponent __instance, ReplicationEventContext? replicationContext, ref Entity? __result)
 	{
 		if (!Enforcing || replicationContext == null || __result == null || __instance is StreamedRespawnScreenSessionComponent) return;
-		if (MayUse(replicationContext, IdentityOf(replicationContext), __result)) return;
+		if (MayUse(replicationContext, IdentityOf(replicationContext), __result, useKey: "use.terminal")) return;
 		Note(replicationContext, __result);
 		__result = null;
 	}
@@ -422,22 +500,101 @@ internal static partial class ServerAccess
 	private static void InteractedPrefix(ReplicationEventContext eventContext, Entity? interacted)
 	{
 		if (!Enforcing || interacted == null) return;
-		if (!MayUse(eventContext, IdentityOf(eventContext), interacted)) throw Refuse(eventContext, interacted);
+		if (!MayUse(eventContext, IdentityOf(eventContext), interacted, useKey: "use.inventory")) throw Refuse(eventContext, interacted);
 	}
 
 	private static bool ControlPanelPrefix(Entity root, ReplicationEventContext? context)
 	{
-		if (!Enforcing || context == null || root == null || MayUse(context, IdentityOf(context), root)) return true;
+		if (!Enforcing || context == null || root == null || MayUse(context, IdentityOf(context), root, useKey: "use.terminal")) return true;
 		Note(context, root);
 		return false;
 	}
 
-	private static bool ActivateRespawnPrefix(IdentityId identity, Entity respawnPoint, ref StringId __result)
+	// __state: -1 refused, 1 the point was the home base before, 0 it was not.
+	private static bool ActivateRespawnPrefix(IdentityId identity, Entity respawnPoint, ref StringId __result, out int __state)
 	{
-		if (!Enforcing || respawnPoint == null || MayUse(null, identity, respawnPoint)) return true;
+		__state = respawnPoint != null && HomeOf(identity) == respawnPoint ? 1 : 0;
+		if (!Enforcing || respawnPoint == null) return true;
+		if (MayUse(null, identity, respawnPoint, useKey: "use.medbay"))
+		{
+			// On a medbay the player owns, the game's action makes it the home base (or clears it, which stays allowed).
+			if (respawnPoint.AsInterface<Keen.Game2.Simulation.GameSystems.Ownership.IOwnerProvider>()?.Owner is not { } owner || (long)owner != (long)identity
+				|| __state == 1 || HasIdentity((long)identity, "respawn.home.set", unknownAllowed: true)) return true;
+			GameLog.Instance.Info($"access: identity {(long)identity} may not set a home base (respawn.home.set)");
+		}
+		else GameLog.Instance.Info($"access: identity {(long)identity} may not bind to the medbay on {respawnPoint.GetComposition()?.DebugNameShort}");
 		Refused++;
 		__result = default;
-		GameLog.Instance.Info($"access: identity {(long)identity} may not bind to the medbay on {respawnPoint.GetComposition()?.DebugNameShort}");
+		__state = -1;
 		return false;
+	}
+
+	private static RespawnPerPlayerData? RespawnData(IdentityId identity)
+		=> MpPlugin.App?.ServerSession is { } session ? Keen.VRage.Core.Game.Components.GameEntityExtensions.Get<IPerPlayerData>(session).GetPerPlayerData<RespawnPerPlayerData>(identity) : null;
+
+	private static Entity? HomeOf(IdentityId identity) => RespawnData(identity)?.HomePoint;
+
+	// SE2 Online keeps the player's home base by SteamID beside the game's own record, so a destroyed one is still named.
+	private static void ActivateRespawnPostfix(IdentityId identity, Entity respawnPoint, int __state)
+	{
+		try
+		{
+			if (__state < 0 || !Enforcing || respawnPoint == null || AdminAccess.Host is not { } host || RespawnData(identity) is not { } data) return;
+			// Unclaiming a faction or shared home base (the game only toggles the claim on medbays the player does not own)
+			// gives it up: the game respawns only at claimed points.
+			if (data.HomePoint == respawnPoint && !data.KnownPoints.Contains(respawnPoint))
+			{
+				data.HomePoint = null;
+				respawnPoint.TryGet<RespawnPointComponent>()?.OnStatusChanged(identity, isClaimed: false, isHome: false);
+			}
+			var home = data.HomePoint;
+			if (home != respawnPoint && __state == 0) return;
+			ulong steam = host.SteamOfIdentity((long)identity);
+			if (steam == 0) return;
+			if (home == null) { host.Access.SetHome(steam, null); return; }
+			var position = home.Data.GetWorldTransform().Position;
+			string name = home.TryGet<RespawnPointComponent>()?.DisplayName.EvaluateText() ?? "";
+			host.Access.SetHome(steam, new Y51_SE2Online.Sync.HomeEntry { World = HostWorld.Current?.WorldKey ?? "", Name = string.IsNullOrWhiteSpace(name) || name.Contains('{') ? "Medbay" : name, X = position.X, Y = position.Y, Z = position.Z,
+				Grid = WorldSocial.GridOf(home)?.TryGet<Keen.Game2.Simulation.WorldObjects.CubeGrids.CubeGridComponent>()?.DisplayName.ToString() ?? "" });
+		}
+		catch (Exception ex) { GameLog.Instance.WarnOnce("home-mirror", "access: recording the home base failed: " + ex.Message); }
+	}
+
+	// The game's own respawn request (its respawn screen, which SE2 Online falls back to): Home needs respawn.home.use and
+	// access to the medbay, and Closest skips medbays the player may no longer use, put back afterwards.
+	private static bool RespawnAtTypePrefix(IdentityId identity, RespawnRequestType request, ref Entity? __result, out System.Collections.Generic.List<Entity>? __state)
+	{
+		__state = null;
+		if (!Enforcing || (long)identity == 0 || RespawnData(identity) is not { } data) return true;
+		if (request == RespawnRequestType.Home && data.HomePoint is { } home
+			&& (!HasIdentity((long)identity, "respawn.home.use", unknownAllowed: true) || !MayUse(null, identity, home, useKey: "use.medbay")))
+		{
+			Refused++;
+			GameLog.Instance.Info($"access: identity {(long)identity} may not respawn at its home base");
+			__result = null;
+			return false;
+		}
+		if (request != RespawnRequestType.Closest) return true;
+		foreach (var point in data.KnownPoints)
+			if (point != null && !MayUse(null, identity, point, useKey: "use.medbay")) (__state ??= new()).Add(point);
+		if (__state != null) foreach (var point in __state) data.KnownPoints.Remove(point);
+		return true;
+	}
+
+	private static Exception? RespawnAtTypeFinalizer(IdentityId identity, Exception? __exception, System.Collections.Generic.List<Entity>? __state)
+	{
+		if (__state != null && RespawnData(identity) is { } data)
+			foreach (var point in __state) if (!data.KnownPoints.Contains(point)) data.KnownPoints.Add(point);
+		return __exception;
+	}
+
+	// The game makes a player's first medbay their home base by itself; a group without respawn.home.set keeps none.
+	private static void AutoHomePrefix(IdentityId owner, out bool __state) => __state = RespawnData(owner)?.HomePoint == null;
+
+	private static void AutoHomePostfix(IdentityId owner, Entity respawn, bool __state)
+	{
+		if (!__state || !Enforcing || RespawnData(owner) is not { } data || data.HomePoint != respawn || HasIdentity((long)owner, "respawn.home.set", unknownAllowed: true)) return;
+		data.HomePoint = null;
+		respawn.TryGet<RespawnPointComponent>()?.OnStatusChanged(owner, isClaimed: true, isHome: false);
 	}
 }

@@ -11,11 +11,7 @@ namespace Y51_SE2Online.SyncEngine;
 
 internal static class TeamPermissions
 {
-	public static volatile bool Enabled;
-
 	public static long Overrides;
-
-	private static int _logged;
 
 	public static IMpLog? Log;
 
@@ -40,82 +36,18 @@ internal static class TeamPermissions
 		return 0L;
 	}
 
-	private static void Grant(ref bool result, string what, long owner, long asker)
-	{
-		result = true;
-		Interlocked.Increment(ref Overrides);
-		if (Interlocked.Increment(ref _logged) <= 5)
-		{
-			Log?.Info($"team grids: {what} allowed for identity {asker} on a grid of identity {owner} (game rule: owner only)");
-		}
-	}
+	// Where SE2 Online has no answer (NPC and unowned grids, "everyone may use" blocks, characters) the game's own rule
+	// stands. Up to 0.18.0-pre4 team grids gave every player the owner's rights there: IsOwner said yes for another
+	// player's character, and an "everyone may use" block opened its control panel to everyone.
+	public static void IsOwnerPostfix(Entity entity, IdentityId owner, ref bool __result) => ApplyAccess(entity, owner, ref __result);
 
-	public static void IsOwnerPostfix(Entity entity, IdentityId owner, ref bool __result)
-	{
-		if (ApplyAccess(entity, owner, ref __result)) return;
-		if (!__result && Enabled)
-		{
-			long gridOwner = OwnerOf(entity);
-			if (PlayerIdentities.SameTeam(gridOwner, owner))
-			{
-				Grant(ref __result, "ownership check", gridOwner, owner);
-			}
-		}
-	}
+	public static void CanPlaceBlockPostfix(Entity target, IdentityId identity, ref bool __result) => ApplyAccess(target, identity, ref __result);
 
-	public static void CanPlaceBlockPostfix(Entity target, IdentityId identity, ref bool __result)
-	{
-		if (ApplyAccess(target, identity, ref __result)) return;
-		if (!__result && Enabled)
-		{
-			long owner = OwnerOf(target);
-			if (PlayerIdentities.SameTeam(owner, identity))
-			{
-				Grant(ref __result, "building", owner, identity);
-			}
-		}
-	}
+	public static void CanUseBlockActionPostfix(Entity block, Entity grid, IdentityId identity, ref bool __result) => ApplyAccess(block, identity, ref __result);
 
-	public static void CanUseBlockActionPostfix(Entity block, Entity grid, IdentityId identity, ref bool __result)
-	{
-		if (ApplyAccess(block, identity, ref __result)) return;
-		if (!__result && Enabled)
-		{
-			long owner = OwnerOf(grid);
-			if (PlayerIdentities.SameTeam(owner, identity))
-			{
-				Grant(ref __result, "block use", owner, identity);
-			}
-		}
-	}
+	public static void CanLinkGridsPostfix(Entity firstGrid, Entity secondGrid, ref bool __result) => ApplyLink(firstGrid, secondGrid, false, ref __result);
 
-	public static void CanLinkGridsPostfix(Entity firstGrid, Entity secondGrid, ref bool __result)
-	{
-		if (ApplyLink(firstGrid, secondGrid, false, ref __result)) return;
-		if (!__result && Enabled)
-		{
-			long firstOwner = OwnerOf(firstGrid);
-			long secondOwner = OwnerOf(secondGrid);
-			if (PlayerIdentities.SameTeam(firstOwner, secondOwner))
-			{
-				Grant(ref __result, "connecting grids", secondOwner, firstOwner);
-			}
-		}
-	}
-
-	public static void CanMergeGridsPostfix(Entity firstGrid, Entity secondGrid, ref bool __result)
-	{
-		if (ApplyLink(firstGrid, secondGrid, true, ref __result)) return;
-		if (!__result && Enabled && firstGrid != secondGrid)
-		{
-			long firstOwner = OwnerOf(firstGrid);
-			long secondOwner = OwnerOf(secondGrid);
-			if (PlayerIdentities.SameTeam(firstOwner, secondOwner))
-			{
-				Grant(ref __result, "merging grids", secondOwner, firstOwner);
-			}
-		}
-	}
+	public static void CanMergeGridsPostfix(Entity firstGrid, Entity secondGrid, ref bool __result) => ApplyLink(firstGrid, secondGrid, true, ref __result);
 
 	private static bool ApplyAccess(Entity target, long actor, ref bool result)
 	{

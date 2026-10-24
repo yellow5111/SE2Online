@@ -30,13 +30,27 @@ internal sealed class SteamDedicatedSession : IDisposable
         {
             GameServer.RunCallbacks();
             SteamId = SteamGameServer.GetSteamID().m_SteamID;
-            if (SteamGameServer.BLoggedOn() && SteamId != 0) return;
+            if (SteamGameServer.BLoggedOn() && SteamId != 0) { _live = true; return; }
             if (MpClock.NowMs() - started > 60000) throw new InvalidOperationException("Steam could not sign in the dedicated server within 60 seconds.");
             Thread.Sleep(100);
         }
         throw new OperationCanceledException("Dedicated-server startup was stopped.");
     }
     private static int _publishedAccess = -1;
+    private static volatile bool _live;
+
+    /// <summary>The game server's public IPv4 address as Steam sees it; null before sign-in or while Steam does not know it.</summary>
+    public static System.Net.IPAddress PublicIp()
+    {
+        if (!_live) return null;
+        try
+        {
+            // IPv4 only: the game port a dedicated server binds by default (0.0.0.0) is IPv4.
+            var ip = SteamGameServer.GetPublicIP();
+            return ip.IsSet() && ip.GetIPType() == ESteamIPType.k_ESteamIPTypeIPv4 ? ip.ToIPAddress() : null;
+        }
+        catch (Exception) { return null; }
+    }
 
     /// <summary>
     /// Password and whitelist in the Steam server list: the lock flag plus rules "password" and "whitelist" ("1"/"0").
@@ -55,6 +69,7 @@ internal sealed class SteamDedicatedSession : IDisposable
     public void Dispose()
     {
         _publishedAccess = -1;
+        _live = false;
         if (!_initialized) return;
         SteamGameServer.LogOff();
         GameServer.Shutdown();

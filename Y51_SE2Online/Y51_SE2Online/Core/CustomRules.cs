@@ -258,7 +258,7 @@ public static partial class OnlineRules
 	{
 		"Description", "MaxPlayers", "TeamGrids", "SharedResearch", "Nametags", "NametagRange", "SpawnNearHost", "StreamingRadiusMeters", "WaterSync",
 		"BuildGhosts", "ClientMovement", "OwnReplication", "VoiceEnabled", "VoiceRadiusMeters", "EnergyUsageMultiplier", "HydrogenUsageMultiplier",
-		"OxygenUsageMultiplier", "PlayerInventoryMultiplier", "CargoInventoryMultiplier", "RespawnShips", "RespawnShipCooldownMinutes", "Pvp",
+		"OxygenUsageMultiplier", "PlayerInventoryMultiplier", "CargoInventoryMultiplier", "RespawnShips", "RespawnShipCooldownMinutes", "VanillaRespawnShips", "Pvp",
 		"OfflineRaidProtection", "PauseOfflineStats", "PcuLimit", "SunRotation", "SunPeriodMinutes", "Hacking", "AllowHackingPlayerGrids",
 		"HackTimeMultiplier", "HackLockdownSeconds", "HackLockdownCooldownSeconds", "Motd", "MotdTitle"
 	};

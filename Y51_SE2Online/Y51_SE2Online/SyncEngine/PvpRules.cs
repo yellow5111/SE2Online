@@ -241,6 +241,7 @@ internal static class PvpRules
         long owner = TeamPermissions.OwnerOf(__instance.Entity);
         if (!IsPlayer(owner)) return true;
         bool byPlayer = IsPlayer(t_attacker) && t_attacker != owner;
+        if (byPlayer && !Y51_SE2Online.KeenNetcode.ServerAccess.HasIdentity(t_attacker, "pvp.damage_players", unknownAllowed: true)) { System.Threading.Interlocked.Increment(ref Blocked); return false; }
         if (byPlayer && !Sync.RelationTable.MayFight(TurretRelations.Table.Of(t_attacker, owner), Pvp))
         {
             System.Threading.Interlocked.Increment(ref Blocked);

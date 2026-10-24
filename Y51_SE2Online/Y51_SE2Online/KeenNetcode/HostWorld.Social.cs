@@ -58,6 +58,17 @@ internal sealed partial class HostWorld
 
 	internal string? FactionTagOf(long identity) => identity != 0 && _factionTags.TryGetValue(identity, out string tag) ? tag : null;
 
+	/// <summary>The permission a faction or grid request needs; leaving a faction and the rest need none.</summary>
+	private static string? SocialKey(SocialAction action) => action switch
+	{
+		SocialAction.CreateFaction => "faction.create",
+		SocialAction.RequestJoin or SocialAction.AcceptInvitation => "faction.join",
+		SocialAction.Invite or SocialAction.ApproveRequest or SocialAction.RejectRequest or SocialAction.RemoveMember or SocialAction.TransferLeadership
+			or SocialAction.DisbandFaction or SocialAction.SetRole or SocialAction.SetFactionMotd => "faction.manage",
+		SocialAction.TransferGrid => "ownership.transfer",
+		_ => null
+	};
+
 	internal void QueueSocial(SocialRequest request) => _socialRequests.Enqueue((null, 1, request));
 	public void OnSocialRequest(PeerId peer, ushort clientId, SocialRequest request)
 	{
@@ -182,6 +193,11 @@ internal sealed partial class HostWorld
 			{
 				long actor = command.Peer.HasValue ? IdentityOf(command.ClientId) : _hostIdentity;
 				if (command.Peer.HasValue && !_host.Players().Any(p => p.ClientId == command.ClientId && p.Peer == command.Peer)) continue;
+				if (command.Peer.HasValue && SocialKey(command.Request.Action) is { } socialKey && !_host.AllowedClient(command.ClientId, socialKey))
+				{
+					_host.SendAdminMessage(command.Peer, $"Your group may not do that ({socialKey}).");
+					continue;
+				}
 				if (command.Request.Action == SocialAction.Broadcast)
 				{
 					// Kept per identity in the world's side file, so a parked character's tag follows its owner's last choice.

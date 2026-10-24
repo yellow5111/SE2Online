@@ -18,8 +18,8 @@ namespace Y51_SE2Online.KeenNetcode;
 /// <summary>
 /// The player's half of SE2 Online's spawn menu on SE2 4.0. Keen's client asks for a body through
 /// ClientRespawnSessionComponent.RequestRespawnScreenAsync (first join without a character, and after the death screen);
-/// in an SE2 Online session that asks the host instead (<see cref="HostWorld.RequestCharacter"/>), shows its menu
-/// (<see cref="RespawnScreen"/>), then possesses the character the host made, the way Keen possesses its own respawns.
+/// in an SE2 Online session that asks the host instead (<see cref="HostWorld.RequestCharacter"/>), shows its menu in the
+/// game's own respawn screen (<see cref="InGameRespawn"/>, or the plain <see cref="RespawnScreen"/> list), then possesses the character the host made, the way Keen possesses its own respawns.
 /// The listen host's own player takes the same path to its HostWorld without the network.
 /// </summary>
 internal static class KeenRespawn
@@ -34,12 +34,19 @@ internal static class KeenRespawn
     private static volatile bool _died;
     [ThreadStatic] private static bool _keenOwn;
     private static SpawnMenu? _logged;
+    private static bool _gameUpdateHooked;
 
     internal static void Install(Harmony harmony)
     {
         harmony.Patch(AccessTools.Method(typeof(ClientRespawnSessionComponent), nameof(ClientRespawnSessionComponent.RequestRespawnScreenAsync)), prefix: new HarmonyMethod(typeof(KeenRespawn), nameof(RespawnScreenPrefix)));
         harmony.Patch(AccessTools.Method(typeof(ClientRespawnSessionComponent), nameof(ClientRespawnSessionComponent.OnLocalPlayerDeath)), prefix: new HarmonyMethod(typeof(KeenRespawn), nameof(DeathPrefix)));
-        harmony.Patch(AccessTools.Method(typeof(Keen.Game2.GameAppComponent), "GameUpdate"), postfix: new HarmonyMethod(typeof(KeenRespawn), nameof(GameUpdatePostfix)));
+        InGameRespawn.Install(harmony);
+        try
+        {
+            harmony.Patch(AccessTools.Method(typeof(Keen.Game2.GameAppComponent), "GameUpdate"), postfix: new HarmonyMethod(typeof(KeenRespawn), nameof(GameUpdatePostfix)));
+            _gameUpdateHooked = true;
+        }
+        catch (Exception ex) { GameLog.Instance.Warn($"spawn: no per-frame menu update ({ex.GetType().Name}: {ex.Message}); the spawn wait updates it instead"); }
     }
 
     private static bool Local => AdminAccess.Hosting && HostWorld.Current != null;
@@ -49,6 +56,8 @@ internal static class KeenRespawn
 
     internal static void Choose(int index)
     {
+        // A home base change reorders the cards; an index into the menu it replaces would pick the wrong one.
+        if (RespawnCardsUi.Updating) { GameLog.Instance.Info($"spawn: choice {index} held back until the menu after the home base change arrives"); return; }
         if (!Local)
         {
             ClientWorld.Current?.BoundSession?.ChooseSpawn(index);
@@ -93,12 +102,41 @@ internal static class KeenRespawn
         else client?.RequestCharacter(died ? CharacterRequestMessage.Respawn : CharacterRequestMessage.Initial);
         GameLog.Instance.Info($"spawn: asked the host for the spawn menu ({(died ? "respawn" : "first spawn")}, IdentityId {identity}{(local ? ", listen host" : "")})");
         long since = MpClock.NowMs();
+        InGameRespawn.Begin();
         Entity? body;
         string? failure = null;
+        // The game's own respawn screen shows the host's menu (InGameRespawn); its answer becomes the card choice.
+        Keen.VRage.Library.Threading.Task<Keen.Game2.Simulation.GameSystems.Respawn.RespawnRequestType> screen = default;
+        bool screenOpen = false;
         while (true)
         {
             await respawn._timer.Delay(TimeSpan.FromMilliseconds(200), out var timer);
             timer.Dispose();
+            if (!_gameUpdateHooked) GameUpdatePostfix();
+            if (screenOpen && screen.IsCompleted)
+            {
+                screenOpen = false;
+                int index = -1;
+                // A cancelled or disposed screen task rethrows here; no answer, so the screen opens again.
+                try { if (screen.TryGetResult(out var answer)) index = InGameRespawn.Resolve(answer); }
+                catch (Exception ex) { GameLog.Instance.Warn($"spawn: the game's respawn screen gave no answer ({ex.GetType().Name}: {ex.Message})"); }
+                if (index >= 0) Choose(index);
+            }
+            else if (screenOpen && (Menu == null || InGameRespawn.Stalled))
+            {
+                if (Menu != null) InGameRespawn.Fail("opening it", new TimeoutException("its view did not show within 5 s"));
+                else InGameRespawn.Cancel();
+            }
+            if (!screenOpen && Menu != null && !InGameRespawn.Fallback)
+            {
+                try
+                {
+                    InGameRespawn.Opening();
+                    screen = respawn._inGameUI.OpenRespawnScreen();
+                    screenOpen = true;
+                }
+                catch (Exception ex) { InGameRespawn.Fail("opening it", ex); }
+            }
             body = OwnLivingCharacter(identity);
             if (body != null) break;
             failure = local ? _localFailure : client?.Assignment is { Status: PlayerAssignMessage.Failed } a && a.Version != version ? a.Text : null;
@@ -107,6 +145,7 @@ internal static class KeenRespawn
             if (Menu != null) since = MpClock.NowMs();
             else if (MpClock.NowMs() - since > AnswerTimeoutMs) { failure = "the host did not answer"; break; }
         }
+        if (screenOpen) InGameRespawn.Cancel();
         if (failure != null)
         {
             GameLog.Instance.Warn($"spawn: the host gave no character ({failure}); the game's own respawn runs");

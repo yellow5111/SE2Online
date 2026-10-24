@@ -41,6 +41,8 @@ internal sealed class WorldSocial
     internal readonly object Sync = new();
     internal SocialState State = new();
     private bool _initialized;
+    // The world's save had SE2 Online's factions file: SE2 Online hosted it before.
+    private bool _hostedBefore;
     private byte[] _unreadable;
     internal SocialSnapshot Local { get; private set; } = new();
     internal static WorldSocial For(WorldSessionComponent world) => Worlds.GetValue(world, _ => new());
@@ -111,6 +113,7 @@ internal sealed class WorldSocial
                     }
                 }
                 social._initialized = false;
+                social._hostedBefore = stream != null;
                 social._tagged.Clear(); social._unmatched = null;
             }
         }
@@ -133,6 +136,8 @@ internal sealed class WorldSocial
                  && Y51_SE2Online.KeenNetcode.SteamUsers.SteamIdOf(creator) is ulong creatorSteam)
             ReclaimHostSlot(world.OwnedSession, creatorSteam);
         long heir = legacySlot ? State.HostHeir : 0;
+        bool keep = KeenNetcode.ServerAccess.Off("sharing"), reviewed = State.SharingReviewed || keep;
+        int undecided = 0;
         foreach (var entity in world.OwnedSession.Entities)
         {
             var grid = entity.TryGet<CubeGridComponent>(); var permissions = entity.TryGet<GridPermissionsComponent>();
@@ -148,9 +153,14 @@ internal sealed class WorldSocial
                     continue;
                 }
             }
-            if (IsExplicit(permissions.BuildPermissions)) continue;
-            SetSharing(entity, shared ? GridSharing.Everyone : SharingOf(entity));
+            bool chosen = IsExplicit(permissions.BuildPermissions);
+            if (SocialState.SharingUndecided(chosen, SharingOf(entity), shared, _hostedBefore, reviewed)) undecided++;
+            if (SocialState.SharingAtLoad(chosen, SharingOf(entity), shared, _hostedBefore, reviewed) is not { } sharing) continue;
+            SetSharing(entity, sharing);
         }
+        if (!keep) State.SharingReviewed = true;
+        if (undecided > 0)
+            GameLog.Instance.Warn($"grid sharing: {undecided} player grid(s) are shared with everyone, left as shared (can't tell if deliberate): earlier SE2 Online versions' team grids shared every grid at each load. Owners can make them private in Grid ownership.");
         if (heir != 0)
         {
             string hostId = host.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -274,6 +284,7 @@ internal sealed class WorldSocial
 
     private static void Transferred(Entity session, Entity target, IdentityId from, IdentityId to)
     {
+        if (PlayerIdentities.IsHuman((long)to) && target != null && target.TryGet<CubeGridComponent>() != null) KeenNetcode.PlayerGridGuard.Queue(target);
         if (_ownTransfer || (long)from == (long)to || target == null || EngineCodec.IsDead(target) || target.TryGet<CubeGridComponent>() == null) return;
         try { ResetBlockAccess(target); }
         catch (Exception ex) { GameLog.Instance.Warn("grid ownership: resetting block access after a native transfer failed: " + ex.Message); }

@@ -168,17 +168,19 @@ public static class HookTargets
 
 	public static readonly EngineMember GpsDrawHud = new EngineMember("gps-draw-hud", "Game2.Client", "Keen.Game2.Client.GameSystems.GPS.GPSMarkerRenderSessionComponent", MemberKind.Method, "DrawHUDMarkers", Array.Empty<string>(), "0.8.2: nametags positioned in the frame that draws them");
 
+	public static readonly EngineMember GpsDrawFilter = new EngineMember("gps-draw-filter", "Game2.Client", "Keen.Game2.Client.GameSystems.GPS.GPSMarkerRenderSessionComponent", MemberKind.Method, "DrawHUDMarkers", Array.Empty<string>(), "0.18.0 marker filter: transpiler wraps the 5 DrawBatch(span) call sites (antennas, IGPSMarkersProvider components, ore detectors, own GPS, GPS groups; each preceded by ldloca of the closure) in MarkerFilter.Pass and the provider's get_Markers in MarkerFilter.ProviderMarkers; another IL shape leaves the method alone with one warning");
+
 	public static readonly EngineMember PaintToolAdded = new EngineMember("paint-tool-added", "Game2.Client", "Keen.Game2.Client.WorldObjects.Tools.PaintToolControllableComponent", MemberKind.Method, "Keen.VRage.Core.Game.Systems.IInSceneListener.OnAddedToScene", Array.Empty<string>(), "0.8.2 joiner: another player's paint tool does not crash the joiner")
 	{
 		InterfaceDispatchOnly = true
 	};
 
-	public static readonly EngineMember[] Patches = new EngineMember[36]
+	public static readonly EngineMember[] Patches = new EngineMember[37]
 	{
 		CommitFrame, BuildAndReset, WorldInit, SteamInit, SteamShutdown, GameUpdate, SessionUpdate, PerPlayerInit,
 		NarratorMoveToClient, PermIsOwner, PermCanPlace, PermCanUse, PermCanLink, PermCanMerge, AwaitReplication, RenderTextureDestroy, NextCharacter, EntityTypeToPossess,
 		CharacterEntityRemoved, NextCharacterFocus, ToolShadowSpawn, ToolShadowDespawn, ToolsUnregister, AudioPlay2D, PcuHas, PcuGet, ServerTrySetEntity, SpawnTop,
-		RenderDestroyEntity, CockpitTogglePower, CockpitToggleDampeners, CockpitToggleLights, CockpitToggleBrakes, CockpitBoost, GpsDrawHud, PaintToolAdded
+		RenderDestroyEntity, CockpitTogglePower, CockpitToggleDampeners, CockpitToggleLights, CockpitToggleBrakes, CockpitBoost, GpsDrawHud, PaintToolAdded, GpsDrawFilter
 	};
 
 	public static readonly EngineMember[] Reflected = new EngineMember[54]

@@ -97,6 +97,25 @@ internal static class PasteOnce
 		if (tool._selectedBlueprintToolbarTile != null) tool.CancelPlacement();
 	}
 
+	/// <summary>The blocks a pasted blueprint carries (a placement of 2 or more blocks from a bundle), or -1 for anything else.</summary>
+	internal static int PasteBlocks(object box)
+	{
+		Type type = box.GetType();
+		if (type.DeclaringType != typeof(BlockPlacerNetworkStories) || !(type.Name.StartsWith("<PlaceStandalone>", StringComparison.Ordinal) || type.Name.StartsWith("<PlaceOnGrid>", StringComparison.Ordinal))) return -1;
+		try
+		{
+			if (ObjectCodec.Fields(type).FirstOrDefault(f => f.Name == "detachedBundle")?.GetValue(box) is not Keen.VRage.Multiplayer.Utils.Detached<EntityBundle> { Value: { } bundle }) return -1;
+			int blocks = 0;
+			for (int i = 0; i < bundle.Roots; i++) blocks += bundle.RootBuilders[i].OB<HierarchyComponent, HierarchyComponentObjectBuilder>().Children.Count(c => c.Has<CubeBlockComponent>());
+			return blocks >= 2 ? blocks : -1;
+		}
+		catch (Exception ex)
+		{
+			GameLog.Instance.WarnOnce("paste-blocks", $"paste guard: could not count a paste's blocks ({ex.GetType().Name}: {ex.Message}); paste limits are not checked");
+			return -1;
+		}
+	}
+
 	/// <summary>Host, for a player's PlaceStandalone story (from ServerAccess's story check): null to run it, else why it is refused.</summary>
 	internal static string? HostGate(ushort clientId, object box)
 	{

@@ -9,5 +9,5 @@ internal sealed class NametagMarkerProvider : Component, IGPSMarkersProvider
 {
 	public volatile ObservableList<GPSMarker> Current = new ObservableList<GPSMarker>();
 
-	ObservableList<GPSMarker> IGPSMarkersProvider.Markers => Current;
+	ObservableList<GPSMarker> IGPSMarkersProvider.Markers => NametagRelevance.View(Current);
 }

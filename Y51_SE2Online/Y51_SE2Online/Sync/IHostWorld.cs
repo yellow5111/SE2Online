@@ -8,6 +8,8 @@ public interface IHostWorld
 	void OnSocialRequest(PeerId peer, ushort clientId, SocialRequest request) { }
 	void OnAdminRequest(PeerId? peer, ushort clientId, AdminRequest request) { }
 	void OnGpsShare(ushort fromClientId, string fromName, GpsShare share) { }
+	/// <summary>Network thread: a checked ping (right, rate, label); the world checks its range and sends it on.</summary>
+	void OnPing(ushort fromClientId, string fromName, PingSend ping) { }
 	void OnPunch(ushort fromClientId, ushort targetClientId) { }
 	/// <summary>Network thread: a player's own character inputs (<see cref="OwnInputs"/>).</summary>
 	void OnOwnMotion(ushort clientId, byte[] inputs) { }

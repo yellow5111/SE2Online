@@ -14,6 +14,8 @@ public sealed class DirectoryListing
     public string Description { get; set; } = "";
     public string SteamId { get; set; } = "0";
     public string Address { get; set; } = "";
+    /// <summary>Publishing only: asks the directory to list the IP it sees the announce come from, with this port (0: list Address as sent).</summary>
+    [System.Text.Json.Serialization.JsonIgnore] public int AutoAddressPort { get; set; }
     public int VirtualPort { get; set; } = MpOptions.DefaultVirtualPort;
     public int Players { get; set; }
     public int MaxPlayers { get; set; }
@@ -54,7 +56,7 @@ public sealed class DirectoryListing
             try { ServerEndpoint.Parse(Address); }
             catch (FormatException) when (id != 0 && ValidHostAddress(Address)) { }
         }
-        if (VirtualPort < 0 || VirtualPort > 65535 || Players < 0 || MaxPlayers < 1 || MaxPlayers > 1024 || Players > MaxPlayers || Tags == null || Tags.Length > 8 || PluginVersion == null || PluginVersion.Length > 100 || GameVersion == null || GameVersion.Length > 100 || SyncVersion < 1 || (Country ??= "").Length > 8) throw new FormatException("The listing contains invalid player or version information.");
+        if (VirtualPort < 0 || VirtualPort > 65535 || AutoAddressPort < 0 || AutoAddressPort > 65535 || Players < 0 || MaxPlayers < 1 || MaxPlayers > 1024 || Players > MaxPlayers || Tags == null || Tags.Length > 8 || PluginVersion == null || PluginVersion.Length > 100 || GameVersion == null || GameVersion.Length > 100 || SyncVersion < 1 || (Country ??= "").Length > 8) throw new FormatException("The listing contains invalid player or version information.");
         if ((PingLocation ??= "").Length > MaxPingLocation) throw new FormatException("The listing contains an invalid ping location.");
         Mods ??= Array.Empty<ListingMod>();
         if (Mods.Length > WorldMods.MaxMods || Mods.Any(m => m == null || !ulong.TryParse(m.Id, NumberStyles.None, CultureInfo.InvariantCulture, out _) || (m.Name ?? "").Length > 120 || m.Size < 0))

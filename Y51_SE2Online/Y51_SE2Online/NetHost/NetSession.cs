@@ -40,6 +40,7 @@ internal sealed partial class NetSession
 	private DirectoryPublisher _directory;
 	private ulong _localIdentity;
 	private long _nextDirectoryMs;
+	private string _listedAddress = "";
 
 	private FriendFinder? _friends;
 
@@ -134,6 +135,8 @@ internal sealed partial class NetSession
 		_o.SunPeriodMinutes = after.SunPeriodMinutes;
 		_o.StreamingRadiusMeters = after.StreamingRadiusMeters;
 		_o.VoiceRadiusMeters = after.VoiceRadiusMeters;
+		_o.Pings = after.PingSettingsOf();
+		_o.MarkerDefaults = after.MarkerDefaults ?? new();
 		_o.WaterSync = after.WaterSync;
 		_o.UsageMultipliers = after.UsageMultipliers;
 		ResourceMultipliers.Current = after.UsageMultipliers;
@@ -153,6 +156,52 @@ internal sealed partial class NetSession
 	{
 		_log.Info("host: admins, bans and whitelist from " + path);
 		return AccessList.Load(path);
+	}
+
+	/// <summary>
+	/// The permission files: dedicated, Permissions/ next to server.json; co-op, the host's own group files shared by all
+	/// worlds (plugin data Permissions/) with one players file per world. Missing files are written from the access list
+	/// and RconRoles (0.17's rights); unreadable ones fall back to 0.17's rights in memory, and the log says why.
+	/// </summary>
+	private (PermissionSet Set, string? Folder, string? PlayersFile) LoadPermissions(AccessList access)
+	{
+		string folder, players;
+		System.Collections.Generic.IReadOnlyDictionary<string, System.Collections.Generic.List<string>>? roles = null;
+		if (_o.Dedicated && Y51_SE2Online.Dedicated.DedicatedRuntime.Config is { } config)
+		{
+			folder = System.IO.Path.Combine(config.Directory, "Permissions");
+			players = System.IO.Path.Combine(folder, "players.json");
+			roles = config.RconRoles;
+			AuditLog.Path = System.IO.Path.Combine(config.Directory, "audit.jsonl");
+		}
+		else
+		{
+			folder = PluginPaths.Data("Permissions");
+			players = WorldFile("Y51_SE2Online.permissions-players.", HostWorld.Current?.WorldKey) ?? System.IO.Path.Combine(folder, "players.json");
+			AuditLog.Path = PluginPaths.Data("Y51_SE2Online.audit.jsonl");
+		}
+		try
+		{
+			foreach (string note in PermissionFiles.Prepare(folder, players, access, roles)) _log.Info("permissions: " + note);
+			var set = PermissionSet.Load(folder, players, out var warnings);
+			foreach (string warning in warnings) _log.Warn("permissions: " + warning);
+			foreach (string note in set.ReconcileAdmins(access.Copy(0).Admins.Select(a => (a.SteamId, a.Name)))) _log.Info("permissions: " + note);
+			access.MirrorAdmins(set.AdminMembers());
+			_log.Info($"permissions: {set.Groups.Count} groups ({string.Join(", ", set.Groups.OrderBy(g => g.Rank).Select(g => g.Name + " " + g.Rank))}), {set.Assignments().Length} assigned players, from {folder}");
+			return (set, folder, players);
+		}
+		catch (Exception ex) when (ex is System.IO.InvalidDataException or System.IO.IOException or UnauthorizedAccessException)
+		{
+			_log.Error("permissions: could not read the permission files (" + ex.Message + "); running with 0.17's rights from the access list until they are fixed (perms reload)");
+			return (PermissionSet.FromAccess(access), System.IO.Directory.Exists(folder) ? folder : null, players);
+		}
+	}
+
+	private static string? WorldFile(string prefix, string? worldKey)
+	{
+		if (string.IsNullOrWhiteSpace(worldKey) || worldKey == "?") return null;
+		string safe = string.Concat(worldKey.Select(c => char.IsLetterOrDigit(c) || c is '-' or '_' ? c : '_'));
+		return PluginPaths.Data(prefix + (safe.Length > 80 ? safe[..80] : safe) + ".json");
 	}
 
 	internal static string WorldAccessPath(string? worldKey, string? worldName)
@@ -370,6 +419,8 @@ internal sealed partial class NetSession
 		{
 			if (_o.Host && HostWorld.Current != null)
 			{
+				var access = LoadAccess(AccessPath(_o.Dedicated));
+				var (permissions, permissionsFolder, playersFile) = LoadPermissions(access);
 				host = new HostSession(transport, _log, HostWorld.Current, HostWorld.Current.Keys, new HostSyncOptions
 				{
 					PluginVersion = _pluginVersion,
@@ -384,7 +435,15 @@ internal sealed partial class NetSession
 					LookTotals = _o.Predict,
 					MaxPlayers = _o.MaxPlayers,
 					HostCountsAsPlayer = !_o.Dedicated,
-					Access = LoadAccess(AccessPath(_o.Dedicated)),
+					Access = access,
+					Permissions = permissions,
+					PermissionsFolder = permissionsFolder,
+					PlayersFile = playersFile,
+					OwnerSteamIds = _o.Dedicated ? Y51_SE2Online.Dedicated.DedicatedRuntime.Config?.OwnerSteamIds : null,
+					ModeOf = HostWorld.Current.ModeOf,
+					CleanupStatus = HostWorld.Current.CleanupStatus,
+					CleanupConfig = HostWorld.Current.CleanupConfigJson,
+					RunWorldAdmin = HostWorld.Current.RunAdminNow,
 					Password = _o.Password ?? "",
 					SessionName = _o.SessionName,
 					Motd = _o.Motd,
@@ -400,6 +459,8 @@ internal sealed partial class NetSession
 					PcuLimit = _o.PcuLimit,
 					StreamingRadiusMeters = _o.StreamingRadiusMeters,
 					VoiceRadiusMeters = _o.VoiceRadiusMeters,
+					Pings = _o.Pings,
+					MarkerDefaults = _o.MarkerDefaults,
 					SunRotation = _o.SunRotation,
 					SunPeriodMinutes = _o.SunPeriodMinutes,
 					OfflineRaidChanged = on => PvpRules.OfflineRaid = on
@@ -437,7 +498,7 @@ internal sealed partial class NetSession
 	{
 		// Advertise can be switched while hosting; the publisher follows it on the net thread.
 		if (_directory == null && _o.Host && _o.Advertise && _o.NeedsSteam && _transport != null)
-			_directory = new DirectoryPublisher(new DirectoryClient(_o.Dedicated ? _o.ServersDirectory : _o.SessionsDirectory), message => _log.WarnOnce("directory-publish", message));
+			_directory = NewDirectory();
 		else if (_directory != null && !_o.Advertise)
 		{
 			_ = _directory.StopAsync();
@@ -452,7 +513,7 @@ internal sealed partial class NetSession
 			listing = new DirectoryListing
 			{
 				Kind = _o.Dedicated ? "dedicated" : "session", Name = _o.SessionName, WorldName = (world.WorldName ?? "World").Length > 100 ? world.WorldName.Substring(0, 100) : world.WorldName ?? "World",
-				Description = _o.Description, SteamId = _localIdentity.ToString(System.Globalization.CultureInfo.InvariantCulture), Address = _o.PublicAddress,
+				Description = _o.Description, SteamId = _localIdentity.ToString(System.Globalization.CultureInfo.InvariantCulture), Address = ListingAddress(out int autoPort), AutoAddressPort = autoPort,
 				VirtualPort = _o.VirtualPort, Players = (_host?.Players().Count(p => p.Peer.HasValue) ?? 0) + (_o.Dedicated ? 0 : 1), MaxPlayers = _o.MaxPlayers,
 				PluginVersion = _pluginVersion, GameVersion = _gameVersion, SyncVersion = SyncProtocol.Version, FriendsOnly = _o.FriendsOnly, Country = _o.Country,
 				PingLocation = SteamPing.Local(_o.Dedicated), Mods = world.ListingMods(),
@@ -460,6 +521,36 @@ internal sealed partial class NetSession
 			};
 		}
 		_directory.Tick(listing, now);
+		if (_o.Dedicated && _directory.ObservedAddress is { Length: > 0 } seen && seen != _observedLogged)
+		{
+			_observedLogged = seen;
+			_log.Info("server browser: public address " + seen + " (seen by the directory)");
+		}
+		if (listing != null && _o.Dedicated && listing.Address != _listedAddress)
+		{
+			_listedAddress = listing.Address;
+			_log.Info(_listedAddress.Length > 0 ? "server browser: players connect to " + _listedAddress + (string.IsNullOrWhiteSpace(_o.PublicAddress) ? " (found automatically)" : " (Network.PublicAddress)")
+				: "server browser: the directory lists the IP it sees this server announce from");
+		}
+	}
+
+	private string _observedLogged = "";
+
+	private DirectoryPublisher NewDirectory()
+	{
+		string service = _o.Dedicated ? _o.ServersDirectory : _o.SessionsDirectory;
+		// The directory lists a dedicated server at the IP it sees, so that must be the family its game port listens on.
+		var client = _o.Dedicated && _o.SteamListenIp?.AddressFamily != System.Net.Sockets.AddressFamily.InterNetworkV6 ? DirectoryClient.Ipv4(service) : new DirectoryClient(service);
+		return new DirectoryPublisher(client, message => _log.WarnOnce("directory-publish", message));
+	}
+
+	/// <summary>A typed Network.PublicAddress as is; for a dedicated server without one, its best guess plus the port the directory lists with the IP it sees.</summary>
+	private string ListingAddress(out int autoPort)
+	{
+		autoPort = 0;
+		if (!_o.Dedicated || !string.IsNullOrWhiteSpace(_o.PublicAddress)) return _o.PublicAddress;
+		autoPort = _o.SteamListenIp?.Port ?? MpOptions.DefaultIpPort;
+		return ListedAddress.Choose("", _directory?.ObservedAddress, Y51_SE2Online.Steam.SteamDedicatedSession.PublicIp(), ListedAddress.Local(), autoPort);
 	}
 
 	private Func<PeerId, string> PeerNames()

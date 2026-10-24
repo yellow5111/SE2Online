@@ -70,7 +70,10 @@ internal static class EmoteMenu
         _target = PlayerInteraction.Target;
         var menu = new QuickMenuScreenViewModel(definition, new QuickMenuData { RootMenu = new RadialMenuData(slices, new BaseRadialMenuPanel()) },
             selected => { if (selected != null) Play(selected); }, hovered => _hovered = hovered);
-        _open = ui.OpenQuickMenu(menu);
+        var open = ui.OpenQuickMenu(menu);
+        _open = open;
+        // Esc (or the game) closing the menu cancels it: releasing the key then plays nothing.
+        if (open != null) open.OnDisposed += _ => { if (ReferenceEquals(_open, open)) _open = null; };
     }
 
     private static void Close(bool playHovered)

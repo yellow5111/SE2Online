@@ -58,6 +58,8 @@ public sealed class MpOptions
 	public bool ClientMovement { get; internal set; }
 	public bool OwnReplication { get; internal set; } = true;
 	public double VoiceRadiusMeters { get; internal set; }
+	public Y51_SE2Online.Sync.PingSettings Pings { get; internal set; } = Y51_SE2Online.Sync.PingSettings.Default;
+	public Y51_SE2Online.Sync.MarkerDefaults MarkerDefaults { get; internal set; } = new();
 	public Y51_SE2Online.Sync.ResourceMultipliers UsageMultipliers { get; internal set; } = Y51_SE2Online.Sync.ResourceMultipliers.Default;
 	public Y51_SE2Online.Sync.InventoryMultipliers InventorySizes { get; internal set; } = Y51_SE2Online.Sync.InventoryMultipliers.Default;
 
@@ -121,7 +123,7 @@ public sealed class MpOptions
 
 	public bool Identities { get; private set; } = true;
 
-	public GridPermissionMode Grids { get; private set; }
+	public GridPermissionMode Grids { get; private set; } = GridPermissionMode.Strict;
 
 	public ResearchMode Research { get; private set; }
 

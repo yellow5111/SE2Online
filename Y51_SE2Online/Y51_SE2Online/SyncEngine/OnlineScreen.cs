@@ -78,6 +78,18 @@ public sealed partial class OnlineScreen : ScreenView
     private readonly (Slider S, Control Row) _bandwidth = OnlineUi.Slider(32, 4096, 32, v => v + " KiB/s");
     private readonly TextBox _password = new() { Watermark = "No password", MaxLength = 64, FontSize = 24, MinHeight = 50, PasswordChar = '*' };
     private readonly KeyBindButton _chatKey = new(), _playersKey = new(), _adminKey = new(), _broadcastKey = new(), _voiceKey = new(), _emoteKey = new();
+    private readonly KeyBindButton _pingKey = new(), _markerFilterKey = new();
+    private static readonly string[] PingAudiences = { "faction", "allies", "all", "range" };
+    private readonly ComboBox _pingAudience = new()
+    {
+        MinHeight = 48, FontSize = 22, HorizontalAlignment = HorizontalAlignment.Stretch,
+        ItemsSource = new[] { "Their faction", "Their faction and allied factions", "Everyone (not players at war)", "Their faction, and anyone within the range below" },
+        ItemTemplate = new Avalonia.Controls.Templates.FuncDataTemplate<string>((t, _) => t == null ? null : OnlineUi.Text(t, size: 22, inheritForeground: true))
+    };
+    private readonly (Slider S, Control Row) _pingRange = OnlineUi.Slider(500, 20000, 500, v => PingRules.DistanceText(v));
+    // The sliders snap and clamp; a saved value the host never touched here (the settings json allows 50 m to 1000 km) stays as it is.
+    private bool _pingRangeMoved, _pingLifetimeMoved;
+    private readonly (Slider S, Control Row) _pingLifetime = OnlineUi.Slider(PingRules.MinLifetimeS, PingRules.MaxLifetimeS, 5, v => v < 60 ? v + " s" : (v / 60.0).ToString("0.#", CultureInfo.InvariantCulture) + " min");
     private readonly OnlineToggle _raid = new OnlineToggle("Offline raid protection: players cannot damage the grids of players who are offline");
     private readonly OnlineToggle _offlineStats = new OnlineToggle("Pause offline players' survival stats: suit energy, oxygen and hydrogen stay as they were until the player is back");
     private readonly TextBox _pcu = OnlineUi.Input("World's limit", 9), _dayLength = OnlineUi.Input("World's setting", 6), _streaming = OnlineUi.Input("0", 7);
@@ -87,6 +99,8 @@ public sealed partial class OnlineScreen : ScreenView
         MinHeight = 48, FontSize = 22, HorizontalAlignment = HorizontalAlignment.Stretch, ItemsSource = SunChoices,
         ItemTemplate = new Avalonia.Controls.Templates.FuncDataTemplate<string>((t, _) => t == null ? null : OnlineUi.Text(t, size: 22, inheritForeground: true))
     };
+    private readonly OnlineToggle _blueprintShips = new("Banana Boat and Atmospheric Lander", "The blueprint respawn ships: the Banana Boat in space and on airless moons, the Atmospheric Lander on planets with air");
+    private readonly OnlineToggle _vanillaShips = new("Vanilla respawn ships too", "The game's own encounter ships below, besides the Banana Boat (space and moons) and the Atmospheric Lander (planets)");
     private readonly (OnlineToggle Toggle, string Key)[] _ships = RespawnShips.Catalog.Select(s => (new OnlineToggle(s.Name, s.Detail), s.Key)).ToArray();
     private readonly (Slider S, Control Row) _shipCooldown = OnlineUi.Slider(0, RespawnShips.MaxCooldownMinutes, 5, v => v == 0 ? "No wait" : v + " min");
     private readonly (Slider S, Control Row) _lockdown = OnlineUi.Slider(0, 600, 5, v => v == 0 ? "Off" : v + " s");
@@ -126,6 +140,8 @@ public sealed partial class OnlineScreen : ScreenView
         OnDisposing += _ => { _closed = true; if (_model != null) _model.Refresh -= QueueRefresh; };
         _limit.S.PropertyChanged += (_, e) => { if (e.Property == Avalonia.Controls.Primitives.RangeBase.ValueProperty) _limitWarning.IsVisible = OnlineSettings.Unstable((int)Math.Round(_limit.S.Value)); };
         ReadSettings();
+        _pingRange.S.PropertyChanged += (_, e) => { if (e.Property == Avalonia.Controls.Primitives.RangeBase.ValueProperty) _pingRangeMoved = true; };
+        _pingLifetime.S.PropertyChanged += (_, e) => { if (e.Property == Avalonia.Controls.Primitives.RangeBase.ValueProperty) _pingLifetimeMoved = true; };
         _limitWarning.IsVisible = OnlineSettings.Unstable((int)Math.Round(_limit.S.Value));
         _joinAddress = OnlineUi.Button("Connect to address", () => MpMenu.JoinAddress(_address.Text ?? ""), "ConnectAddress", true);
         _joinId = OnlineUi.Button("Join Steam host", () => MpMenu.Activate(MpMenu.Settings.JoinOptions(MpOptions.ParseSteamId(_steamId.Text), false)), "ConnectSteam");
@@ -157,12 +173,17 @@ public sealed partial class OnlineScreen : ScreenView
                 _hacking, _hackPlayers, OnlineUi.Field("Hack time", _hackTime.Row, "x1 is 30 s plus 0.25 s per block, at most 5 min; powered grids take 1.5x"),
                 OnlineUi.Field("Remote lockdown", _lockdown.Row, "How long an owner's lockdown freezes a hack on their grid"), OnlineUi.Field("Lockdown cooldown", _lockdownCooldown.Row, "Wait before the same grid can be locked down again")),
             OnlineUi.Section("SUN AND RESPAWN SHIPS", OnlineUi.Field("Sun", _sun), OnlineUi.Field("Day length", _dayLength, "Minutes for one full day, 1-10080; empty keeps the world's setting"),
-                OnlineUi.Text("Respawn ships players may choose", "SubTitle"), OnlineUi.Stack(_ships.Select(s => (Control)s.Toggle).ToArray()),
+                OnlineUi.Text("Respawn ships players may choose", "SubTitle"), _blueprintShips, _vanillaShips, OnlineUi.Stack(_ships.Select(s => (Control)s.Toggle).ToArray()),
                 OnlineUi.Field("Respawn ship cooldown", _shipCooldown.Row, "Wait before a player can take another respawn ship")),
             OnlineUi.Section("KEYBINDS", OnlineUi.Text("Click a binding, then press the new key or combination. Esc cancels.", "SubtleNotice", 21),
                 OnlineUi.Field("Open chat", _chatKey), OnlineUi.Field("Players list", _playersKey), OnlineUi.Field("Admin panel", _adminKey, "The F3 players screen and /admin also open the panel"), OnlineUi.Field("Suit broadcast", _broadcastKey, "Hides or shows your name tag to other players"),
                 OnlineUi.Field("Push to talk", _voiceKey, "Hold to talk to players near you"), OnlineUi.Field("Emotes", _emoteKey, "Hold for the emote menu; release over an emote to play it"),
-                OnlineUi.Field("Hack", _hackKey, "At a terminal or control block: hack the grid, or counter-hack one of yours; again cancels")),
+                OnlineUi.Field("Hack", _hackKey, "At a terminal or control block: hack the grid, or counter-hack one of yours; again cancels"),
+                OnlineUi.Field("Ping", _pingKey, "Tap: ping what you look at. Hold: Go, Danger, Mine, Build, Regroup, Look or a text label. With Ctrl on a ping: keep it as a GPS marker"),
+                OnlineUi.Field("Marker filter", _markerFilterKey, "Tap: all, relevant, pings only or off. Hold: the marker categories")),
+            OnlineUi.Section("PINGS WHEN HOSTING", OnlineUi.Field("Who sees a ping", _pingAudience, "Players at war never see each other's pings"),
+                OnlineUi.Field("Ping range", _pingRange.Row, "With 'within range': how far from the ping other players still see it"),
+                OnlineUi.Field("Ping lifetime", _pingLifetime.Row, "How long a ping stays on screen")),
             OnlineUi.Section("VOICE", _voice, _openMic, OnlineUi.Field("Voice volume", _voiceVolume.Row, "0-200 percent"),
                 OnlineUi.Field("Voice range when hosting", _voiceRadius.Row, "0 turns voice off for your session"),
                 OnlineUi.Text("Your microphone is Steam's (Steam > Settings > Voice). Type /mute <player> in chat to stop hearing someone.", "SubtleNotice", 21)),
@@ -249,12 +270,15 @@ public sealed partial class OnlineScreen : ScreenView
         _name.Text = s.PlayerName; _sessionName.Text = s.SessionName; _description.Text = s.Description; _country.Text = s.Country;
         _limit.S.Value = Math.Clamp(s.MaxPlayers, OnlineSettings.MinPlayers, OnlineSettings.PlayerLimit); ReadVisibility(s);
         _directIp.IsChecked = s.AllowDirectIp; _waterSync.IsChecked = s.WaterSync; _buildGhosts.IsChecked = s.BuildGhosts; _clientMovement.IsChecked = s.ClientMovement; _ownReplication.IsChecked = s.OwnReplication; _onePilot.IsChecked = s.OnePilot;
-        _bind.Text = s.BindAddress; _port.Text = s.ListenPort.ToString(CultureInfo.InvariantCulture); _publicAddress.Text = s.PublicAddress;
+        _bind.Text = s.BindAddress; _port.Text = s.ListenPort.ToString(CultureInfo.InvariantCulture); _publicAddress.Text = s.PublicAddress; _showAddressOverride = !string.IsNullOrWhiteSpace(s.PublicAddress);
         _team.IsChecked = s.TeamGrids; _research.IsChecked = s.SharedResearch; _turrets.IsChecked = s.Pvp; _nametags.IsChecked = s.Nametags;
         _range.S.Value = Math.Clamp(s.NametagRange, 50, 10000); _spawn.IsChecked = s.SpawnNearHost;
         _energyUse.S.Value = Math.Clamp(s.EnergyUsageMultiplier * 10, 0, ResourceMultipliers.Max * 10); _hydrogenUse.S.Value = Math.Clamp(s.HydrogenUsageMultiplier * 10, 0, ResourceMultipliers.Max * 10); _oxygenUse.S.Value = Math.Clamp(s.OxygenUsageMultiplier * 10, 0, ResourceMultipliers.Max * 10);
         _playerInventory.S.Value = Math.Clamp(s.PlayerInventoryMultiplier * 10, InventoryMultipliers.Min * 10, InventoryMultipliers.Max * 10); _cargoInventory.S.Value = Math.Clamp(s.CargoInventoryMultiplier * 10, InventoryMultipliers.Min * 10, InventoryMultipliers.Max * 10);
         _password.Text = s.Password; _chatKey.Binding = s.ChatKey; _playersKey.Binding = s.PlayersKey; _adminKey.Binding = s.AdminKey; _broadcastKey.Binding = s.BroadcastKey; _voiceKey.Binding = s.VoiceKey; _emoteKey.Binding = s.EmoteKey; _hackKey.Binding = s.HackKey;
+        _pingKey.Binding = s.PingKey; _markerFilterKey.Binding = s.MarkerFilterKey;
+        _pingAudience.SelectedIndex = Math.Max(0, Array.IndexOf(PingAudiences, PingRules.TryAudience(s.PingAudience, out var audience) ? audience.ToString().ToLowerInvariant() : "faction"));
+        _pingRange.S.Value = Math.Clamp(s.PingRangeMeters, 500, 20000); _pingLifetime.S.Value = Math.Clamp(s.PingLifetimeSeconds, PingRules.MinLifetimeS, PingRules.MaxLifetimeS);
         _hacking.IsChecked = s.Hacking; _hackPlayers.IsChecked = s.AllowHackingPlayerGrids; _hackTime.S.Value = Math.Clamp(s.HackTimeMultiplier * 10, 1, 100);
         _voice.IsChecked = s.VoiceEnabled; _openMic.IsChecked = s.VoiceOpenMic; _voiceVolume.S.Value = Math.Clamp(s.VoiceVolume, 0, 200); _voiceRadius.S.Value = Math.Clamp(s.VoiceRadiusMeters, 0, 500);
         _reconnect.IsChecked = s.AutoReconnect; _updates.IsChecked = s.CheckForUpdates; _autoUpdate.IsChecked = s.AutoUpdate; _smoothing.S.Value = Math.Clamp(s.InterpolationMs, 0, 250); _bandwidth.S.Value = Math.Clamp(s.StateBudgetKiB, 32, 4096);
@@ -263,6 +287,8 @@ public sealed partial class OnlineScreen : ScreenView
         _streaming.Text = s.StreamingRadiusMeters.ToString(CultureInfo.InvariantCulture);
         foreach (var (toggle, key) in _ships) toggle.IsChecked = s.RespawnShips is not { Count: > 0 } || s.RespawnShips.Contains(key, StringComparer.OrdinalIgnoreCase);
         _shipCooldown.S.Value = Math.Clamp(s.RespawnShipCooldownMinutes, 0, RespawnShips.MaxCooldownMinutes);
+        _vanillaShips.IsChecked = RespawnShips.OfferVanilla(s.VanillaRespawnShips, s.RespawnShips);
+        _blueprintShips.IsChecked = s.RespawnBlueprints is { Count: > 0 };
         _lockdown.S.Value = Math.Clamp(s.HackLockdownSeconds, 0, 600); _lockdownCooldown.S.Value = Math.Clamp(s.HackLockdownCooldownSeconds, 0, 3600);
         _motdTitle.Text = s.MotdTitle; _motd.Text = s.Motd;
         _directIp.IsCheckedChanged += (_, _) => RefreshControls();
@@ -288,12 +314,22 @@ public sealed partial class OnlineScreen : ScreenView
             StreamingRadiusMeters = streaming ?? 0, OfflineRaidProtection = _raid.IsChecked, PauseOfflineStats = _offlineStats.IsChecked, PcuLimit = (int?)pcu,
             SunRotation = _sun.SelectedIndex switch { 1 => true, 2 => false, _ => null }, SunPeriodMinutes = day,
             // Every ship ticked is stored as "all", so ships a later version adds are offered too.
-            RespawnShips = ships.Length == _ships.Length ? new() : ships.Length == 0 ? new() { RespawnShips.None } : ships.ToList(), RespawnShipCooldownMinutes = (int)Math.Round(_shipCooldown.S.Value),
+            // A named list also offers the vanilla ships (0.17 behaviour), so it is only kept while the switch is on.
+            RespawnShips = !_vanillaShips.IsChecked || ships.Length == _ships.Length || ships.Length == 0 ? new() : ships.ToList(), RespawnShipCooldownMinutes = (int)Math.Round(_shipCooldown.S.Value),
+            VanillaRespawnShips = _vanillaShips.IsChecked && ships.Length > 0,
+            RespawnBlueprints = !_blueprintShips.IsChecked ? new() : MpMenu.Settings.RespawnBlueprints is { Count: > 0 } kept ? kept : RespawnShips.DefaultBlueprints(),
             Motd = _motd.Text ?? "", MotdTitle = (_motdTitle.Text ?? "").Trim(), MaxModDownloadGiB = MpMenu.Settings.MaxModDownloadGiB,
             VoiceKey = _voiceKey.Binding, EmoteKey = _emoteKey.Binding, VoiceEnabled = _voice.IsChecked == true, VoiceOpenMic = _openMic.IsChecked == true, VoiceVolume = (int)Math.Round(_voiceVolume.S.Value), VoiceRadiusMeters = Math.Round(_voiceRadius.S.Value),
             MutedVoices = MpMenu.Settings.MutedVoices,
             Hacking = _hacking.IsChecked == true, AllowHackingPlayerGrids = _hackPlayers.IsChecked == true, HackingChosen = true, HackTimeMultiplier = Math.Round(_hackTime.S.Value) / 10, HackKey = _hackKey.Binding,
             HackLockdownSeconds = (int)Math.Round(_lockdown.S.Value), HackLockdownCooldownSeconds = (int)Math.Round(_lockdownCooldown.S.Value),
+            PingKey = _pingKey.Binding, MarkerFilterKey = _markerFilterKey.Binding, PingAudience = PingAudiences[Math.Clamp(_pingAudience.SelectedIndex, 0, PingAudiences.Length - 1)],
+            PingRangeMeters = _pingRangeMoved ? Math.Round(_pingRange.S.Value) : MpMenu.Settings.PingRangeMeters,
+            PingLifetimeSeconds = _pingLifetimeMoved ? (int)Math.Round(_pingLifetime.S.Value) : MpMenu.Settings.PingLifetimeSeconds,
+            // Kept as saved: the Alt+M filter and the settings json's own ping keys have no control on this page.
+            MarkerMode = MpMenu.Settings.MarkerMode, MarkersOff = MpMenu.Settings.MarkersOff, MarkerFullCount = MpMenu.Settings.MarkerFullCount, MarkerAimDegrees = MpMenu.Settings.MarkerAimDegrees,
+            PingBurst = MpMenu.Settings.PingBurst, PingRefillSeconds = MpMenu.Settings.PingRefillSeconds, PingMaxRangeMeters = MpMenu.Settings.PingMaxRangeMeters,
+            PingWordFilter = MpMenu.Settings.PingWordFilter, MarkerDefaults = MpMenu.Settings.MarkerDefaults,
             EnergyUsageMultiplier = Math.Round(_energyUse.S.Value) / 10, HydrogenUsageMultiplier = Math.Round(_hydrogenUse.S.Value) / 10, OxygenUsageMultiplier = Math.Round(_oxygenUse.S.Value) / 10, PlayerInventoryMultiplier = Math.Round(_playerInventory.S.Value) / 10, CargoInventoryMultiplier = Math.Round(_cargoInventory.S.Value) / 10
         };
         string error = settings.Validate();

@@ -188,6 +188,26 @@ internal sealed class NametagOverlay
 		}
 	}
 
+	private System.Collections.Generic.Dictionary<string, string> _groupsByName = new();
+	private long _groupsDueMs;
+
+	// The group's name prefix and suffix around the name (colours stay the relation colours: friend or foe matters more
+	// over a head). The host cleaned the names, so a name never carries a role tag of its own.
+	private string Styled(string name)
+	{
+		long now = MpClock.NowMs();
+		if (now >= _groupsDueMs)
+		{
+			_groupsDueMs = now + 2000;
+			var roster = AdminAccess.Hosting ? AdminAccess.Host.AccessPlayers() : AdminAccess.Client?.Admin.Players ?? System.Array.Empty<AccessPlayer>();
+			var map = new System.Collections.Generic.Dictionary<string, string>(System.StringComparer.Ordinal);
+			foreach (var p in roster) if (p.Group != null && !string.IsNullOrEmpty(p.Name)) map[p.Name] = p.Group;
+			_groupsByName = map;
+		}
+		if (string.IsNullOrEmpty(name) || !_groupsByName.TryGetValue(name, out string group) || AdminAccess.StyleOf(group) is not { } style) return name;
+		return (style.NamePrefix ?? "") + name + (style.NameSuffix ?? "");
+	}
+
 	private void UpdateCore(Session session, Entity sessionEntity, IReadOnlyList<(ushort ClientId, string Name, Entity? Target)> players)
 	{
 		if (sessionEntity != _sessionEntity)
@@ -205,8 +225,9 @@ internal sealed class NametagOverlay
 		Updates++;
 		bool changed = false;
 		var seen = new HashSet<ushort>();
-		foreach (var (clientId, name, target) in players)
+		foreach (var (clientId, plain, target) in players)
 		{
+			string name = Styled(plain);
 			if (target != null && !EngineCodec.IsDead(target))
 			{
 				seen.Add(clientId);

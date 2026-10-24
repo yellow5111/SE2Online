@@ -75,7 +75,7 @@ internal sealed partial class NetSession
 			steamLink.Start(_o.Host);
 			link = steamLink;
 			SteamJoinStart(localId, name);
-			if (_o.Host && _o.Advertise) _directory = new DirectoryPublisher(new DirectoryClient(_o.Dedicated ? _o.ServersDirectory : _o.SessionsDirectory), message => _log.WarnOnce("directory-publish", message));
+			if (_o.Host && _o.Advertise) _directory = NewDirectory();
 		}
 		else
 		{

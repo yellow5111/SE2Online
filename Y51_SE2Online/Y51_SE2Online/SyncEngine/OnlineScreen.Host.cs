@@ -39,7 +39,10 @@ public sealed partial class OnlineScreen
     private readonly TextBlock _codeHint = OnlineUi.Text("", "SubtleNotice", 18);
     private readonly TextBlock _hostAddress = OnlineUi.Text("", "SubTitle", 26);
     private readonly TextBlock _hostAddressHint = OnlineUi.Text("", "SubtleNotice", 18);
-    private Button _copyCode, _copyAddress, _invite, _hostPlayers, _stopHost;
+    private Button _copyCode, _copyAddress, _invite, _hostPlayers, _stopHost, _listingToggle, _advancedAddress;
+    private readonly TextBlock _listing = OnlineUi.Text("", "SubTitle", 22);
+    private Control _publicAddressField;
+    private bool _showAddressOverride;
 
     private Control BuildHostPage()
     {
@@ -52,6 +55,8 @@ public sealed partial class OnlineScreen
         _hostSave = OnlineUi.Button("Apply host settings", Save, "SaveHostSettings", true);
         _copyCode = OnlineUi.SmallButton("Copy code", () => { }, "CopyJoinCode");
         _copyAddress = OnlineUi.SmallButton("Copy", () => Copy(HostAddress()), "CopyHostAddress");
+        _listingToggle = OnlineUi.SmallButton("Make private", ToggleListing, "ToggleListing");
+        _advancedAddress = OnlineUi.SmallButton("Advanced", () => { _showAddressOverride = !_showAddressOverride; RefreshControls(); }, "AdvancedAddress");
 
         // The session card.
         _statusPill.Child = _statusPillText;
@@ -60,7 +65,9 @@ public sealed partial class OnlineScreen
         var actions = OnlineUi.Row(_host, _load, _create, _invite, _hostPlayers, _stopHost);
         actions.Margin = new Thickness(0, 12, 0, 0);
         var left = new StackPanel { Spacing = 10, VerticalAlignment = VerticalAlignment.Center };
-        left.Children.Add(_statusPill); left.Children.Add(_heroTitle); left.Children.Add(_heroDetail); left.Children.Add(actions);
+        _listing.HorizontalAlignment = HorizontalAlignment.Left; _listing.TextAlignment = TextAlignment.Left; _listing.VerticalAlignment = VerticalAlignment.Center;
+        var listingRow = OnlineUi.Row(_listing, _listingToggle);
+        left.Children.Add(_statusPill); left.Children.Add(_heroTitle); left.Children.Add(_heroDetail); left.Children.Add(listingRow); left.Children.Add(actions);
 
         _code.LetterSpacing = 8; _code.HorizontalAlignment = HorizontalAlignment.Left; _code.FontWeight = FontWeight.Bold;
         foreach (var hint in new[] { _codeHint, _hostAddressHint }) { hint.HorizontalAlignment = HorizontalAlignment.Left; hint.TextAlignment = TextAlignment.Left; }
@@ -110,15 +117,18 @@ public sealed partial class OnlineScreen
             OnlineUi.Field("Country", _country, "auto finds it from your IP, or a 2-letter code like US", null, 420));
         var motd = OnlineUi.Section("MESSAGE OF THE DAY", OnlineUi.Text("Shown to each player after they spawn. {player}, {server}, {online} and {max} are filled in.", "SubtleNotice", 18),
             OnlineUi.Field("Title", _motdTitle, "Empty uses the session name", null, 420), OnlineUi.Field("Message", _motd, "The admin panel's message replaces it", null, 420));
+        // Players join a co-op session through Steam, so an address is only for the card and the browser: an advanced
+        // override, hidden until asked for (shown when one is saved, so it can be cleared).
+        _publicAddressField = OnlineUi.Field("Public address override", _publicAddress, "Advanced. Shown on the card and in the browser", null, 300);
         var direct = OnlineUi.Section("DIRECT IP", _directIp,
             OnlineUi.Field("Bind address", _bind, "0.0.0.0 listens on every IPv4 network", null, 300), OnlineUi.Field("Listen port", _port, "UDP; forward it on your router", null, 300),
-            OnlineUi.Field("Public address", _publicAddress, "Shown on the card and in the browser", null, 300));
+            _advancedAddress, _publicAddressField);
         var sync = OnlineUi.Section("SYNC", _ownReplication, _clientMovement, _onePilot, _buildGhosts, _waterSync);
         // SE2 Online's own netcode always carries the world.
         _ownReplication.IsVisible = false;
         var columns = new Grid { ColumnDefinitions = new ColumnDefinitions("*,24,*") };
         var leftColumn = OnlineUi.Stack(session, motd);
-        var rightColumn = OnlineUi.Stack(direct, sync);
+        var rightColumn = OnlineUi.Stack(direct, sync, BuildCleanupSection());
         columns.Children.Add(leftColumn); Grid.SetColumn(rightColumn, 2); columns.Children.Add(rightColumn);
 
         var apply = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
@@ -170,6 +180,16 @@ public sealed partial class OnlineScreen
 
     private void ReadVisibility(OnlineSettings s) => _visibility = s.FriendsOnly ? FriendsOnly : s.Advertise ? Public : InviteAndCode;
 
+    /// <summary>One click between public and private: saves only who can join, other unsaved edits on the page stay as they are.</summary>
+    private void ToggleListing()
+    {
+        var s = System.Text.Json.JsonSerializer.Deserialize<OnlineSettings>(System.Text.Json.JsonSerializer.Serialize(MpMenu.Settings));
+        _visibility = _visibility == Public ? InviteAndCode : Public;
+        s.Advertise = _visibility == Public; s.FriendsOnly = false; s.AdvertiseChosen = true;
+        MpMenu.SaveSettings(s);
+        RefreshControls();
+    }
+
     private void RefreshHostPage(bool busy, bool hosting)
     {
         var current = MpPlugin.Controller?.Current;
@@ -197,9 +217,19 @@ public sealed partial class OnlineScreen
         _hostAddress.Text = _directIp.IsChecked != true ? "Off" : address ?? "Port " + settings.ListenPort;
         _hostAddress.Opacity = address != null ? 1 : .6;
         _hostAddressHint.Text = _directIp.IsChecked != true ? "Turn on Direct IP below to let players connect by address."
-            : address == null ? "Add your public address below to show it here; players also need the port forwarded."
+            : address == null ? "Players join through Steam. To show an address here, set it under Advanced in Direct IP; players also need the port forwarded."
             : "Players need UDP port " + settings.ListenPort + " forwarded to this PC.";
         _copyAddress.IsEnabled = address != null;
+        _listing.Text = _visibility switch
+        {
+            Public => "PUBLIC: listed in the session browser, anyone with SE2 Online can join",
+            FriendsOnly => "FRIENDS ONLY: hidden from the session browser",
+            _ => "PRIVATE: hidden from the session browser, join by invite or address"
+        };
+        _listing.Foreground = _visibility == Public ? LiveBrush : IdleBrush;
+        _listingToggle.Content = _visibility == Public ? "Make private" : "Make public";
+        _publicAddressField.IsVisible = _showAddressOverride;
+        _advancedAddress.Content = _showAddressOverride ? "Hide advanced" : "Advanced";
 
         _host.IsVisible = !hosting;
         _load.IsVisible = _create.IsVisible = !MpMenu.HasWorld && hosting;

@@ -171,6 +171,12 @@ public sealed class ClientSession
 			_t.Send(Host.Value, Channel.Control, SocialMessage.Encode(SyncMsg.Punch, new PunchRequest(target)));
 	}
 
+	public void SendPing(PingSend ping)
+	{
+		if (Host.HasValue && CurrentPhase == Phase.Accepted)
+			_t.Send(Host.Value, Channel.Control, SocialMessage.Encode(SyncMsg.PingSend, ping));
+	}
+
 	public void SendGpsShare(GpsShare share)
 	{
 		if (Host.HasValue && CurrentPhase == Phase.Accepted)
@@ -443,7 +449,7 @@ public sealed class ClientSession
 				_o.Progress?.Download(now, atAccept.Channels[0].BytesReceived + atAccept.Channels[1].BytesReceived + atAccept.Channels[2].BytesReceived, 0, 0);
 			_o.Progress?.SetWorldEntities(Accept.WorldEntities);
 			_log.Info($"sync(client): JOIN ACCEPTED: world '{Accept.WorldName}', snapshot {MpLogExtensions.Bytes(Accept.SnapshotBytes)}, world {MpLogExtensions.Bytes(Accept.WorldBytes)} in {Accept.WorldParts} part(s) ({Accept.WorldEntities} entities), {Accept.WorldBlobs} offloaded blobs ({MpLogExtensions.Bytes(Accept.WorldBlobBytes)}) on the way; this player is ClientId {Accept.ClientId}");
-			_log.Info($"sync(client): host settings: {Accept.Settings}; " + (Accept.IdentityId != 0L ? $"this player is IdentityId {Accept.IdentityId} (PlayerIdentity {Accept.PlayerId}); players: {DescribePlayers(Accept.Players)}" : "this player plays as the host's identity (identities off on the host)"));
+			_log.Info($"sync(client): host settings: {Accept.Settings}; " + (Accept.IdentityId != 0L ? $"this player is IdentityId {Accept.IdentityId} (PlayerIdentity {Accept.PlayerId}); players: {DescribePlayers(Accept.Players)}" : Accept.Settings.Identities ? "this player's identity follows with the player table" : "this player plays as the host's identity (identities off on the host)"));
 			break;
 		}
 		case SyncMsg.JoinReject:
@@ -666,6 +672,19 @@ public sealed class ClientSession
 			ServerInfo = ((info.Rows ?? System.Array.Empty<ServerInfoRow>()).Where(r => r != null).Take(Sync.ServerInfo.MaxRows).ToArray(), ServerInfo.Version + 1);
 			break;
 		}
+		case SyncMsg.PingShow:
+		{
+			if (data.Length > 2048) break;
+			var ping = SocialMessage.Decode<PingShow>(data);
+			if (ping == null || !double.IsFinite(ping.X) || !double.IsFinite(ping.Y) || !double.IsFinite(ping.Z) || !Enum.IsDefined(ping.Kind) || !Enum.IsDefined(ping.Icon) || !Enum.IsDefined(ping.Relation)) break;
+			PingInbox.Add(ping with
+			{
+				FromName = SocialState.Clean(ping.FromName ?? "", 64), Group = SocialState.Clean(ping.Group ?? "", 32),
+				Label = PingRules.CleanLabel(ping.Label), What = SocialState.Clean(ping.What ?? "", PingRules.MaxWhat),
+				LifetimeS = Math.Clamp(ping.LifetimeS, PingRules.MinLifetimeS, PingRules.MaxLifetimeS)
+			});
+			break;
+		}
 		case SyncMsg.Motd:
 		{
 			var motd = SocialMessage.Decode<MotdMessage>(data);
@@ -685,7 +704,7 @@ public sealed class ClientSession
 		{
 			var menu = SocialMessage.Decode<SpawnMenu>(data);
 			if (menu.Options == null || menu.Options.Length is 0 or > 64) break;
-			SpawnMenu = menu with { Message = SocialState.Clean(menu.Message ?? "", 200), Options = menu.Options.Select(o => o with { Name = SocialState.Clean(o.Name ?? "", 100), Detail = SocialState.Clean(o.Detail ?? "", 120) }).ToArray() };
+			SpawnMenu = SpawnCards.Clean(menu);
 			break;
 		}
 		case SyncMsg.AdminState:

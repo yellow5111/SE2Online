@@ -821,7 +821,7 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 		if (!AcceptSignal(signal)) return;
 		if (!Host.IsServer && !NoSignalHold && Building(signal)) { _parkedSignals.Add((signal, MpClock.NowMs())); SignalsParked++; return; }
 		if (!Host.IsServer) { Replay(signal); return; }
-		var sender = KeenNetcode.ServerAccess.EnterSignal(PeerClientId);
+		var sender = KeenNetcode.ServerAccess.EnterSignal(PeerClientId, signal.Name);
 		try { Replay(signal); }
 		finally { KeenNetcode.ServerAccess.LeaveSignal(sender); }
 	}

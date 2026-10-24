@@ -57,8 +57,10 @@ internal static class KeyHook
 		if (ReferenceEquals(settings, _claimedFrom)) return;
 		_claimedFrom = settings;
 		var list = new List<KeyBinding>();
-		foreach (var text in new[] { settings.ChatKey, settings.PlayersKey, settings.AdminKey, settings.BroadcastKey, settings.VoiceKey, settings.EmoteKey, settings.HackKey })
+		foreach (var text in new[] { settings.ChatKey, settings.PlayersKey, settings.AdminKey, settings.BroadcastKey, settings.VoiceKey, settings.EmoteKey, settings.HackKey, settings.PingKey, settings.MarkerFilterKey })
 			if (KeyBinding.TryParse(text, out var key) && (key.Ctrl || key.Alt)) list.Add(key);
+		// Ctrl with the ping key keeps a ping (PingClient); without this the bare letter reaches the game too.
+		if (KeyBinding.TryParse(settings.PingKey, out var ping) && !ping.Ctrl) list.Add(ping with { Ctrl = true });
 		_claimed = list.ToArray();
 	}
 

@@ -44,12 +44,23 @@ internal static class ChatUi
     internal static Control Line(ChatLine line, double opacity)
     {
         var text = new TextBlock { FontSize = 18, TextWrapping = TextWrapping.Wrap, Opacity = opacity, MaxWidth = 440 };
-        text.Inlines.Add(new Avalonia.Controls.Documents.Run((line.Kind == ChatKind.System ? "" : line.From + ": "))
+        IBrush nameBrush = line.Kind switch { ChatKind.System => Brushes.Gold, ChatKind.Admin => new SolidColorBrush(Color.FromRgb(255, 170, 60)), _ => new SolidColorBrush(Color.FromRgb(120, 200, 255)) };
+        // Role decorations come from the group's style table, drawn as their own runs: a name can never carry them.
+        var style = line.Kind == ChatKind.System ? null : AdminAccess.StyleOf(line.Group);
+        IBrush Paint(string hex, IBrush fallback) => GroupStyle.Readable(hex) is var (r, g, b) ? new SolidColorBrush(Color.FromRgb(r, g, b)) : fallback;
+        void Add(string part, IBrush brush, bool bold) { if (!string.IsNullOrEmpty(part)) text.Inlines.Add(new Avalonia.Controls.Documents.Run(part) { Foreground = brush, FontWeight = bold ? FontWeight.Bold : FontWeight.Normal }); }
+        if (line.Kind != ChatKind.System)
         {
-            Foreground = line.Kind switch { ChatKind.System => Brushes.Gold, ChatKind.Admin => new SolidColorBrush(Color.FromRgb(255, 170, 60)), _ => new SolidColorBrush(Color.FromRgb(120, 200, 255)) },
-            FontWeight = FontWeight.Bold
-        });
-        text.Inlines.Add(new Avalonia.Controls.Documents.Run(line.Text) { Foreground = line.Kind == ChatKind.System ? Brushes.Gold : Brushes.White });
+            var name = Paint(style?.NameColor, nameBrush);
+            Add(style?.NamePrefix, Paint(style?.NamePrefixColor, name), true);
+            Add(line.From, name, true);
+            Add(style?.NameSuffix, Paint(style?.NameSuffixColor, name), true);
+            Add(": ", name, true);
+        }
+        var body = line.Kind == ChatKind.System ? Brushes.Gold : Paint(style?.TextColor, Brushes.White);
+        Add(style?.ChatPrefix, Paint(style?.ChatPrefixColor, body), false);
+        Add(line.Text, body, false);
+        Add(style?.ChatSuffix, Paint(style?.ChatSuffixColor, body), false);
         return new Border { Child = text, Background = new SolidColorBrush(Color.FromArgb(150, 0, 0, 0)), Padding = new Thickness(8, 3), Margin = new Thickness(0, 1), HorizontalAlignment = HorizontalAlignment.Left };
     }
 

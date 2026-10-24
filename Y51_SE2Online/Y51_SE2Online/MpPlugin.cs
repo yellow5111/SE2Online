@@ -187,6 +187,8 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		Optional("leaving a joined world", () => LeaveDetect.Install(_harmony));
 		Optional("server-side access checks", () => ServerAccess.Install(_harmony));
 		Optional("admin creative tools weld without components", () => CreativeWeld.Install(_harmony));
+		Optional("permission checks on tools, drills, fast travel and PCU", () => PermissionHooks.Install(_harmony));
+		Optional("player grids kept from the game's own removals", () => KeenNetcode.PlayerGridGuard.Install(_harmony));
 		Optional("tool reach for remote players", () => ToolReach.Install(_harmony));
 		Optional("hand drill on planet boulders for remote players", () => DrillReach.Install(_harmony));
 		Optional("streaming radius", () => Streaming.Install(_harmony));
@@ -213,13 +215,16 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		if (!DedicatedRuntime.Headless)
 		{
 			MpMenu.Install(_harmony);
+			Optional("SE2 Online main menu banner", () => MainMenuBanner.Install(_harmony));
 			Optional("GPS sharing", GpsShareUi.Install);
+			Optional("pings and the marker filter", () => PingClient.Install(_harmony));
 			Optional("sound range", () => SoundRange.Install(_harmony));
 			Optional("full antenna and player names on the HUD", () => HudNameWidth.Install(_harmony));
 			Optional("flora sector fix", () => FloraSectorSpawnFix.Install(_harmony));
 			Optional("host-only saves", () => HostOnlySaves.Install(_harmony));
 			Optional("trade UI", TradeUi.Install);
 			Optional("third-person camera memory", () => CameraMemory.Install(_harmony));
+			Optional("third-person camera ignores the character's own parts", () => KeenNetcode.CameraCreep.Install(_harmony));
 			Optional("passenger seats", () => PassengerSeats.Install(_harmony));
 			Optional("water sync", () => WaterMirror.Install(_harmony));
 			Optional("cockpit passengers", () => CockpitPassenger.Install(_harmony));
@@ -360,7 +365,6 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		PlayerInteraction.Reset();
 		HostWorld.Reset();
 		ClientWorld.Reset();
-		TeamPermissions.Enabled = false;
 		TurretRelations.Reset();
 		PvpRules.Reset();
 		Sync.OfflineStats.Reset();

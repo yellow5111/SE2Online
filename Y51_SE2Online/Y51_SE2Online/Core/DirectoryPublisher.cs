@@ -12,6 +12,8 @@ public sealed class DirectoryPublisher
     private long _next;
     private bool _stopping;
     public string Error { get; private set; }
+    /// <summary>The address the directory listed this server at when it registered; "" before that or from older directories.</summary>
+    public string ObservedAddress => _lease?.Address ?? "";
 
     public DirectoryPublisher(DirectoryClient client, Action<string> error) { _client = client; _error = error; }
     public void Tick(DirectoryListing listing, long now)

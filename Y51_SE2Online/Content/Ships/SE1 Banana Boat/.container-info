@@ -1,0 +1,50 @@
+{
+  "$Bundles": {
+    "Game2": "4.0.0.3165",
+    "System.Runtime": "1.0.0.0",
+    "VRage": "4.0.0.3165",
+    "Y51_SE2Online": "0.17.5.0"
+  },
+  "$Type": "VRage:Keen.VRage.Library.Filesystem.StorageManagers.ContainerInfo`1<Game2:Keen.Game2.Client.GameSystems.Blueprints.BlueprintMetadata>",
+  "$Value": {
+    "Meta": {
+      "UserInfo": {
+        "DisplayName": {
+          "RawText": "SE1 Banana Boat"
+        },
+        "Summary": "",
+        "Tags": [
+          "UGCBlueprintTypeTag"
+        ]
+      },
+      "BaseMetadata": {
+        "Id": null,
+        "Title": "SE1 Banana Boat",
+        "Description": "",
+        "Visiblity": "Unlisted",
+        "Tags": [
+          "UGCBlueprintTypeTag"
+        ],
+        "IsSubscribed": false,
+        "VotesUp": 0,
+        "VotesDown": 0,
+        "Rating": 0,
+        "IsOwner": false,
+        "NumSubscriptions": 0,
+        "Size": 0,
+        "OwnerName": null,
+        "CreatedAt": "2026-10-23T23:37:30.3864423-05:00",
+        "UpdatedAt": "2026-10-23T23:37:30.3864423-05:00",
+        "WorkshopURL": null,
+        "PreviewFilePath": "",
+        "Dependencies": null
+      },
+      "GameVersion": 4000000,
+      "GameBuildNumber": 3165,
+      "LastEdited": "2026-10-23T23:37:30.3864423-05:00",
+      "BlockCount": 125,
+      "PCU": 3122
+    },
+    "AdditionalData": {}
+  }
+}

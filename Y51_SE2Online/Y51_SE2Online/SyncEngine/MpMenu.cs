@@ -362,8 +362,9 @@ internal static class MpMenu
     private static void ShowAdmin(SharedUIComponent shared, bool free, string via)
     {
         var role = AdminAccess.LocalRole;
-        string refusal = Sync.AdminPanel.Refusal(AdminAccess.InSession, role, AdminAccess.ServerName);
-        GameLog.Instance.Info($"admin panel ({via}): role {role}{(AdminAccess.InSession ? "" : ", no session")}: "
+        var state = AdminAccess.State;
+        string refusal = Sync.AdminPanel.Refusal(AdminAccess.InSession, state, AdminAccess.ServerName);
+        GameLog.Instance.Info($"admin panel ({via}): role {role}, group {state.Group}{(AdminAccess.InSession ? "" : ", no session")}: "
             + (!free ? "not opened, another screen has the input (" + shared.TryGetTopScreenNeedingInput()?.GetType().Name + ")" : refusal != null ? "refused" : "opened"));
         if (!free) return;
         if (refusal != null) { AdminAccess.Notice(shared, "Admin panel", refusal); return; }

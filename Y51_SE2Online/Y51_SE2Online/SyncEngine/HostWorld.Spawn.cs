@@ -21,6 +21,7 @@ using Keen.VRage.DCS.Components;
 using Keen.VRage.Library.Definitions;
 using Keen.VRage.Library.Mathematics;
 using Keen.VRage.Library.Utils;
+using Keen.VRage.Voxels.Components;
 using Y51_SE2Online.Core;
 using Y51_SE2Online.KeenNetcode;
 using Y51_SE2Online.Net;
@@ -192,7 +193,10 @@ internal sealed partial class HostWorld
             return false;
         default:
             var point = target.Point;
-            if (point != null && !EngineCodec.IsDead(point) && RespawnSessionComponent.IsFunctional(point))
+            // Checked again: the menu can stay open while access or the group changes.
+            bool allowed = point != null && ServerAccess.MayUse(null, identity, point, useKey: "use.medbay")
+                && (!target.Option.Home || host.SteamOfIdentity(identity) is var steam && (steam == 0 || host.Allowed(steam, "respawn.home.use")));
+            if (allowed && !EngineCodec.IsDead(point!) && RespawnSessionComponent.IsFunctional(point!))
             {
                 var known = session.Get<IPerPlayerData>().GetPerPlayerData<RespawnPerPlayerData>(identity).KnownPoints;
                 bool wasKnown = known.Contains(point);
@@ -215,25 +219,44 @@ internal sealed partial class HostWorld
     private void SendSpawnMenu(Session session, HostSession host, Joiner j, IdentityId identity, Entity? hostCharacter, string message)
     {
         var targets = new List<SpawnTarget>();
-        if (SpawnNearHost && hostCharacter != null) targets.Add(new(new SpawnOption(SpawnKind.NearHost, "Next to the host", "Spawn beside the host's character", true), null));
+        var at = new Dictionary<SpawnTarget, Vector3D>();
+        if (SpawnNearHost && hostCharacter != null)
+        {
+            var near = new SpawnTarget(new SpawnOption(SpawnKind.NearHost, "Next to the host", "Spawn beside the host's character", true), null);
+            targets.Add(near);
+            at[near] = hostCharacter.Data.GetWorldTransform().Position;
+        }
         var perPlayer = session.Get<IPerPlayerData>();
         var data = perPlayer.GetPerPlayerData<RespawnPerPlayerData>(identity);
-        Vector3D? death = j.Respawn ? perPlayer.GetPerPlayerData<LastDeathPerPlayerData>(identity).LastDeathPoint.Position : null;
+        var respawn = session.TryGet<IRespawn>() as RespawnSessionComponent;
+        Vector3D? death = null;
+        string deathText = "";
+        if (j.Respawn)
+        {
+            var last = perPlayer.GetPerPlayerData<LastDeathPerPlayerData>(identity);
+            death = last.LastDeathPoint.Position;
+            try { if (respawn != null) deathText = SocialState.Clean(respawn.EvaluateDeathMessage(last), 160); }
+            catch (Exception ex) { _log.WarnOnce("spawn-death-text", "host spawn: the death message could not be read: " + ex.Message); }
+        }
         var social = Social;
         long me = identity;
 #if !PULSAR
         RigSocial(session, social, me);
 #endif
-        var medbays = new List<(SpawnTarget Target, double Distance, bool Home)>();
+        ulong steam = host.SteamOfIdentity(me);
+        bool homeAllowed = steam == 0 || host.Allowed(steam, "respawn.home.use");
+        bool homeSettable = steam == 0 || host.Allowed(steam, "respawn.home.set");
+        Entity? homePoint = data.HomePoint is { } hp && !EngineCodec.IsDead(hp) ? hp : null;
+        var medbays = new List<SpawnTarget>();
         foreach (Entity point in session.GetEntitiesOfType<RespawnPointComponent>())
         {
-            if (EngineCodec.IsDead(point) || !RespawnSessionComponent.IsFunctional(point)) continue;
+            if (EngineCodec.IsDead(point)) continue;
+            bool home = point == homePoint, working = RespawnSessionComponent.IsFunctional(point);
             long owner = TeamPermissions.OwnerOf(point);
-            bool home = data.HomePoint == point;
             SpawnKind kind;
             string ownerText;
-            if (owner == me || data.KnownPoints.Contains(point)) { kind = SpawnKind.Medbay; ownerText = home ? "Home medbay" : "Your medbay"; }
-            else if (owner == 0 || PlayerIdentities.IsNpc(owner) || social == null || WorldSocial.Access(point, me) != true) continue;
+            if (owner == me || data.KnownPoints.Contains(point) || home) { kind = home ? SpawnKind.Home : SpawnKind.Medbay; ownerText = owner == me ? "Your medbay" : "Medbay you claimed"; }
+            else if (!working || owner == 0 || PlayerIdentities.IsNpc(owner) || social == null || WorldSocial.Access(point, me) != true) continue;
             else
             {
                 bool faction;
@@ -246,40 +269,185 @@ internal sealed partial class HostWorld
                 kind = faction ? SpawnKind.FactionMedbay : SpawnKind.SharedMedbay;
                 ownerText = (faction ? "Faction medbay of " : "Shared by ") + name;
             }
-            var transform = point.Data.GetWorldTransform();
-            double distance = death is Vector3D at ? Vector3D.Distance(in at, in transform.Position) : -1;
-            medbays.Add((new(new SpawnOption(kind, PointName(point), ownerText + (distance >= 0 ? $", {Distance(distance)} from where you died" : ""), true), point), distance, home));
+            bool mayUse = ServerAccess.MayUse(null, identity, point, useKey: "use.medbay");
+            var functional = point.TryGet<FunctionalBlockComponent>();
+            var power = point.TryGet<PowerableBlockComponent>();
+            var (status, reason) = SpawnCards.HomeStatus(true, functional?.Functional ?? true, working, power?.Supplied ?? true, power?.Enabled ?? true, mayUse, !home || homeAllowed);
+            var position = point.Data.GetWorldTransform().Position;
+            string detail = home ? (reason.Length > 0 ? reason : "Your home base") : status == SpawnStatus.Available ? ownerText : ownerText + ", " + SpawnCards.StatusText(status).ToLowerInvariant();
+            var target = new SpawnTarget(new SpawnOption(kind, PointName(point), detail, status == SpawnStatus.Available,
+                Grid: GridNameOf(point), Distance: death is Vector3D d ? Vector3D.Distance(in d, in position) : -1, Place: PlaceOf(session, position),
+                Status: status, Home: home, CanSetHome: homeSettable && !home && mayUse), point);
+            medbays.Add(target);
+            at[target] = position;
+            if (home && steam != 0) host.Access.SetHome(steam, new HomeEntry { World = WorldKey, Name = target.Option.Name, Grid = target.Option.Grid, X = position.X, Y = position.Y, Z = position.Z });
         }
-        targets.AddRange(medbays.OrderByDescending(m => m.Home).ThenBy(m => m.Target.Option.Kind).ThenBy(m => m.Distance).Take(40).Select(m => m.Target));
-        targets.Add(new(new SpawnOption(SpawnKind.Suit, "Space suit", "Spawn in your suit at the world spawn", true), null));
-        long wait = _shipReadyAt.TryGetValue(me, out long ready) ? ready - MpClock.NowMs() : 0;
-        foreach (var ship in RespawnShips.Offered(ShipSettings?.RespawnShips).Where(s => s.Space))
+        // The game forgets a home medbay that was destroyed; the player still sees which one it was, and why it is gone.
+        if (homePoint == null && steam != 0 && host.Access.HomeOf(steam, WorldKey) is { } lost)
         {
-            bool hasShip = Singleton<DefinitionManager>.Instance.TryGetDefinition(ship.Prefab, out PrefabDefinition _);
-            string detail = !hasShip ? "Not available in this game version" : wait > 0 ? $"Available again in {(wait + 59_999) / 60_000} min" : ship.Detail + ", fuelled and yours to keep";
-            targets.Add(new(new SpawnOption(SpawnKind.Ship, "Respawn ship: " + ship.Name, detail, hasShip && wait <= 0), null, ship));
+            var position = new Vector3D(lost.X, lost.Y, lost.Z);
+            var target = new SpawnTarget(new SpawnOption(SpawnKind.Home, lost.Name.Length > 0 ? lost.Name : "Home base", SpawnCards.HomeStatus(false, false, false, false, false, false, false).Reason, false,
+                Grid: lost.Grid, Distance: death is Vector3D d ? Vector3D.Distance(in d, in position) : -1, Place: PlaceOf(session, position), Status: SpawnStatus.Destroyed, Home: true), null);
+            medbays.Add(target);
+            at[target] = position;
+        }
+        targets.AddRange(SpawnCards.Order(medbays, t => t.Option).Take(40));
+        var suit = new SpawnTarget(new SpawnOption(SpawnKind.Suit, "Space suit", "Spawn in your suit at the world spawn", true), null);
+        targets.Add(suit);
+        if (respawn != null) at[suit] = respawn.WorldSpawn.Position;
+        long wait = _shipReadyAt.TryGetValue(me, out long ready) ? ready - MpClock.NowMs() : 0;
+        foreach (var ship in ShipsFor(SpawnPlace.Space))
+        {
+            bool hasShip = ShipExists(ship);
+            string detail = !hasShip ? (ship.Blueprint != null ? "Its blueprint is missing on the server" : "Not available in this game version") : wait > 0 ? $"Available again in {(wait + 59_999) / 60_000} min" : ship.Detail + ", fuelled and yours to keep";
+            var target = new SpawnTarget(new SpawnOption(SpawnKind.Ship, "Space near the world spawn", detail, hasShip && wait <= 0,
+                Status: !hasShip ? SpawnStatus.Unavailable : wait > 0 ? SpawnStatus.Cooldown : SpawnStatus.Available, Preview: ship.Preview, Tag: RespawnShips.Tag(ship),
+                Group: ship.Name, Destination: SpawnDestination.Space, Info: "Open space, no gravity: the ship starts 150 m from the world spawn."), null, ship);
+            targets.Add(target);
+            if (respawn != null) at[target] = respawn.WorldSpawn.Position;
         }
         AddPlanetShips(session, targets, wait);
+        targets = SpawnCards.Order(targets, t => t.Option);
+        double farthest = death is Vector3D from ? at.Values.Select(v => Vector3D.Distance(in from, in v)).DefaultIfEmpty(0).Max() : 0;
+        for (int i = 0; i < targets.Count; i++)
+        {
+            var t = targets[i];
+            var o = t.Option;
+            if (at.TryGetValue(t, out var position))
+            {
+                if (o.Place.Length == 0 && o.Kind is SpawnKind.Suit or SpawnKind.NearHost) o = o with { Place = PlaceOf(session, position) };
+                if (death is Vector3D d)
+                {
+                    if (o.Distance < 0) o = o with { Distance = Vector3D.Distance(in d, in position) };
+                    // ponytail: a top-down world X/Z map; a planet's local up would read better on its surface.
+                    var (x, y) = SpawnCards.MapPoint(position.X - d.X, position.Z - d.Z, farthest);
+                    o = o with { MapX = x, MapY = y, HasMap = true };
+                }
+            }
+            else if (death is Vector3D from2 && t.Planet != default && o.Distance < 0
+                && session.GetEntitiesOfType<VoxelPlanetComponent>().FirstOrDefault(e => !EngineCodec.IsDead(e) && e.Get<VoxelPlanetComponent>().Id == t.Planet) is { } body)
+                o = o with { Distance = Math.Max(0, Vector3D.Distance(in from2, body.Data.GetWorldTransform().Position) - body.Get<VoxelPlanetComponent>().Radius) };
+            targets[i] = t with { Option = o };
+        }
         j.Menu = targets;
-        var menu = new SpawnMenu(targets.Select(t => t.Option).ToArray(), j.Respawn, message);
+        var menu = new SpawnMenu(targets.Select(t => t.Option).ToArray(), j.Respawn, message, deathText);
         if (j.Local) KeenRespawn.ShowLocal(menu);
         else host.SendSpawnMenu(j.Peer, menu);
-        _log.Info($"host spawn: sent ClientId {j.ClientId} '{j.Name}' {targets.Count} spawn choices ({medbays.Count} medbays){(message.Length > 0 ? ": " + message : "")}");
+        var homeCard = targets.FirstOrDefault(t => t.Option.Home)?.Option;
+        _log.Info($"host spawn: sent ClientId {j.ClientId} '{j.Name}' {targets.Count} spawn choices ({medbays.Count} medbays{(homeCard != null ? ", home base " + SpawnCards.StatusText(homeCard.Status) : "")}){(message.Length > 0 ? ": " + message : "")}");
     }
-
-    private static string Distance(double metres) => metres >= 10_000 ? $"{metres / 1000:0} km" : metres >= 1000 ? $"{metres / 1000:0.0} km" : $"{metres:0} m";
 
     private static string PointName(Entity point)
     {
         string? name = null;
         try { name = point.Get<RespawnPointComponent>().DisplayName.EvaluateText(); } catch (Exception) { }
-        if (string.IsNullOrWhiteSpace(name) || name.Contains('{')) name = "Medbay";
+        return string.IsNullOrWhiteSpace(name) || name.Contains('{') ? "Medbay" : SocialState.Clean(name, 64);
+    }
+
+    private static string GridNameOf(Entity point)
+    {
         string? grid = WorldSocial.GridOf(point)?.TryGet<CubeGridComponent>()?.DisplayName.ToString();
-        return string.IsNullOrWhiteSpace(grid) ? name : name + " on " + grid;
+        return string.IsNullOrWhiteSpace(grid) ? "" : SocialState.Clean(grid, 64);
+    }
+
+    /// <summary>The planet whose gravity a point is in, "" in space.</summary>
+    private static string PlaceOf(Session session, Vector3D position)
+    {
+        foreach (Entity planet in session.GetEntitiesOfType<VoxelPlanetComponent>())
+        {
+            if (EngineCodec.IsDead(planet)) continue;
+            var p = planet.Get<VoxelPlanetComponent>();
+            var sphere = p.GetSphereOfInfluence();
+            if (Vector3D.Distance(in position, in sphere.Center) < sphere.Radius) return SocialState.Clean(p.Name, 64);
+        }
+        return "";
+    }
+
+    /// <summary>Server thread: the player makes the medbay on card <c>Minutes</c> of its spawn menu its home base (Value), or
+    /// gives up its home base. A player on the spawn screen gets the menu again with the answer.</summary>
+    private string? SetHome(Session session, ushort clientId, long actor, AdminRequest r)
+    {
+        var j = clientId == SyncProtocol.HostClientId ? _localJoiner : _joiners.TryGetValue(clientId, out var found) ? found : null;
+        if (actor == 0 || _host == null) return "You have no identity in this world yet.";
+        var identity = new IdentityId(actor);
+        var data = session.Get<IPerPlayerData>().GetPerPlayerData<RespawnPerPlayerData>(identity);
+        ulong steam = _host.SteamOfIdentity(actor);
+        string answer;
+        if (!r.Value)
+        {
+            if (data.HomePoint is { } old && !EngineCodec.IsDead(old)) old.TryGet<RespawnPointComponent>()?.OnStatusChanged(identity, isClaimed: true, isHome: false);
+            data.HomePoint = null;
+            _host.Access.SetHome(steam, null);
+            answer = "Home base cleared.";
+        }
+        else
+        {
+            var menu = j?.Menu;
+            int index = r.Minutes;
+            if (menu == null || index < 0 || index >= menu.Count) return "Choose a home base on the respawn screen.";
+            var point = menu[index].Point;
+            if (point == null || EngineCodec.IsDead(point) || point.TryGet<RespawnPointComponent>() is not { } medbay) return "Only a medbay can be your home base.";
+            if (!ServerAccess.MayUse(null, identity, point, useKey: "use.medbay")) return "You may not use that medbay.";
+            if (data.HomePoint is { } old && old != point && !EngineCodec.IsDead(old)) old.TryGet<RespawnPointComponent>()?.OnStatusChanged(identity, isClaimed: true, isHome: false);
+            data.HomePoint = point;
+            if (!data.KnownPoints.Contains(point)) data.KnownPoints.Add(point);
+            medbay.OnStatusChanged(identity, isClaimed: true, isHome: true);
+            var position = point.Data.GetWorldTransform().Position;
+            _host.Access.SetHome(steam, new HomeEntry { World = WorldKey, Name = PointName(point), Grid = GridNameOf(point), X = position.X, Y = position.Y, Z = position.Z });
+            answer = "Home base set: " + PointName(point) + ".";
+        }
+        _log.Info($"host spawn: ClientId {clientId} identity {actor}: {answer}");
+        if (j?.Menu == null) return answer;
+        SendSpawnMenu(session, _host, j, identity, j.Local ? null : _hostCharacterServer, answer);
+        return null;
+    }
+
+    /// <summary>The respawn ships offered at a place: the host's blueprints, then (when turned on) the vanilla encounter ships.</summary>
+    private static IEnumerable<RespawnShip> ShipsFor(SpawnPlace place, double gravity = 0, double air = 0)
+    {
+        var settings = ShipSettings;
+        if (RespawnShips.AllOff(settings?.RespawnShips)) return Enumerable.Empty<RespawnShip>();
+        var ships = RespawnShips.ForPlace(settings?.RespawnBlueprints ?? RespawnShips.DefaultBlueprints(), place).AsEnumerable();
+        if (settings == null || !RespawnShips.OfferVanilla(settings.VanillaRespawnShips, settings.RespawnShips)) return ships;
+        return ships.Concat(place == SpawnPlace.Space ? RespawnShips.Offered(settings.RespawnShips).Where(s => s.Space) : RespawnShips.ForPlanet(settings.RespawnShips, gravity, air));
+    }
+
+    private static bool ShipExists(RespawnShip ship)
+        => ship.Blueprint != null ? BlueprintFolder(ship.Blueprint) is { } folder && !BlueprintBroken(folder) : Singleton<DefinitionManager>.Instance.TryGetDefinition(ship.Prefab, out PrefabDefinition _);
+
+    /// <summary>A blueprint's folder with its grid.json.vrb: a full path from server.json, or a folder under Content\Ships.</summary>
+    internal static string? BlueprintFolder(string path)
+    {
+        try
+        {
+            string folder = System.IO.Path.IsPathRooted(path) ? path : PluginPaths.ContentDir is { } content ? System.IO.Path.Combine(content, "Ships", path) : path;
+            if (System.IO.File.Exists(System.IO.Path.Combine(folder, "grid.json.vrb"))) return folder;
+            return System.IO.Path.IsPathRooted(path) ? null : UnpackDefault(path);
+        }
+        catch (Exception) { return null; }
+    }
+
+    // A 0.17 runner applying the first 0.18 update drops Content/Ships: the default ships come out of the plugin itself.
+    private static string? UnpackDefault(string name)
+    {
+        foreach (string ships in new[] { PluginPaths.ContentDir is { } content ? System.IO.Path.Combine(content, "Ships") : null, System.IO.Path.Combine(System.IO.Path.GetTempPath(), "Y51_SE2Online", "Ships") })
+        {
+            if (ships == null) continue;
+            try
+            {
+                if (!DefaultShipFiles.Unpack(ships, name)) return null;
+                string folder = System.IO.Path.Combine(ships, name);
+                GameLog.Instance.Info($"host spawn: the respawn ship {name} was missing; unpacked it to {folder}");
+                return folder;
+            }
+            catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException) { GameLog.Instance.WarnOnce("ship-unpack-" + name, $"host spawn: could not unpack {name} to {ships}: {ex.Message}"); }
+        }
+        return null;
     }
 
     private bool StartShip(Session session, Joiner j, IRespawn respawn, RespawnShip ship)
     {
+        if (ship.Blueprint != null) return StartBlueprintShip(session, j, ship, NearSpawn(session, respawn), lander: false);
         var encounters = session.SessionComponents.TryGet<EncounterSessionComponent>();
         if (encounters == null || !Singleton<DefinitionManager>.Instance.TryGetDefinition(ship.Prefab, out PrefabDefinition prefab)) return false;
         _shipChosen[j.ClientId] = ship;
@@ -289,20 +457,56 @@ internal sealed partial class HostWorld
         if (side.LengthSquared() < 1e-6) side = WorldTransform.TransformDirection(new Vector3D(1, 0, 0), spawn);
         side.Normalize();
         j.ShipRoots = null;
+        j.ShipBlueprint = false;
         j.ShipDeadline = MpClock.NowMs() + ShipSpawnTimeoutMs;
         j.ShipPending = true;
-        SpawnShip(session, encounters, prefab, new WorldTransform(OpenSpace(session, spawn.Position + up * 150 + side * 150), spawn.Orientation), j);
+        SpawnShip(session, encounters, prefab, new WorldTransform(OpenSpace(session, spawn.Position + up * 150 + side * 150), spawn.Orientation), j, ++j.ShipRequest);
         return true;
     }
 
-    private async void SpawnShip(Session session, EncounterSessionComponent encounters, PrefabDefinition prefab, WorldTransform at, Joiner j)
+    /// <summary>Where a space respawn ship appears: 150 m up and to a random side of the world spawn, out of any gravity well.</summary>
+    private static WorldTransform NearSpawn(Session session, IRespawn respawn)
     {
-        try { j.ShipRoots = await SpawnEncounter(session, encounters, prefab, at); }
+        var spawn = respawn.WorldSpawn;
+        var up = WorldTransform.TransformDirection(new Vector3D(0, 1, 0), spawn);
+        var side = WorldTransform.TransformDirection(new Vector3D(Random.Shared.NextDouble() - 0.5, 0, Random.Shared.NextDouble() - 0.5), spawn);
+        if (side.LengthSquared() < 1e-6) side = WorldTransform.TransformDirection(new Vector3D(1, 0, 0), spawn);
+        side.Normalize();
+        return new WorldTransform(OpenSpace(session, spawn.Position + up * 150 + side * 150), spawn.Orientation);
+    }
+
+    /// <summary>Starts a blueprint ship's spawn; the tick hands it over like an encounter ship once its grids exist.</summary>
+    private bool StartBlueprintShip(Session session, Joiner j, RespawnShip ship, WorldTransform at, bool lander)
+    {
+        string? folder = BlueprintFolder(ship.Blueprint!);
+        if (folder == null) { _log.Warn($"host spawn: the blueprint of respawn ship {ship.Name} is missing ({ship.Blueprint})"); return false; }
+        _shipChosen[j.ClientId] = ship;
+        j.ShipRoots = null;
+        j.ShipBlueprint = true;
+        j.ShipDeadline = MpClock.NowMs() + ShipSpawnTimeoutMs;
+        j.ShipPending = true;
+        SpawnBlueprintShip(session, folder, at, j, ++j.ShipRequest);
+        _log.Info($"host spawn: spawning blueprint ship {ship.Name}{(lander ? " (lander)" : "")} for ClientId {j.ClientId} from {folder}");
+        return true;
+    }
+
+    private async void SpawnShip(Session session, EncounterSessionComponent encounters, PrefabDefinition prefab, WorldTransform at, Joiner j, long request)
+    {
+        try { HandOver(j, request, await SpawnEncounter(session, encounters, prefab, at)); }
         catch (Exception ex)
         {
             _log.Warn("host spawn: spawning the respawn ship failed: " + ex.Message);
-            j.ShipRoots = Array.Empty<Entity>();
+            HandOver(j, request, Array.Empty<Entity>());
         }
+    }
+
+    /// <summary>A finished ship spawn: given to the request still waiting for it, else (timed out, the player chose again or
+    /// left) deleted so nobody is left with an orphan ship.</summary>
+    private void HandOver(Joiner j, long request, Entity[] roots)
+    {
+        if (j.ShipPending && j.ShipRequest == request) { j.ShipRoots = roots; return; }
+        if (roots.Length > 0) _log.Info($"host spawn: a respawn ship for ClientId {j.ClientId} finished after its request ended; deleting its {roots.Length} entities");
+        foreach (var root in roots) DeleteLater(root);
     }
 
     // The game's own encounter spawn (EncounterSessionComponent.DebugSpawnEncounter without the admin story).
@@ -352,8 +556,9 @@ internal sealed partial class HostWorld
     /// </summary>
     private static bool CreationConfirmed(Session session, Entity[] roots)
     {
-        var grids = EncounterHelper.EnumerateEntities<EncounterSpawnerComponent>(roots, null)
-            .SelectMany(spawner => spawner.SpawnedEntities).Where(e => !EngineCodec.IsDead(e) && e.TryGet<CubeGridComponent>() != null).ToList();
+        // A blueprint ship's roots are its grids; an encounter's grids come from its spawners.
+        var grids = EncounterHelper.EnumerateEntities<EncounterSpawnerComponent>(roots, null).SelectMany(spawner => spawner.SpawnedEntities)
+            .Concat(roots).Where(e => !EngineCodec.IsDead(e) && e.TryGet<CubeGridComponent>() != null).Distinct().ToList();
         if (grids.Count == 0) return false;
         if (session.SessionComponents.TryGet<Keen.VRage.Multiplayer.Replications.ReplicationServerSessionComponent>() is not { } replication) return true;
         // With streaming on, a client outside a grid's range is never sent it: it has nothing to confirm or to build.
@@ -413,7 +618,7 @@ internal sealed partial class HostWorld
             if (site.SpawnedMs == 0) site.SpawnedMs = now;
             // Confirmed by every client, and settled: moving the lander or switching its motion within a second of spawning
             // raced the physics on both ends (the host's shared-motion link to the contract pad, a client's fresh body).
-            if (now < site.SpawnedMs + DeleteDelayMs && (now < site.SpawnedMs + SettleMs || !CreationConfirmed(session, roots))) return;
+            if (roots.Length > 0 && now < site.SpawnedMs + DeleteDelayMs && (now < site.SpawnedMs + SettleMs || !CreationConfirmed(session, roots))) return;
             _log.Info($"host spawn: lander handed over {now - site.SpawnedMs} ms after spawning ({(CreationConfirmed(session, roots) ? "its grids reached every client" : "deadline: its grids had not reached every client")})");
         }
         j.ShipPending = false;
@@ -423,7 +628,7 @@ internal sealed partial class HostWorld
         {
             if (roots != null)
             {
-                ship = ReleaseEncounter(session, roots);
+                ship = j.ShipBlueprint ? roots.Where(e => !EngineCodec.IsDead(e)).ToList() : ReleaseEncounter(session, roots);
                 foreach (var grid in ship.Where(e => e.TryGet<CubeGridComponent>() != null && e.TryGet<OwnershipComponent>() != null))
                 {
                     WorldSocial.SetOwner(grid, (long)identity);

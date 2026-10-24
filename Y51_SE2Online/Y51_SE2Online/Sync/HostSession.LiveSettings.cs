@@ -13,6 +13,8 @@ public sealed partial class HostSession
 	public void ApplySettings(OnlineSettings before, OnlineSettings after, IReadOnlyList<string> changes)
 	{
 		_o.MaxPlayers = after.MaxPlayers;
+		_o.Pings = after.PingSettingsOf();
+		_o.MarkerDefaults = after.MarkerDefaults ?? new();
 		_o.Password = after.Password ?? "";
 		_o.SessionName = after.SessionName.Trim();
 		_o.Motd = after.Motd ?? "";

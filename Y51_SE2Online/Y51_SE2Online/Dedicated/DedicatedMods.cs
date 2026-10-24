@@ -36,6 +36,18 @@ internal static class DedicatedMods
 
 	private static readonly ConcurrentDictionary<ulong, WorldMod> Mods = new ConcurrentDictionary<ulong, WorldMod>();
 
+	// Steam's time of the installed version (the item's update time when it was downloaded), per item.
+	private static readonly ConcurrentDictionary<ulong, long> Stamps = new ConcurrentDictionary<ulong, long>();
+
+	/// <summary>The Workshop items the running world loaded, with the Workshop update time of the copy installed.</summary>
+	internal static IReadOnlyDictionary<ulong, long> Installed() =>
+		_loaded.Where(m => m.WorkshopId != 0 && Stamps.ContainsKey(m.WorkshopId)).ToDictionary(m => m.WorkshopId, m => Stamps[m.WorkshopId]);
+
+	internal static string NameOf(ulong id) => Mods.TryGetValue(id, out var mod) && mod.Name.Length > 0 ? mod.Name : id.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+	/// <summary>The newest Workshop answer (mods check), for the mods command.</summary>
+	internal static volatile IReadOnlyDictionary<ulong, WorkshopUpdates.Detail> Latest = new Dictionary<ulong, WorkshopUpdates.Detail>();
+
 	private static readonly List<string> Problems = new List<string>();
 
 	private static IReadOnlyList<WorldMod> _loaded = Array.Empty<WorldMod>();
@@ -126,13 +138,14 @@ internal static class DedicatedMods
 					Problem($"Workshop item {id}: {error}");
 					continue;
 				}
-				if (!SteamGameServerUGC.GetItemInstallInfo(new PublishedFileId_t(id), out _, out string folder, 1024u, out _) || !Directory.Exists(folder))
+				if (!SteamGameServerUGC.GetItemInstallInfo(new PublishedFileId_t(id), out _, out string folder, 1024u, out uint stamp) || !Directory.Exists(folder))
 				{
 					Problem($"Workshop item {id}: Steam reports no install folder");
 					continue;
 				}
 				Folders[id] = folder;
-				GameLog.Instance.Info($"dedicated: Workshop item {id} ready in {folder}");
+				Stamps[id] = stamp;
+				GameLog.Instance.Info($"dedicated: Workshop item {id} ready in {folder} (version of {WorkshopUpdates.Time(stamp)})");
 			}
 			catch (Exception ex)
 			{
@@ -329,6 +342,9 @@ internal static class DedicatedMods
 	internal static string Describe()
 	{
 		string text = "World mods: " + WorldMods.Summary(_loaded);
+		var latest = Latest;
+		foreach (var (id, stamp) in Installed())
+			text += $"\n  {NameOf(id)} ({id}): installed {WorkshopUpdates.Time(stamp)}, Workshop " + (latest.TryGetValue(id, out var d) ? d.Result == 1 ? WorkshopUpdates.Time(d.TimeUpdated) + (d.TimeUpdated > stamp ? " (newer)" : "") : "unavailable (result " + d.Result + ")" : "not checked yet");
 		lock (Problems)
 			if (Problems.Count > 0) text += "\nNot loaded:\n  " + string.Join("\n  ", Problems);
 		return text;

@@ -14,7 +14,23 @@ public enum AdminAction
     Creative, SpawnPrefab, SpawnItem, CreateSafeZone, DeleteSafeZone, TeleportTo, Bring, Pvp, OfflineRaidProtection, PcuLimit,
     SunRotation, SunPeriod, SunNudge, Motd, SunSet,
     /// <summary>An admin's own access bypass (Value on/off): use, open, sit in and build on anything regardless of ownership.</summary>
-    AccessBypass
+    AccessBypass,
+    /// <summary>God mode for oneself (Value on/off), apart from creative tools.</summary>
+    Invulnerable,
+    /// <summary>Put Target into group Name.</summary>
+    SetGroup,
+    /// <summary>List grids (Name: filter text, Value: everywhere instead of near me); the rows come back in AdminState.Query.</summary>
+    EntityQuery,
+    /// <summary>Act on the grid with NetId Target; Minutes is the <see cref="EntityVerb"/>, Name a SteamID for Transfer.</summary>
+    EntityAction,
+    CleanupPreview, CleanupRun, CleanupSettings, PermsReload,
+    /// <summary>Effective permissions of Target (Name: a key, or empty for every granted key).</summary>
+    PermsCheck,
+    Kill,
+    /// <summary>Resource usage: Name energy|hydrogen|oxygen, Size the multiplier.</summary>
+    Usage,
+    /// <summary>The player's own home base: Minutes is a card index of their last spawn menu (Value true), or Value false clears it.</summary>
+    SetHome
 }
 
 /// <summary>
@@ -36,16 +52,31 @@ public static class AccessBypass
     }
 
     public static void Clear() => On.Clear();
+
+    public static long[] All() => On.Keys.ToArray();
 }
 
 public sealed record ChatSend(string Text);
 /// <summary>Message of the day for one joiner, placeholders already filled in.</summary>
 public sealed record MotdMessage(string Title, string Text);
-public sealed record ChatLine(string From, ulong FromId, string Text, ChatKind Kind, long UnixMs);
+public sealed record ChatLine(string From, ulong FromId, string Text, ChatKind Kind, long UnixMs, string Group = null);
 public sealed record AdminRequest(AdminAction Action, ulong Target = 0, string Reason = "", int Minutes = 0,
     string Name = "", bool Value = false, double Size = 0);
 public sealed record AccessEntry(ulong SteamId, string Name);
-public sealed record AccessPlayer(ulong SteamId, string Name, OnlineRole Role, bool Connected, int PingMs);
+public sealed record AccessPlayer(ulong SteamId, string Name, OnlineRole Role, bool Connected, int PingMs, string Group = null, int Rank = 0);
+/// <summary>A group players can be put into, for the admin panel's group choices.</summary>
+public sealed record GroupInfo(string Name, int Rank);
+/// <summary>A player the server knows (online now, or seen before), for finding offline players to put into a group.</summary>
+public sealed record KnownPlayer(ulong SteamId, string Name, string Group, long LastSeenUnixMs);
+/// <summary>A per-player reply to a panel query (entities, cleanup preview, permission check), sent only to who asked.</summary>
+public sealed class AdminQuery
+{
+    public string Kind { get; set; } = "";
+    public string Text { get; set; } = "";
+    public QueryRow[] Rows { get; set; } = Array.Empty<QueryRow>();
+    public long Serial { get; set; }
+}
+public sealed record QueryRow(uint NetId, string Name, string Owner, int Blocks, double Distance, string Note);
 public sealed record SafeZoneInfo(uint NetId, string Name, double Radius, double Distance);
 
 public sealed class BanEntry
@@ -59,7 +90,29 @@ public sealed class BanEntry
     public bool ActiveAt(long now) => ExpiresUnixMs == null || ExpiresUnixMs > now;
 }
 
+public sealed class SeenEntry
+{
+    public ulong SteamId { get; set; }
+    public string Name { get; set; } = "";
+    /// <summary>The player's game identity in this world (the grid owner id), 0 until known.</summary>
+    public long Identity { get; set; }
+    public long LastSeenUnixMs { get; set; }
+}
+
 /// <summary>Sent as JoinReject code <see cref="JoinRejectCode.Removed"/> to kicked and banned players.</summary>
+/// <summary>A player's home base as last seen, so the spawn screen can still name it after the game forgets a destroyed one.</summary>
+public sealed class HomeEntry
+{
+    public ulong SteamId { get; set; }
+    /// <summary>The world it is in (a dedicated server's access.json outlives a world change).</summary>
+    public string World { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string Grid { get; set; } = "";
+    public double X { get; set; }
+    public double Y { get; set; }
+    public double Z { get; set; }
+}
+
 public sealed record RemovalNotice(bool Banned, string Reason, long? ExpiresUnixMs, string By, string ServerName)
 {
     public string Describe(long now)
@@ -76,6 +129,11 @@ public sealed record RemovalNotice(bool Banned, string Reason, long? ExpiresUnix
 public sealed class AdminState
 {
     public OnlineRole Role { get; set; }
+    /// <summary>The server's marker filter defaults (design 10.2); a player's own saved choice overrides them.</summary>
+    public MarkerDefaults MarkerDefaults { get; set; } = new();
+    public int PingLifetimeS { get; set; } = 60;
+    /// <summary>How far from their character the server lets a player ping, in metres.</summary>
+    public double PingMaxRangeMeters { get; set; } = 2000;
     public string ServerName { get; set; } = "";
     public bool Dedicated { get; set; }
     public bool WhitelistOnly { get; set; }
@@ -101,6 +159,27 @@ public sealed class AdminState
     public BanEntry[] Bans { get; set; } = Array.Empty<BanEntry>();
     public AccessEntry[] Whitelist { get; set; } = Array.Empty<AccessEntry>();
     public SafeZoneInfo[] SafeZones { get; set; } = Array.Empty<SafeZoneInfo>();
+    /// <summary>This player's group and rank (1000 for an owner).</summary>
+    public string Group { get; set; } = PermissionSet.DefaultGroup;
+    public int Rank { get; set; }
+    /// <summary>The catalogue keys this player has ("*" for an owner): the panel shows only what these allow; the server checks every action anyway.</summary>
+    public string[] Grants { get; set; } = Array.Empty<string>();
+    /// <summary>Every group's style (public), for names in chat, over heads and in player lists.</summary>
+    public Dictionary<string, GroupStyle> Styles { get; set; } = new();
+    /// <summary>Groups this player may hand out (empty without admin.players.set_group).</summary>
+    public GroupInfo[] Groups { get; set; } = Array.Empty<GroupInfo>();
+    /// <summary>Players seen before, online or not (only with admin.players.set_group), at most 500, newest first.</summary>
+    public KnownPlayer[] Known { get; set; } = Array.Empty<KnownPlayer>();
+    /// <summary>Whether this player's own creative tools and god mode are on.</summary>
+    public bool Creative { get; set; }
+    public bool Invulnerable { get; set; }
+    /// <summary>The cleanup's next pass and last result, for the panel (only with admin.cleanup).</summary>
+    public string Cleanup { get; set; } = "";
+    /// <summary>The cleanup settings in force as JSON (only with cleanup.configure), so the panel edits them rather than defaults.</summary>
+    public string CleanupConfig { get; set; } = "";
+    public AdminQuery Query { get; set; }
+
+    public bool Can(string key) => Role == OnlineRole.Host || Array.IndexOf(Grants, "*") >= 0 || Array.IndexOf(Grants, key) >= 0;
 }
 
 /// <summary>Persistent admins, bans and whitelist for one host or dedicated server. Thread-safe.</summary>
@@ -123,6 +202,11 @@ public sealed class AccessList
     public List<AccessEntry> Admins { get; set; } = new();
     public List<BanEntry> Bans { get; set; } = new();
     public List<AccessEntry> Whitelist { get; set; } = new();
+    /// <summary>When each player was last online (unix ms), by SteamID: the cleanup's "owner inactive" clock, and the known
+    /// players for group assignment. 0.17 ignores it.</summary>
+    public List<SeenEntry> Seen { get; set; } = new();
+    /// <summary>Home bases by SteamID (the game keeps the medbay itself in the world save). 0.17 ignores it.</summary>
+    public List<HomeEntry> Homes { get; set; } = new();
     private readonly object _sync = new();
     private string _path;
     [System.Text.Json.Serialization.JsonIgnore] public long Revision { get; private set; }
@@ -133,7 +217,7 @@ public sealed class AccessList
         try { if (File.Exists(path)) list = JsonSerializer.Deserialize<AccessList>(File.ReadAllText(path)); }
         catch (Exception e) when (e is JsonException or IOException) { throw new InvalidDataException("Could not read " + path + ": " + e.Message, e); }
         list ??= new AccessList();
-        list.Admins ??= new(); list.Bans ??= new(); list.Whitelist ??= new();
+        list.Admins ??= new(); list.Bans ??= new(); list.Whitelist ??= new(); list.Seen ??= new(); list.Homes ??= new();
         list._path = path;
         return list;
     }
@@ -167,6 +251,66 @@ public sealed class AccessList
     }
 
     public bool IsAdmin(ulong id) { lock (_sync) return Admins.Any(a => a.SteamId == id); }
+
+    /// <summary>Replaces the admin list with the players of rank 50 or more (0.18 permissions), so a 0.17 rollback keeps its admins.</summary>
+    public void MirrorAdmins(IEnumerable<(ulong SteamId, string Name)> admins)
+    {
+        lock (_sync)
+        {
+            var next = admins.Select(a => new AccessEntry(a.SteamId, Clean(string.IsNullOrWhiteSpace(a.Name) ? Admins.FirstOrDefault(x => x.SteamId == a.SteamId)?.Name ?? "" : a.Name, 64))).ToList();
+            if (next.Select(a => a.SteamId).SequenceEqual(Admins.Select(a => a.SteamId))) return;
+            Admins = next;
+            Save();
+        }
+    }
+
+    /// <summary>Notes players as online now (join, leave, and every minute while online). Writes the file at most once a minute unless <paramref name="force"/>.</summary>
+    public void MarkSeen(IEnumerable<(ulong SteamId, string Name, long Identity)> players, long now, bool force = false)
+    {
+        lock (_sync)
+        {
+            bool changed = false;
+            foreach (var (id, name, identity) in players)
+            {
+                if (id == 0) continue;
+                var entry = Seen.FirstOrDefault(s => s.SteamId == id);
+                if (entry == null) { entry = new SeenEntry { SteamId = id }; Seen.Add(entry); changed = true; }
+                string clean = Clean(name, 64);
+                if (clean.Length > 0 && entry.Name != clean) { entry.Name = clean; changed = true; }
+                if (identity != 0 && entry.Identity != identity) { entry.Identity = identity; changed = true; }
+                if (now > entry.LastSeenUnixMs) { entry.LastSeenUnixMs = now; changed = true; }
+            }
+            if (Seen.Count > 20000) { Seen = Seen.OrderByDescending(s => s.LastSeenUnixMs).Take(20000).ToList(); changed = true; }
+            if (changed && (force || now - _seenSavedMs >= 60_000)) { _seenSavedMs = now; Save(); }
+        }
+    }
+
+    private long _seenSavedMs;
+
+    public HomeEntry HomeOf(ulong steam, string world)
+    {
+        lock (_sync) return Homes.FirstOrDefault(h => h.SteamId == steam && h.World == (world ?? "")) is { } h ? new HomeEntry { SteamId = h.SteamId, World = h.World, Name = h.Name, Grid = h.Grid, X = h.X, Y = h.Y, Z = h.Z } : null;
+    }
+
+    /// <summary>Records (or with null, forgets) a player's home base; writes the file only when it changed.</summary>
+    public void SetHome(ulong steam, HomeEntry home)
+    {
+        if (steam == 0) return;
+        lock (_sync)
+        {
+            var old = Homes.FirstOrDefault(h => h.SteamId == steam);
+            if (home == null) { if (old != null) { Homes.Remove(old); Save(); } return; }
+            string name = Clean(home.Name, 64), grid = Clean(home.Grid, 64);
+            string world = home.World ?? "";
+            // A home on a moving ship is rewritten only when it moved far: each write is the whole file.
+            if (old != null && old.World == world && old.Name == name && old.Grid == grid && Math.Abs(old.X - home.X) + Math.Abs(old.Y - home.Y) + Math.Abs(old.Z - home.Z) < 1000) return;
+            if (old == null) { old = new HomeEntry { SteamId = steam }; Homes.Add(old); }
+            old.World = world; old.Name = name; old.Grid = grid; old.X = home.X; old.Y = home.Y; old.Z = home.Z;
+            Save();
+        }
+    }
+
+    public SeenEntry[] SeenCopy() { lock (_sync) return Seen.Select(s => new SeenEntry { SteamId = s.SteamId, Name = s.Name, Identity = s.Identity, LastSeenUnixMs = s.LastSeenUnixMs }).ToArray(); }
     public bool IsWhitelisted(ulong id) { lock (_sync) return Whitelist.Any(a => a.SteamId == id); }
 
     public BanEntry ActiveBan(ulong id, long now)
@@ -176,13 +320,17 @@ public sealed class AccessList
 
     /// <summary>Returns null when the player may join, otherwise the reject code and text.</summary>
     public (byte Code, string Text)? CheckJoin(ulong id, string password, string required, string serverName, long now)
+        => CheckJoin(id, password, required, serverName, now, key => key is "join.bypass_password" or "join.bypass_whitelist" && IsAdmin(id));
+
+    /// <summary>The join check with the player's permissions: join.ban_immune, join.bypass_whitelist, join.bypass_password.</summary>
+    public (byte Code, string Text)? CheckJoin(ulong id, string password, string required, string serverName, long now, Func<string, bool> has)
     {
         var ban = ActiveBan(id, now);
-        if (ban != null)
+        if (ban != null && !has("join.ban_immune"))
             return (JoinRejectCode.Removed, JsonSerializer.Serialize(new RemovalNotice(true, ban.Reason, ban.ExpiresUnixMs, ban.By, serverName)));
-        if (IsAdmin(id)) return null;
-        if (WhitelistOnly && !IsWhitelisted(id))
+        if (WhitelistOnly && !IsWhitelisted(id) && !has("join.bypass_whitelist"))
             return (JoinRejectCode.Generic, $"This server only admits whitelisted players. Ask an admin to whitelist your SteamID {id}.");
+        if (has("join.bypass_password")) return null;
         if (!string.IsNullOrEmpty(required) && !FixedEquals(password ?? "", required))
             return (JoinRejectCode.Password, string.IsNullOrEmpty(password) ? "This server requires a password." : "The password was incorrect.");
         return null;
@@ -365,4 +513,9 @@ public static class AdminPanel
     public static string Refusal(bool inSession, OnlineRole role, string serverName)
         => !inSession ? "The admin panel is available while you host a multiplayer session or are an admin on a server."
         : role == OnlineRole.Player ? "You are not an admin on " + serverName + ", so you can't use the admin panel." : null;
+
+    /// <summary>The 0.18 refusal: the panel needs admin.panel (owners always have it).</summary>
+    public static string Refusal(bool inSession, AdminState state, string serverName)
+        => !inSession ? "The admin panel is available while you host a multiplayer session or are an admin on a server."
+        : state.Can("admin.panel") ? null : "Your role on " + serverName + " (" + state.Group + ") does not include the admin panel.";
 }

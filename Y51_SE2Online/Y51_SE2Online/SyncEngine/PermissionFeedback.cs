@@ -35,6 +35,12 @@ internal static class PermissionFeedback
         var drill = new HarmonyMethod(typeof(PermissionFeedback), nameof(DrillPostfix));
         harmony.Patch(AccessTools.Method(typeof(Keen.Game2.Client.WorldObjects.Tools.DrillToolControllableComponent), nameof(Keen.Game2.Client.WorldObjects.Tools.DrillToolControllableComponent.RequestActivatePrimaryAction)), postfix: drill);
         harmony.Patch(AccessTools.Method(typeof(Keen.Game2.Client.WorldObjects.Tools.DrillToolControllableComponent), nameof(Keen.Game2.Client.WorldObjects.Tools.DrillToolControllableComponent.RequestActivateSecondaryAction)), postfix: drill);
+        try
+        {
+            harmony.Patch(AccessTools.Method(typeof(Keen.Game2.Simulation.StreamedUI.Terminal.Inventories.InventoryListModel), nameof(Keen.Game2.Simulation.StreamedUI.Terminal.Inventories.InventoryListModel.CreateAsync)),
+                new HarmonyMethod(typeof(PermissionFeedback), nameof(InventoryListPrefix)));
+        }
+        catch (Exception ex) { GameLog.Instance.Warn("permissions: the denied inventory notice is not installed: " + ex.Message); }
     }
 
     // SE2 sends its own "no voxel edits in a safe zone" notice from the server with MoveTo.Client, which never reaches
@@ -60,16 +66,46 @@ internal static class PermissionFeedback
     /// <summary>The local player's identity in a hosted or joined world, else 0.</summary>
     internal static long LocalActor => AdminAccess.Hosting ? PlayerIdentities.HotfixIdentity : AdminAccess.Joined ? AdminAccess.Client.IdentityId : 0;
 
-    // Feedback only: the host still decides, so a stale prediction never blocks a use that would succeed.
-    private static void InteractPrefix(UseAction __instance, bool value)
+    // Feedback only, apart from the uses the game carries out locally before the server answers: on/off flips the block
+    // and pulling from an item slot plays the pickup sound. A joined player's game skips those when the server would refuse
+    // them (the host's own uses are never refused there). A prediction that is unsure (null) lets the use go to the server.
+    private static bool InteractPrefix(UseAction __instance, bool value)
     {
         try
         {
             long actor = LocalActor;
-            if (!value || actor == 0 || __instance.Entity == null || WorldSocial.Access(__instance.Entity, actor) != false) return;
+            if (!value || actor == 0 || __instance.Entity == null || AccessBypass.IsOn(actor) || WorldSocial.Access(__instance.Entity, actor) != false) return true;
             Deny(__instance);
+            return !(AdminAccess.Joined && __instance is UsePowerableAction or UseItemSlotAction);
         }
         catch (Exception ex) { GameLog.Instance.WarnOnce("permission-feedback", "permissions: denied feedback failed: " + ex.Message); }
+        return true;
+    }
+
+    // Opening a container's terminal lists every inventory on its ship; the server leaves out the ones the player may not
+    // use (ServerAccess.InventoryEntryPrefix), so the player is told which, once per list.
+    private static void InventoryListPrefix(Entity targetEntity)
+    {
+        try
+        {
+            long actor = LocalActor;
+            if (actor == 0 || AccessBypass.IsOn(actor) || WorldSocial.GridOf(targetEntity) is not { } grid) return;
+            var refused = new System.Collections.Generic.List<string>();
+            foreach (var ship in grid.Get<Keen.Game2.Simulation.WorldObjects.CubeGrids.CubeGridComponent>().GetAllGridsInShip())
+                ship.TryGet<Keen.Game2.Simulation.WorldObjects.CubeGrids.CubeGridComponent>()?.VisitAllBlocksWithComponent<Keen.Game2.Simulation.WorldObjects.Items.InventoryComponent>(inventory =>
+                {
+                    if (refused.Count < 100 && WorldSocial.Access(inventory.Entity, actor) == false) refused.Add(BlockName(inventory.Entity));
+                }, includeSubgrids: false);
+            if (InteractionRules.DeniedNotice(refused) is { } text) Notify("Inventory", text);
+        }
+        catch (Exception ex) { GameLog.Instance.WarnOnce("inventory-denied-feedback", "permissions: denied inventory feedback failed: " + ex.Message); }
+    }
+
+    private static string BlockName(Entity block)
+    {
+        try { return block.TryGet<Keen.Game2.Simulation.WorldObjects.CubeBlocks.FunctionalBlockComponent>()?.DisplayName.EvaluateText()
+            ?? block.TryGet<Keen.Game2.Simulation.WorldObjects.CubeBlocks.CubeBlockComponent>()?.Definition.LocalizableBlockTypeDisplayName.EvaluateText(); }
+        catch (Exception) { return null; }
     }
 
     internal static void Deny(UseAction action)

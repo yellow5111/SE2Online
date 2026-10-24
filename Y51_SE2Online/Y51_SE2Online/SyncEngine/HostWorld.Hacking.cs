@@ -138,6 +138,7 @@ internal sealed partial class HostWorld
         if (host == null) return;
         long now = MpClock.NowMs();
         if (request.Action == SocialAction.Lockdown) { Lockdown(actor, clientId, request.Grid, now); return; }
+        if (request.Offset == 1 && !host.AllowedClient(clientId, "hack.use")) { Tell(clientId, "Your group may not hack."); return; }
         var mine = _hacks.Values.FirstOrDefault(h => h.Hacker == actor);
         if (request.Offset == 0)
         {

@@ -39,7 +39,7 @@ public static class LoadScreenLayout
 		("I", "Push to talk", "Hold to speak. Voices fade with distance, so walk over to whoever you want to talk to."),
 		("N", "Emote wheel", "Hold to pick an emote. Some emotes start a friendly fist fight with the player in front of you."),
 		("O", "Suit broadcast", "Turns your suit antenna, and with it your name tag, on or off for other players."),
-		("Alt+F10", "Admin panel", "Hosts and admins kick and ban, toggle PvP, set PCU limits, place safe zones and control the sun, all live."),
+		("Ctrl+F10", "Admin panel", "Kick, ban, assign groups, manage grids and the cleanup, PvP, safe zones and the sun, live (as your group allows)."),
 		("F11", "Connection stats", "Press until the Y51_SE2Online page shows: ping, bandwidth and sync health, handy for bug reports."),
 		("Keys", "Rebind anything", "Every multiplayer key above can be changed in Multiplayer > Settings."),
 		("Browser", "Find the right server", "Filter for compatible builds and free slots, sort by players or country, and star favorites to find them again."),

@@ -60,11 +60,13 @@ internal sealed partial class HostWorld
         }
         string name = string.IsNullOrWhiteSpace(s.Name) ? "Shared marker" : s.Name;
         if (name.Length > config.NameMaxLength) name = name[..config.NameMaxLength];
-        string description = "Shared by " + fromName;
+        bool kept = target.ClientId == from;
+        string description = kept ? "Kept from a ping" : "Shared by " + fromName;
         if (description.Length > config.DescriptionMaxLength) description = description[..config.DescriptionMaxLength];
         var icon = s.Icon >= 0 && s.Icon < config.Icons.Length ? config.Icons[s.Icon] : config.PlayerCreatedMarkerIcon;
         data.GPSMarkers.Add(new GPSMarker(config.PlayerMadeMarkerType, name, description, position, icon, new ColorSRGB(s.R, s.G, s.B, (byte)255), alwaysShow: false, hidden: false));
         _log.Info($"gps share: ClientId {from} '{fromName}' -> ClientId {target.ClientId} '{target.Name}': '{name}'");
+        if (kept) { host.GpsNotice(from, $"Kept '{name}' as a GPS marker."); return; }
         host.GpsNotice(from, $"Shared GPS marker '{name}' with {target.Name}.");
         host.GpsNotice(target.ClientId, $"{fromName} shared GPS marker '{name}' with you.");
     }

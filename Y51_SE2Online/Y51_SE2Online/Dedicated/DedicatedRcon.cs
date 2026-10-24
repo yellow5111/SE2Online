@@ -134,7 +134,9 @@ internal static class DedicatedRcon
 			case "players": return PlayersText(host);
 			case "json": return Json(caller, words.Skip(1).ToArray(), host);
 		}
-		if (caller.Role != RconCaller.Owner && Refusal(verb, words, host) is { } refused) return "[WARN] " + refused;
+		// The same router as chat: the verb's key, and sub-commands with their own key (mods check).
+		if (caller.IsSteam && caller.Role != RconCaller.Owner && Permissions() is { } perms && CommandRouter.Refusal(perms, caller.SteamId, perms.IsOwner(caller.SteamId), command, CommandChannel.Rcon) is { } refused)
+			return "[WARN] " + refused;
 		if (DedicatedRuntime.Exiting) return "[WARN] The server is shutting down.";
 		// Reads are fine during a save or the load; changes wait their turn in the command file, here they are refused.
 		if (DedicatedRuntime.Busy && verb is not ("bans" or "admins" or "mods")) return "[WARN] The server is " + (DedicatedRuntime.State().Saving ? "saving" : "loading the world") + "; try again in a moment.";
@@ -143,8 +145,11 @@ internal static class DedicatedRcon
 		if (verb == "restart" && words.Length > 1 && words[1].StartsWith("update", StringComparison.OrdinalIgnoreCase)) return "[WARN] restart update is sent by the server runner only.";
 		string line = verb + (words.Length > 1 ? " " + string.Join(' ', words.Skip(1)) : "");
 		HostSession.LocalActor = (caller.IsSteam ? caller.Name : "Server") + " (RCON)";
+		// A Steam sign-in acts as its player: every admin action it starts is checked against that player's permissions and rank.
+		HostSession.LocalActorId = caller.IsSteam && caller.Role != RconCaller.Owner ? caller.SteamId : 0;
+		AuditLog.Write("rcon", caller.ToString(), line, "run");
 		try { DedicatedRuntime.RunCommand(app, line); }
-		finally { HostSession.LocalActor = null; }
+		finally { HostSession.LocalActor = null; HostSession.LocalActorId = 0; }
 		return verb switch
 		{
 			"save" => "Saving the world (the log shows when it completes).",
@@ -153,22 +158,14 @@ internal static class DedicatedRcon
 		};
 	}
 
-	// The in-game admin rules, for Steam sign-ins acting through the server console (which may do anything).
-	private static string Refusal(string verb, string[] words, HostSession host)
-	{
-		if (verb is not ("kick" or "ban" or "deadmin")) return null;
-		if (verb == "deadmin") return "Only the owner can demote admins.";
-		return words.Length > 1 && ulong.TryParse(words[1], out ulong target) && host?.Access.IsAdmin(PeerAlias.SteamOf(target)) == true
-			? "Only the owner can remove another admin." : null;
-	}
-
 	private static string Help(RconCaller caller)
 	{
-		var allowed = RconAccess.ListFor(_config.RconRoles, caller.Role);
+		var allowed = caller.Role == RconCaller.Owner ? ["*"] : Commands(caller);
 		string[] lines =
 		{
 			"status | players | save | say <text>", "kick <SteamID64> [reason] | ban <SteamID64> [minutes|perm] [reason] | unban <SteamID64> | bans",
-			"admin <SteamID64> | deadmin <SteamID64> | admins | whitelist on|off|add <id>|remove <id>|list",
+			"admin <player> | deadmin <player> | admins | group list|show <player>|set <player> <group>|remove <player> [group] | perms reload|check <player> [key]",
+			"whitelist on|off|add <id>|remove <id>|list | cleanup status|preview [category]|run [category] [now]|cancel",
 			"pvp on|off | raid on|off | pcu <number>|off|default | sun on|off|day <min>|move <deg>|set <0-360>",
 			"usage energy|hydrogen|oxygen <0-10> | mods | motd <text>|clear | restart [now|cancel] | stop [now]",
 			"json status|players|bans|admins|whitelist|config|log [after] [max]|commands"
@@ -249,7 +246,7 @@ internal static class DedicatedRcon
 				result = new { Last = LogRing.Server.Last, Lines = LogRing.Server.Since(after, max).Select(l => new { l.Seq, l.Utc, l.Level, l.Text }).ToArray() };
 				break;
 			case "commands":
-				var allowed = RconAccess.ListFor(_config.RconRoles, caller.Role);
+				var allowed = caller.Role == RconCaller.Owner ? ["*"] : Commands(caller);
 				result = new { Role = caller.Role, Commands = RconAccess.Commands.Where(c => RconAccess.Allowed(allowed, c)).ToArray() };
 				break;
 			default:
@@ -291,6 +288,28 @@ internal static class DedicatedRcon
 		EBeginAuthSessionResult.k_EBeginAuthSessionResultExpiredTicket => "the ticket has expired",
 		_ => result.ToString()
 	};
+
+	/// <summary>The permissions in force; before multiplayer is up (the world still loading), the files on disk.</summary>
+	private static PermissionSet Permissions()
+	{
+		if (NetSession.Current?.Host is { } host) return host.Perms;
+		try
+		{
+			string folder = Path.Combine(_config.Directory, "Permissions");
+			var set = Directory.Exists(folder) ? PermissionSet.Load(folder, Path.Combine(folder, "players.json"), out _) : PermissionSet.FromAccess(AccessList.Load(Path.Combine(_config.Directory, "access.json")));
+			set.SetOwners(_config.OwnerSteamIds);
+			return set;
+		}
+		catch (InvalidDataException) { return null; }
+		catch (IOException) { return null; }
+	}
+
+	private static List<string> Commands(RconCaller caller)
+	{
+		if (!caller.IsSteam) return caller.Role == RconCaller.Owner ? ["*"] : [];
+		var perms = Permissions();
+		return perms == null ? [] : CommandRouter.AllowedVerbs(perms, caller.SteamId, perms.IsOwner(caller.SteamId));
+	}
 
 	private sealed class Host : IRconHost
 	{
@@ -377,12 +396,12 @@ internal static class DedicatedRcon
 
 		public string RoleOf(ulong steamId)
 		{
-			if (NetSession.Current?.Host is { } host) return host.Access.IsAdmin(steamId) ? RconCaller.Admin : RconCaller.Player;
-			// Before multiplayer is up (the world still loading), the admin list on disk.
-			try { return AccessList.Load(Path.Combine(_config.Directory, "access.json")).IsAdmin(steamId) ? RconCaller.Admin : RconCaller.Player; }
-			catch (InvalidDataException) { return null; }
-			catch (IOException) { return null; }
+			var perms = Permissions();
+			if (perms == null) return null;
+			return perms.IsOwner(steamId) ? RconCaller.Owner : perms.Has(steamId, "admin.panel") ? RconCaller.Admin : RconCaller.Player;
 		}
+
+		public List<string> CommandsFor(RconCaller caller) => Commands(caller);
 
 		public string NameOf(ulong steamId)
 		{

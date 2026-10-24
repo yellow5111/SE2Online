@@ -31,6 +31,9 @@ public sealed class DedicatedConfig
     /// <summary>Read by the runner's live console: signed server updates from the website, installed with a warned restart.</summary>
     [JsonObjectCreationHandling(JsonObjectCreationHandling.Populate)]
     public UpdateSettings AutoUpdate { get; set; } = new();
+    /// <summary>While the server runs: look for newer versions of its Workshop mods and restart (warned) to load them.</summary>
+    [JsonObjectCreationHandling(JsonObjectCreationHandling.Populate)]
+    public ModUpdateSettings ModUpdates { get; set; } = new();
     /// <summary>Message of the day shown to each joiner; {player}, {server}, {online} and {max} are filled in.</summary>
     public string Motd { get; set; } = "";
     public string MotdTitle { get; set; } = "";
@@ -41,6 +44,8 @@ public sealed class DedicatedConfig
     [JsonObjectCreationHandling(JsonObjectCreationHandling.Populate)]
     public OnlineSettings Network { get; set; } = new OnlineSettings
     {
+        // Advertise: what a server.json without the key has always run with, and what the merge writes into it. New servers
+        // are listed: server.example.json (copied for a new server) says true.
         FriendsOnly = false, Advertise = false, SessionName = "Y51 Dedicated Server", AllowDirectIp = true,
         // Not co-op's 7742: a dedicated server and a co-op host on one PC no longer fight over the port.
         ListenPort = 27016,
@@ -74,6 +79,13 @@ public sealed class DedicatedConfig
     public bool RconSteamAuth { get; set; } = true;
     /// <summary>Commands a Steam sign-in may run over RCON by role (Admin, Player): command words, "*" for all. The password is Owner: every command.</summary>
     public Dictionary<string, List<string>> RconRoles { get; set; } = Core.RconAccess.DefaultRoles();
+    /// <summary>Players (SteamID64) who are owners of this server, like the console and the RCON password: every permission,
+    /// above every group. Empty by default: on a dedicated server nobody in game is an owner unless listed here.</summary>
+    [JsonNumberHandling(JsonNumberHandling.AllowReadingFromString)]
+    public ulong[] OwnerSteamIds { get; set; } = Array.Empty<ulong>();
+    /// <summary>SE2 Online's cleanup: floating items, unowned debris, idle NPC grids, and player grids only after their owners were offline for the set time.</summary>
+    [JsonObjectCreationHandling(JsonObjectCreationHandling.Populate)]
+    public CleanupSettings Cleanup { get; set; } = new();
     [JsonIgnore] public string ConfigPath { get; private set; }
     [JsonIgnore] public string Directory => Path.GetDirectoryName(ConfigPath);
     [JsonIgnore] public string DumpPath => Path.GetFullPath(Path.Combine(Directory, SettingsDumpFile));
@@ -110,7 +122,9 @@ public sealed class DedicatedConfig
         // The client's own record of the Host screen; a server.json states its hacking options outright.
         "Network.HackingChosen",
         // A host's own role lists: added whole when missing, never given a role the host left out.
-        "RconRoles.Admin", "RconRoles.Player"
+        "RconRoles.Admin", "RconRoles.Player",
+        // The co-op Host screen's record of a choice; a server.json states Advertise outright.
+        "Network.AdvertiseChosen"
     };
 
     /// <summary>Writes options this version added into the host's server.json with their defaults; returns their paths.</summary>
@@ -160,6 +174,8 @@ public sealed class DedicatedConfig
             throw new ArgumentException("ShutdownCountdownSeconds must be between 0 and 600.");
         config.AutoRestart.Validate();
         if (config.AutoUpdate == null || config.AutoUpdate.CheckMinutes is < 5 or > 1440) throw new ArgumentException("AutoUpdate.CheckMinutes must be between 5 and 1440.");
+        if (config.ModUpdates == null) throw new ArgumentException("ModUpdates must be an object (CheckMinutes, Restart); remove the line to use the defaults.");
+        if (config.ModUpdates.CheckMinutes != 0 && config.ModUpdates.CheckMinutes is < 5 or > 1440) throw new ArgumentException("ModUpdates.CheckMinutes must be 0 (off) or between 5 and 1440.");
         if ((config.Motd ?? "").Length > Core.Motd.MaxText) throw new ArgumentException($"Motd can be at most {Core.Motd.MaxText} characters.");
         if ((config.MotdTitle ?? "").Length > Core.Motd.MaxTitle) throw new ArgumentException($"MotdTitle can be at most {Core.Motd.MaxTitle} characters.");
         if (config.Network == null) throw new ArgumentException("Network must be configured.");
@@ -168,7 +184,6 @@ public sealed class DedicatedConfig
         config.Network.MotdTitle = config.MotdTitle ?? "";
         if (config.Network.FriendsOnly) throw new ArgumentException("Dedicated Steam servers have no Steam friends. Set Network.FriendsOnly to false.");
         if (!config.Network.AllowDirectIp) throw new ArgumentException("Dedicated servers require Network.AllowDirectIp=true for Steam Game Server IP networking.");
-        if (config.Network.Advertise && string.IsNullOrWhiteSpace(config.Network.PublicAddress)) throw new ArgumentException("Set Network.PublicAddress to the public IP or hostname and port before advertising a dedicated server.");
         string error = config.Network.Validate();
         if (error != null) throw new ArgumentException(error);
         if (config.SessionSettings == null) throw new ArgumentException("SessionSettings cannot be null.");
@@ -176,6 +191,8 @@ public sealed class DedicatedConfig
         if (string.IsNullOrWhiteSpace(config.SettingsDumpFile)) throw new ArgumentException("SettingsDumpFile cannot be empty.");
         if (string.IsNullOrWhiteSpace(config.DefinitionDumpFile)) throw new ArgumentException("DefinitionDumpFile cannot be empty.");
         ValidateRcon(config);
+        if (config.Cleanup == null) config.Cleanup = new CleanupSettings();
+        if (config.Cleanup.Validate() is { } cleanup) throw new ArgumentException(cleanup);
         if (string.IsNullOrWhiteSpace(config.ResumeFile) || string.IsNullOrWhiteSpace(config.CommandFile))
             throw new ArgumentException("ResumeFile and CommandFile cannot be empty.");
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -203,6 +220,9 @@ public sealed class DedicatedConfig
         config.RconBindAddress = config.RconBindAddress?.Trim() ?? "";
         config.RconPassword ??= "";
         config.RconRoles ??= Core.RconAccess.DefaultRoles();
+        config.OwnerSteamIds ??= Array.Empty<ulong>();
+        foreach (ulong owner in config.OwnerSteamIds)
+            if (!Y51_SE2Online.Sync.AccessList.IsPlayerSteamId(owner)) throw new ArgumentException($"OwnerSteamIds: {owner} is not a Steam player's SteamID64 (17 digits, starting 7656119).");
         if (config.RconPort is < 1 or > 65535) throw new ArgumentException("RconPort must be between 1 and 65535.");
         if (config.RconBindAddress.Length > 0 && !System.Net.IPAddress.TryParse(config.RconBindAddress, out _))
             throw new ArgumentException($"RconBindAddress: '{config.RconBindAddress}' is not an IP address (empty uses Network.BindAddress).");
@@ -229,6 +249,15 @@ public sealed class UpdateSettings
 {
     public bool Enabled { get; set; } = true;
     public int CheckMinutes { get; set; } = 30;
+}
+
+/// <summary>Workshop mod updates while the server runs (Steam's Web API, no key); a newer version restarts with the AutoRestart warnings.</summary>
+public sealed class ModUpdateSettings
+{
+    /// <summary>Minutes between checks; 0 off.</summary>
+    public int CheckMinutes { get; set; } = 30;
+    /// <summary>False: only log it and tell players in chat that the next restart loads it.</summary>
+    public bool Restart { get; set; } = true;
 }
 
 /// <summary>Scheduled restarts (the runner relaunches the server) and restarts after a crash.</summary>

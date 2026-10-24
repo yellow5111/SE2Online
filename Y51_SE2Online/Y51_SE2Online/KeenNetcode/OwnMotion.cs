@@ -497,6 +497,7 @@ internal static class OwnMotion
 			_shiftedTo = to.Position;
 			_shiftPending = true;
 			_shifts++;
+			LastShiftMeters = (float)(to.Position - at.Position).Length();
 			own.Data.SetWorldTransform(to);
 		}
 		if (dv != default && own.Data.TryGet<RigidBodyData>(out var body))
@@ -513,6 +514,10 @@ internal static class OwnMotion
 	private static volatile bool _shiftPending;
 	private static Vector3D _shiftedTo;
 	private static long _shifts, _shiftsTurned, _snaps, _turns;
+
+	/// <summary>Camera diagnostic (<see cref="CameraCreep"/>): eased shifts so far, and how far the last one moved the body.</summary>
+	internal static long Shifts => _shifts;
+	internal static volatile float LastShiftMeters;
 
 	private static void OrientationConstraintPrefix(ref WorldTransform wt, in SoftTransform st, in TransformChangeTypeData tcd)
 	{

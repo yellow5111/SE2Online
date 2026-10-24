@@ -55,6 +55,8 @@ internal static class KeenGuards
 			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(ReplaySignalsFinalizer))));
 		Guard("unawaited exception", () => harmony.Patch(AccessTools.Method(AccessTools.TypeByName("Keen.VRage.Library.Threading.SkipWaitMonitor"), "ProcessException"),
 			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(UnawaitedExceptionPrefix))));
+		Guard("host's own story faults", () => harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Multiplayer.Transport.InProcess.InProcessPeerTransportSessionComponent), "ProcessCompleteStory"),
+			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(InProcessCompletionPrefix))));
 		Guard("sort grids", () => harmony.Patch(AccessTools.Method(AccessTools.TypeByName("Keen.Game2.Client.UI.TerminalScreen.ControlPanel.ControlPanelTreeViewModel"), "SortGrids"),
 			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(SortGridsPrefix))));
 		if (AccessTools.TypeByName("Keen.VRage.Render12.SceneSystem.SceneManager") is { } sceneManager)
@@ -334,6 +336,20 @@ internal static class KeenGuards
 			return false;
 		}
 		return true;
+	}
+
+	// The co-op host's own requests reach the server in process, and one the server turned down there (an access refusal,
+	// or SE2's own throw on a block that refusal left out of the screen) came back to the host's game as the raw exception:
+	// its terminal and toolbar code handed that to the crash handler (async void) or rethrew it on the continuation queue
+	// (an unawaited request), and the host's game closed. Only completions arriving at the host's client transport are
+	// converted, exactly as StoryFaultSerializer does for a player's on the wire (descriptor round trip: skip or remote fault).
+	private static void InProcessCompletionPrefix(object __instance, ref Keen.VRage.Multiplayer.Transport.IStoryCompletion completion)
+	{
+		if (__instance is not Keen.VRage.Multiplayer.Transport.InProcess.InProcessClientPeerTransportSessionComponent
+			|| completion is not Keen.VRage.Multiplayer.Transport.StoryFault fault || !HostFaultRule.AsRemoteFault(fault.Exception)) return;
+		var raw = fault.Exception;
+		GameLog.Instance.WarnOnce("in-process-story-fault", $"keen guards: a request of the host's own game failed on the server ({raw.GetType().Name}: {raw.Message.Split('\n')[0]}); it ends the way a player's failed request does (further ones not logged)");
+		completion = new Keen.VRage.Multiplayer.Transport.StoryFault(Keen.VRage.Multiplayer.Transport.StoryFaultDescriptor.FromException(raw).ToException());
 	}
 
 	private static bool UnawaitedExceptionPrefix(System.Runtime.ExceptionServices.ExceptionDispatchInfo? ____exception)

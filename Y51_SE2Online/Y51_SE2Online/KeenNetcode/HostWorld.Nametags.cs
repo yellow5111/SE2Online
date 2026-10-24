@@ -98,7 +98,9 @@ internal sealed partial class HostWorld
 			}
 			var bodies = new List<(uint, long)>();
 			var alive = new List<Entity>();
-			if (session.TryFillAliveCharactersHotfix(alive, preserveOrder: false))
+			// Not the Hotfix variant: it also walks the archetypes a parallel spawn (GameEntitySerializer.BuildFromBundleAsync) is still
+			// filling on worker threads, a data race on the server scene ("Concurrent access (write) 10001", 0.17.5 hosts).
+			if (session.TryFillAliveCharacters(alive))
 			{
 				foreach (var character in alive)
 				{

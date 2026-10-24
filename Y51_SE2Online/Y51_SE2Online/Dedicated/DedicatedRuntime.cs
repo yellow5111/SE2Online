@@ -219,9 +219,11 @@ internal static class DedicatedRuntime
             long commandStarted = MpClock.NowMs();
             try { CheckCommand(app); }
             catch (Exception ex) { GameLog.Instance.Error("dedicated: command failed: " + ex); }
+            if (!Busy) RunChatCommands(app);
             _commandCostMs = MpClock.NowMs() - commandStarted;
             if (_shutdownAtMs != 0 && !_exiting) TickCountdown(app);
             else if (_loaded && !_exiting) TickRestart(app);
+            if (_loaded && !_exiting) TickModUpdates();
         }
         if (!Active || _exiting) return;
         try
@@ -448,6 +450,22 @@ internal static class DedicatedRuntime
         return saves;
     }
 
+    /// <summary>Saves now for the cleanup (SaveBefore) and reports whether it worked; false at once while a save runs.</summary>
+    internal static void SaveNow(Action<bool> done)
+    {
+        var world = MpPlugin.App?.Server?.Entity.Get<WorldSessionComponent>();
+        if (world == null || _saving || _exiting) { done(false); return; }
+        SaveAndReport(world, done).SkipWait();
+    }
+
+    private static async Keen.VRage.Library.Threading.Task SaveAndReport(WorldSessionComponent world, Action<bool> done)
+    {
+        await Task.SetLifetime(world);
+        bool ok = false;
+        try { ok = await Save(world, false); }
+        finally { done(ok); }
+    }
+
     private static async Keen.VRage.Library.Threading.Task<bool> Save(WorldSessionComponent world, bool exiting)
     {
         await Task.SetLifetime(world);
@@ -575,6 +593,12 @@ internal static class DedicatedRuntime
             if (world == null) throw new InvalidOperationException("World has not loaded yet.");
             Save(world, false).SkipWait();
         }
+        else if (string.Join(' ', command.Split(' ', StringSplitOptions.RemoveEmptyEntries)).Equals("mods check", StringComparison.OrdinalIgnoreCase))
+        {
+            // Admins may run it (RCON): at most once a minute, so it cannot hammer Steam's Web API.
+            if (MpClock.NowMs() - _lastForcedCheckMs < 60_000) GameLog.Instance.Info("console: the Workshop was asked less than a minute ago; try again shortly");
+            else { _lastForcedCheckMs = MpClock.NowMs(); _nextModCheckMs = 0; _modCheckForced = true; GameLog.Instance.Info("console: checking the Workshop for newer versions of this world's mods now"); }
+        }
         else if (command.Equals("mods", StringComparison.OrdinalIgnoreCase)) GameLog.Instance.Info("console: " + DedicatedMods.Describe() + (SyncEngine.BrokenMods.Skipped is { Count: > 0 } skipped ? "; skipped as broken: " + string.Join(", ", skipped) : ""));
         else if (AdminCommand(command)) { }
         else throw new ArgumentException("Unknown dedicated command: " + command);
@@ -627,7 +651,7 @@ internal static class DedicatedRuntime
         if (left > countdown)
         {
             int warn = online ? RestartSchedule.WarnDue(Config.AutoRestart.WarnMinutes, _restartWarned, left) : 0;
-            if (warn > 0 && warn * 60 > countdown) { _restartWarned = warn; Say(_updateVersion != null ? $"Server restart in {warn} min to update Space Engineers 2 Online to {_updateVersion} - finish up and get somewhere safe." : RestartSchedule.WarnText(warn)); }
+            if (warn > 0 && warn * 60 > countdown) { _restartWarned = warn; Say(_updateWhat != null ? $"Server restart in {warn} min to update {_updateWhat} - finish up and get somewhere safe." : RestartSchedule.WarnText(warn)); }
             return;
         }
         if (_lastSaveFailed || _saving)
@@ -637,20 +661,109 @@ internal static class DedicatedRuntime
             GameLog.Instance.Warn("dedicated: scheduled restart postponed to " + _restartAt.Value.ToString("HH:mm") + (_saving ? ": a save is running" : ": the last save failed"));
             return;
         }
-        BeginRestart(app, _updateVersion != null ? "update " + _updateVersion : "scheduled");
+        BeginRestart(app, _updateWhat != null ? "update " + _updateWhat : "scheduled");
     }
 
     // Queued by the runner's live console once it has downloaded and verified a server update: the same warnings as a
     // scheduled restart (AutoRestart.WarnMinutes while players are online, then the countdown), and the same
     // postponement while a save is running or the last one failed.
-    private static string _updateVersion;
+    // What a pending update restart installs ("Space Engineers 2 Online to 0.17.6", "Workshop mod Foo"), or null.
+    private static string _updateWhat;
     private static void UpdateRestart(string version)
     {
-        _updateVersion = version.Length == 0 ? "a new version" : version;
+        _updateWhat = "Space Engineers 2 Online to " + (version.Length == 0 ? "a new version" : version);
         int lead = OnlinePlayers() > 0 ? Config.AutoRestart.WarnMinutes.DefaultIfEmpty(0).Max() : 0;
         _restartAt = DateTime.Now.AddMinutes(lead);
         _restartWarned = int.MaxValue;
-        GameLog.Instance.Info($"dedicated: update {_updateVersion} is verified and staged by the runner; restarting to install it at {_restartAt.Value:HH:mm}");
+        GameLog.Instance.Info($"dedicated: update of {_updateWhat} is verified and staged by the runner; restarting to install it at {_restartAt.Value:HH:mm}");
+        WriteStatus(true);
+    }
+
+    // Workshop mods: a dedicated server downloads them only when it starts, while players joining get the newest version.
+    // Every ModUpdates.CheckMinutes the Web API is asked off the game thread; a newer version gets the same warned restart
+    // as a server update (or, with Restart false, a log line and a chat note). workshop-updates.json remembers what the
+    // server restarted for, so a stale copy from Steam cannot restart it in a loop.
+    private static long _nextModCheckMs;
+    private static bool _modCheckForced;
+    private static System.Threading.Tasks.Task<string> _modCheck;
+    private static readonly System.Net.Http.HttpClient WorkshopApi = new() { Timeout = TimeSpan.FromSeconds(20) };
+    private static readonly System.Collections.Generic.HashSet<string> ModNotes = new();
+    // The content manifest of each installed item, learned at the first check that shows no update since the install.
+    private static readonly System.Collections.Generic.Dictionary<ulong, string> InstalledContent = new();
+    private static long _lastForcedCheckMs = long.MinValue / 2;
+
+    private static void TickModUpdates()
+    {
+        int minutes = Config.ModUpdates.CheckMinutes;
+        long now = MpClock.NowMs();
+        if (_modCheck is { IsCompleted: true } done)
+        {
+            _modCheck = null;
+            string error = done.IsCompletedSuccessfully ? done.Result : done.Exception?.GetBaseException().Message;
+            if (error != null) GameLog.Instance.Info("dedicated: Workshop update check failed (" + error + "); trying again at the next check");
+            else ApplyModUpdates();
+        }
+        if (_modCheck != null || (minutes <= 0 && !_modCheckForced)) return;
+        if (_nextModCheckMs == 0 && !_modCheckForced) { _nextModCheckMs = now + Math.Max(1, minutes) * 60_000L; return; }
+        if (now < _nextModCheckMs) return;
+        _modCheckForced = false;
+        _nextModCheckMs = now + Math.Max(5, minutes) * 60_000L;
+        var installed = DedicatedMods.Installed();
+        if (installed.Count == 0) { GameLog.Instance.Info("dedicated: no Workshop mods to check for updates"); return; }
+        var ids = installed.Keys.Take(WorkshopUpdates.MaxIds).ToList();
+        _modCheck = System.Threading.Tasks.Task.Run(async () =>
+        {
+            using var response = await WorkshopApi.PostAsync(WorkshopUpdates.DetailsUrl, new System.Net.Http.FormUrlEncodedContent(WorkshopUpdates.Form(ids))).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) return "HTTP " + (int)response.StatusCode;
+            string body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            if (body.Length > 4 << 20 || WorkshopUpdates.Parse(body) is not { } details) return "the answer was not Steam's Workshop details";
+            DedicatedMods.Latest = details;
+            return null;
+        });
+    }
+
+    private static void ApplyModUpdates()
+    {
+        string guard = Path.Combine(Config.Directory, "workshop-updates.json");
+        var restarted = WorkshopUpdates.LoadRestarted(guard);
+        var installed = DedicatedMods.Installed();
+        var latest = DedicatedMods.Latest;
+        WorkshopUpdates.Learn(installed, latest, InstalledContent);
+        foreach (ulong id in WorkshopUpdates.Stale(installed, latest, restarted, InstalledContent))
+            if (ModNotes.Add("stale:" + id + ":" + latest[id].TimeUpdated))
+                GameLog.Instance.Warn($"dedicated: Workshop mod {DedicatedMods.NameOf(id)} ({id}) still has its older version after a restart for the {WorkshopUpdates.Time(latest[id].TimeUpdated)} update; Steam served an old copy (or only the mod's page changed), so the server does not restart for it again");
+        var changed = WorkshopUpdates.Changed(installed, latest, restarted, InstalledContent);
+        if (changed.Count == 0) return;
+        string names = string.Join(", ", changed.Select(DedicatedMods.NameOf));
+        string what = changed.Count == 1 ? "Workshop mod " + names : "Workshop mods " + names;
+        if (!Config.ModUpdates.Restart)
+        {
+            if (ModNotes.Add("note:" + string.Join(",", changed.Select(id => id + "@" + latest[id].TimeUpdated))))
+            {
+                GameLog.Instance.Info($"dedicated: {what} updated on the Workshop; ModUpdates.Restart is off, so the next restart loads it");
+                Say($"{what} updated on the Workshop; the next server restart loads it.");
+            }
+            return;
+        }
+        if (_restartRequested) return;
+        int lead = OnlinePlayers() > 0 ? Config.AutoRestart.WarnMinutes.DefaultIfEmpty(0).Max() : 0;
+        DateTime at = DateTime.Now.AddMinutes(lead);
+        foreach (ulong id in changed) restarted[id] = latest[id].TimeUpdated;
+        try { WorkshopUpdates.SaveRestarted(guard, restarted); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            GameLog.Instance.Warn("dedicated: could not write " + guard + " (" + ex.Message + "); not restarting for the mod update, so a stale copy cannot loop");
+            return;
+        }
+        if (_restartAt is DateTime planned && planned <= at)
+        {
+            GameLog.Instance.Info($"dedicated: {what} updated on the Workshop; the restart already planned for {planned:HH:mm} loads it");
+            return;
+        }
+        _updateWhat = what;
+        _restartAt = at;
+        _restartWarned = int.MaxValue;
+        GameLog.Instance.Info($"dedicated: {what} updated on the Workshop; restarting at {at:HH:mm} to load it (restart cancel keeps the old version until the next restart)");
         WriteStatus(true);
     }
 
@@ -667,7 +780,7 @@ internal static class DedicatedRuntime
     {
         bool counting = _restartRequested && _shutdownAtMs != 0;
         _restartRequested = false;
-        _updateVersion = null;
+        _updateWhat = null;
         _shutdownAtMs = 0;
         if (counting) Say("Server restart cancelled.");
         // Skips the restart that was due (or counting down) and plans the one after it.
@@ -694,77 +807,43 @@ internal static class DedicatedRuntime
         app.ExitGame();
     }
 
-    /// <summary>Console moderation: say, kick, ban, unban, bans, admin, deadmin, admins, whitelist.</summary>
+    /// <summary>Console moderation shared with RCON and chat (<see cref="HostCommands"/>): say, kick, ban, unban, bans,
+    /// admin, deadmin, admins, group, whitelist, pvp, raid, pcu, sun, usage, perms, cleanup.</summary>
     internal static bool AdminCommand(string command)
     {
-        string[] words = command.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (words.Length == 0) return false;
-        var network = NetSession.Current;
-        var host = network?.Host;
-        string verb = words[0].ToLowerInvariant();
-        if (verb is not ("say" or "kick" or "ban" or "unban" or "bans" or "admin" or "deadmin" or "admins" or "whitelist" or "pvp" or "raid" or "pcu" or "sun" or "usage")) return false;
-        if (host == null) throw new InvalidOperationException("Multiplayer is not running yet.");
-        string Rest(int from) => string.Join(' ', words.Skip(from));
-        ulong Id(int index) => words.Length > index && ulong.TryParse(words[index], out ulong id) && id != 0 ? id : throw new ArgumentException("Give a SteamID64 (see players).");
-        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        string result;
-        switch (verb)
-        {
-            case "say": host.LocalChat(Rest(1), true); return true;
-            case "pvp":
-                result = words.Length > 1 && words[1] is "on" or "off" ? host.LocalAdmin(new AdminRequest(AdminAction.Pvp, Value: words[1] == "on")) : "PvP is " + (host.Pvp ? "on" : "off") + ". Use pvp on|off.";
-                break;
-            case "pcu":
-                result = words.Length > 1 && (words[1] is "off" or "default" || int.TryParse(words[1], out _))
-                    ? host.LocalAdmin(new AdminRequest(AdminAction.PcuLimit, Size: words[1] == "off" ? 0 : words[1] == "default" ? -1 : int.Parse(words[1])))
-                    : "PCU limit: " + (host.PcuLimit is int limit ? (limit == 0 ? "unlimited" : limit.ToString("N0")) : "the world's own setting") + ". Use pcu <number>|off|default.";
-                break;
-            case "sun":
-                var invariant = System.Globalization.CultureInfo.InvariantCulture;
-                result = words.Length > 1 && words[1] is "on" or "off" ? host.LocalAdmin(new AdminRequest(AdminAction.SunRotation, Value: words[1] == "on"))
-                    : words.Length > 2 && words[1] == "day" && double.TryParse(words[2], System.Globalization.NumberStyles.Float, invariant, out double day) ? host.LocalAdmin(new AdminRequest(AdminAction.SunPeriod, Size: day))
-                    : words.Length > 2 && words[1] == "move" && double.TryParse(words[2], System.Globalization.NumberStyles.Float, invariant, out double deg) ? host.LocalAdmin(new AdminRequest(AdminAction.SunNudge, Value: true, Size: deg))
-                    : words.Length > 2 && words[1] == "set" && double.TryParse(words[2], System.Globalization.NumberStyles.Float, invariant, out double angle) ? host.LocalAdmin(new AdminRequest(AdminAction.SunSet, Value: true, Size: angle))
-                    : "Sun rotation is " + (host.SunInForce.Rotation ? "on" : "off") + ", one full day every " + AccessList.DayLength(host.SunInForce.PeriodMinutes) + $", sun at {host.SunDegrees:0} degrees. Use sun on|off, sun day <minutes>, sun move <degrees>, sun set <0-360>.";
-                break;
-            case "usage":
-                string usageError = "";
-                if (words.Length > 2 && ResourceMultipliers.Current.TryWith(words[1], words[2], out var usage, out usageError)) { ResourceMultipliers.Current = usage; result = "Resource usage now " + usage.Describe() + " (until restart; set Network.EnergyUsageMultiplier etc. in server.json to keep it)."; }
-                else result = (words.Length > 2 ? usageError + " " : "") + "Resource usage: " + ResourceMultipliers.Current.Describe() + ". Use usage energy|hydrogen|oxygen <0-10>.";
-                break;
-            case "raid":
-                result = words.Length > 1 && words[1] is "on" or "off" ? host.LocalAdmin(new AdminRequest(AdminAction.OfflineRaidProtection, Value: words[1] == "on")) : "Offline raid protection is " + (host.OfflineRaidProtection ? "on" : "off") + ". Use raid on|off.";
-                break;
-            case "kick": result = host.LocalAdmin(new AdminRequest(AdminAction.Kick, Id(1), Rest(2))); break;
-            case "ban":
-                int minutes = 0, reasonFrom = 2;
-                if (words.Length > 2 && (int.TryParse(words[2], out minutes) || words[2].Equals("perm", StringComparison.OrdinalIgnoreCase))) reasonFrom = 3;
-                result = host.LocalAdmin(new AdminRequest(AdminAction.Ban, Id(1), Rest(reasonFrom), Math.Max(0, minutes))); break;
-            case "unban": result = host.LocalAdmin(new AdminRequest(AdminAction.Unban, Id(1))); break;
-            case "admin": result = host.LocalAdmin(new AdminRequest(AdminAction.Promote, Id(1))); break;
-            case "deadmin": result = host.LocalAdmin(new AdminRequest(AdminAction.Demote, Id(1))); break;
-            case "bans":
-                var bans = host.Access.Copy(now).Bans;
-                result = bans.Length == 0 ? "No active bans." : string.Join("\n", bans.Select(b => $"{b.SteamId}  {b.Name}  {(b.ExpiresUnixMs is long end ? AccessList.Remaining(end - now) + " left" : "permanent")}  {b.Reason}"));
-                break;
-            case "admins":
-                var admins = host.Access.Copy(now).Admins;
-                result = admins.Length == 0 ? "No admins. Use admin <SteamID64>." : string.Join("\n", admins.Select(a => $"{a.SteamId}  {a.Name}"));
-                break;
-            default:
-                string sub = words.Length > 1 ? words[1].ToLowerInvariant() : "list";
-                result = sub switch
-                {
-                    "on" => host.LocalAdmin(new AdminRequest(AdminAction.WhitelistOnly, Value: true)),
-                    "off" => host.LocalAdmin(new AdminRequest(AdminAction.WhitelistOnly, Value: false)),
-                    "add" => host.LocalAdmin(new AdminRequest(AdminAction.WhitelistAdd, Id(2))),
-                    "remove" => host.LocalAdmin(new AdminRequest(AdminAction.WhitelistRemove, Id(2))),
-                    _ => (host.Access.WhitelistOnly ? "Whitelist enforced. " : "Whitelist not enforced. ") + string.Join(", ", host.Access.Copy(now).Whitelist.Select(w => w.SteamId + " " + w.Name))
-                };
-                break;
-        }
-        GameLog.Instance.Info("console: " + result);
+        string result = HostCommands.Run(NetSession.Current?.Host, command);
+        if (result == null) return false;
+        if (result.Length > 0) GameLog.Instance.Info("console: " + result);
         return true;
+    }
+
+    // Players' /commands in chat, a few per tick, each run as its player (permissions and rank checked like the panel).
+    private static void RunChatCommands(GameAppComponent app)
+    {
+        var host = NetSession.Current?.Host;
+        if (host == null) return;
+        for (int i = 0; i < 4 && host.ChatCommands.TryDequeue(out var command); i++)
+            host.RunChatCommand(command, line =>
+            {
+                var captured = new System.Text.StringBuilder();
+                GameLog.Capture = captured;
+                string reply;
+                try
+                {
+                    string verb = Core.RconAccess.Verb(line);
+                    reply = verb switch
+                    {
+                        "status" => Status + " | Players: " + OnlinePlayers() + "/" + Config.Network.MaxPlayers + " | SE2 Online " + MpPlugin.Version,
+                        "players" => "Online: " + string.Join(", ", host.AccessPlayers().Where(p => p.Connected).Select(p => p.Name)),
+                        _ => null
+                    };
+                    if (reply == null && verb == "motd") SetMotd(line.Length > 4 ? line[4..].Trim() : "");
+                    else if (reply == null && verb == "mods") RunCommand(app, string.Join(' ', line.Split(' ', StringSplitOptions.RemoveEmptyEntries).Take(2)).ToLowerInvariant());
+                    else if (reply == null && !AdminCommand(line)) reply = "That command runs on the server console only.";
+                }
+                finally { GameLog.Capture = null; }
+                return reply ?? captured.ToString().Replace("console: ", "").TrimEnd('\n');
+            });
     }
 
     private static bool ExitPrefix(GameApp __instance)

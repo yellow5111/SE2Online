@@ -29,6 +29,11 @@ internal static class AdminAccess
     /// <summary>True offline too: single player keeps the game's own free camera and tools.</summary>
     public static bool LocalIsAdmin => !Joined || LocalRole != OnlineRole.Player;
 
+    /// <summary>Every group's name and chat style: the host's own table, or the one the server sent.</summary>
+    public static System.Collections.Generic.Dictionary<string, GroupStyle> Styles => Hosting ? Host.Perms.Styles() : Client?.Admin.Styles ?? new();
+
+    public static GroupStyle StyleOf(string group) => group != null && Styles.TryGetValue(group, out var style) ? style : null;
+
     public static AdminState State
     {
         get
@@ -63,7 +68,7 @@ internal static class AdminAccess
     {
         if (string.IsNullOrWhiteSpace(text)) return;
         if (text.Trim().Equals("/admin", StringComparison.OrdinalIgnoreCase)) { MpMenu.OpenAdmin("/admin"); return; }
-        if (VoiceCommand(text.Trim()) || TradeUi.Command(text.Trim()) || HackUi.Command(text.Trim())) return;
+        if (VoiceCommand(text.Trim()) || TradeUi.Command(text.Trim()) || HackUi.Command(text.Trim()) || PingClient.Command(text.Trim())) return;
         if (Hosting) Host.LocalChat(text, false);
         else Client?.SendChat(text);
     }

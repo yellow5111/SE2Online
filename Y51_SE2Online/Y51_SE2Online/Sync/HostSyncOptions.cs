@@ -65,6 +65,10 @@ public sealed class HostSyncOptions
 	/// <summary>Players hear each other within this many metres; 0 turns voice off.</summary>
 	public double VoiceRadiusMeters;
 
+	public PingSettings Pings = PingSettings.Default;
+
+	public MarkerDefaults MarkerDefaults = new();
+
 	public int PcuInForce;
 
 	/// <summary>Sun settings from the host or server config: null keeps the world's own.</summary>
@@ -77,5 +81,26 @@ public sealed class HostSyncOptions
 	public Action<bool>? OfflineRaidChanged;
 
 	public Action<bool>? PvpChanged;
+
+	/// <summary>Permissions in force; null builds the 0.17 rights from <see cref="Access"/> in memory.</summary>
+	public PermissionSet? Permissions;
+
+	/// <summary>Where the group files and players.json are, for perms reload; null when there are none.</summary>
+	public string? PermissionsFolder, PlayersFile;
+
+	/// <summary>server.json OwnerSteamIds: players who are owners like the console (dedicated servers).</summary>
+	public ulong[]? OwnerSteamIds;
+
+	/// <summary>Whether an identity's own creative tools and god mode are on (the world, read every 2 s).</summary>
+	public Func<long, (bool Creative, bool Invulnerable)>? ModeOf;
+
+	/// <summary>The cleanup's state line for the console and the panel.</summary>
+	public Func<string>? CleanupStatus;
+
+	/// <summary>The cleanup settings in force, as JSON.</summary>
+	public Func<string>? CleanupConfig;
+
+	/// <summary>Runs a world admin action now and returns its answer (game thread only: console, RCON and chat commands).</summary>
+	public Func<Y51_SE2Online.Net.PeerId?, ushort, AdminRequest, string?>? RunWorldAdmin;
 
 }

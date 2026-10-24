@@ -40,6 +40,8 @@ public enum SyncMsg : byte
 	SpawnMenu = 71,
 	InputAck = 72,
 	GpsShare = 73,
+	// Pings (HostSession.Pings.cs): a player's ping up, the host's ping down to each player who may see it.
+	PingSend = 74,
 	BuildGhost = 75,
 	VoiceUp = 76,
 	VoiceDown = 77,
@@ -62,6 +64,7 @@ public enum SyncMsg : byte
 	RulesOffer = 84,
 	RulesAck = 85,
 	// Counted down from SyncProtocol.IsSyncMessage's upper bound.
+	PingShow = 93,
 	DesyncReport = 94,
 	DesyncCheck = 95,
 	// Roster patches (RosterDocs.cs); a free slot, clear of the values other changes count up and down from.

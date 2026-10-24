@@ -36,8 +36,11 @@ public interface IRconHost
 	Task<ulong> ServerSteamIdAsync(CancellationToken cancel);
 	/// <summary>Ends the Steam auth session a successful check started.</summary>
 	void EndSteam(ulong steamId);
-	/// <summary>Admin when the account is on the server's admin list, else Player. Null while the list cannot be read.</summary>
+	/// <summary>Owner, Admin or Player for display (an owner runs every command). Null while the permissions cannot be read.</summary>
 	string RoleOf(ulong steamId);
+	/// <summary>The command words this Steam sign-in may run ("*" for all); empty when it may not use RCON at all
+	/// (0.18: rcon.connect and command.&lt;verb&gt; permissions).</summary>
+	List<string> CommandsFor(RconCaller caller);
 	string NameOf(ulong steamId);
 }
 
@@ -114,7 +117,7 @@ public static class RconAccess
 	public static readonly string[] Commands =
 	[
 		"help", "status", "players", "json", "save", "say", "kick", "ban", "unban", "bans", "admin", "deadmin", "admins",
-		"whitelist", "pvp", "raid", "pcu", "sun", "usage", "mods", "motd", "restart", "stop"
+		"whitelist", "pvp", "raid", "pcu", "sun", "usage", "mods", "motd", "restart", "stop", "group", "perms", "cleanup"
 	];
 
 	public static Dictionary<string, List<string>> DefaultRoles() => new(StringComparer.OrdinalIgnoreCase)
@@ -150,14 +153,24 @@ public static class RconAccess
 		return verb is "help" or "" || list.Contains("*") || list.Contains(verb);
 	}
 
-	/// <summary>Every *Password* value (the join password, RconPassword) becomes "(set)" or "": json config never carries a secret.</summary>
+	// Key bindings end in "Key" too; they are the only such settings that are not secrets.
+	private static readonly HashSet<string> KeyBindings = new(StringComparer.OrdinalIgnoreCase) { "ChatKey", "PlayersKey", "AdminKey", "BroadcastKey", "VoiceKey", "EmoteKey", "HackKey", "PingKey", "MarkerFilterKey" };
+
+	/// <summary>Whether a config option holds a secret: any name with password, secret, token or credential in it, or one
+	/// ending in Key (an API or private key) except the key bindings.</summary>
+	public static bool Secret(string name) =>
+		name.Contains("password", StringComparison.OrdinalIgnoreCase) || name.Contains("secret", StringComparison.OrdinalIgnoreCase)
+		|| name.Contains("token", StringComparison.OrdinalIgnoreCase) || name.Contains("credential", StringComparison.OrdinalIgnoreCase)
+		|| name.EndsWith("key", StringComparison.OrdinalIgnoreCase) && !KeyBindings.Contains(name);
+
+	/// <summary>Every secret value (<see cref="Secret"/>: the join password, RconPassword, any token or key) becomes "(set)" or "": json config never carries one.</summary>
 	public static void Redact(System.Text.Json.Nodes.JsonNode node)
 	{
 		if (node is System.Text.Json.Nodes.JsonObject obj)
 		{
 			foreach (var (key, value) in obj.ToList())
 			{
-				if (key.Contains("password", StringComparison.OrdinalIgnoreCase))
+				if (Secret(key))
 					obj[key] = value is System.Text.Json.Nodes.JsonValue v && v.TryGetValue(out string text) && text.Length == 0 ? "" : "(set)";
 				else Redact(value);
 			}
@@ -456,9 +469,10 @@ public sealed class RconServer : IDisposable
 		string role = _host.RoleOf(id);
 		string name = _host.NameOf(id);
 		if (role == null) return ("The server's admin list is not loaded yet; try again in a moment.", null);
-		if (RconAccess.ListFor(_o.Roles, role).Count == 0)
-			return ($"{name} ({id}) has no remote console access on this server (role {role}). The owner can make you an admin (admin {id}) or give the {role} role commands in RconRoles.", null);
-		return (null, new RconCaller { Address = address, SteamId = id, Name = name, Role = role });
+		var caller = new RconCaller { Address = address, SteamId = id, Name = name, Role = role };
+		if (role != RconCaller.Owner && _host.CommandsFor(caller).Count == 0)
+			return ($"{name} ({id}) has no remote console access on this server. The owner can put you in a group with rcon.connect (group set {id} admin).", null);
+		return (null, caller);
 	}
 
 	private async Task<string> Run(Session session, string command)
@@ -472,7 +486,7 @@ public sealed class RconServer : IDisposable
 			string role = _host.RoleOf(caller.SteamId);
 			if (role != null) caller.Role = role;
 		}
-		var allowed = RconAccess.ListFor(_o.Roles, caller.Role);
+		var allowed = caller.Role == RconCaller.Owner ? ["*"] : _host.CommandsFor(caller);
 		if (allowed.Count == 0)
 		{
 			session.Done = true;

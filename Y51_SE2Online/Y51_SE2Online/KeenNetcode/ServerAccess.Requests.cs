@@ -36,6 +36,7 @@ namespace Y51_SE2Online.KeenNetcode;
 internal static partial class ServerAccess
 {
 	internal static readonly bool SeatOff = Off("seats");
+	private static readonly bool InteractionsOff = Off("interactions");
 	private static readonly bool SpawnOff = Off("spawn requests"), CopyOff = Off("grid copies"), SaveOff = Off("save requests"), DepositOff = Off("deposit all"), OwnerOff = Off("default owner");
 
 	private const long AutosaveEveryMs = 300_000;
@@ -84,17 +85,104 @@ internal static partial class ServerAccess
 		return false;
 	}
 
-	// The player whose signals are being replayed on the server (Y51PeerTransport around its signal replay).
+	// The player whose signals are being replayed on the server (Y51PeerTransport around its signal replay), and the signal.
 	[ThreadStatic] private static ClientId? _signalClient;
+	[ThreadStatic] private static string? _signalName;
 
-	internal static ClientId? EnterSignal(ClientId client)
+	internal static (ClientId? Client, string? Name) EnterSignal(ClientId client, string? name = null)
 	{
-		var before = _signalClient;
+		var before = (_signalClient, _signalName);
 		_signalClient = client;
+		_signalName = name;
 		return before;
 	}
 
-	internal static void LeaveSignal(ClientId? before) => _signalClient = before;
+	internal static void LeaveSignal((ClientId? Client, string? Name) before) => (_signalClient, _signalName) = before;
+
+	/// <summary>
+	/// Server, a player's signal: a door, on/off, landing gear or light signal on a block the player may not use
+	/// (InteractionRules). Admins too: only a player's own access bypass lifts it. (A pilot parks through the grid's
+	/// ToggleParkingBrakes story, not these.)
+	/// </summary>
+	internal static bool RefusesSignal(ClientId client, string signal, Entity target, out bool predicted)
+	{
+		predicted = false;
+		if (InteractionsOff || !Enforcing || target == null || !Y51_SE2Online.Sync.InteractionRules.IsBlockUse(signal, out predicted)) return false;
+		var who = IdentityOf(client);
+		if ((long)who != 0 && MayUse(null, who, Y51_SE2Online.SyncEngine.WorldSocial.BlockOf(target) ?? target, basicUse: true)) return false;
+		Refused++;
+		if (LogDue(client, "block-use")) GameLog.Instance.Info($"access: refused identity {(long)who}'s {Y51_SE2Online.Engine.OwnSignals.Short(signal)} on {target.GetComposition()?.DebugNameShort} (no access; further ones within 5 s not logged)");
+		return true;
+	}
+
+	/// <summary>
+	/// A player's story that uses a block (item slots, tank slots, medical rooms, clearing a toolbar) on one the player may
+	/// not use, or in the name of an inventory that is not the player's own living character (a tank slot fills from the
+	/// "interactor": a modified client named another player's container): it still runs, with arguments that do nothing
+	/// (no slot or toolbar, the block itself as the user), so the player's game gets the answer of an empty slot. A faulted
+	/// one reached the async void interaction that awaits it.
+	/// </summary>
+	private static bool BlockUseRefused(ClientId sender, IAsyncStateMachine story)
+	{
+		var type = story.GetType();
+		if (InteractionsOff || Y51_SE2Online.Sync.InteractionRules.StoryUse(type.DeclaringType?.Name, StoryName(type)) is not { } use) return false;
+		var target = use.Field == "<>4__this" ? Field<Component>(story, use.Field)?.Entity : Field<SkipOnReplicationFail<Entity>>(story, use.Field).Value;
+		var who = IdentityOf(sender);
+		if (target == null) return false;
+		var interactor = AccessTools.Field(type, "interactor");
+		bool ownBody = interactor == null || Field<SkipOnReplicationFail<Entity>>(story, "interactor").Value is { } body
+			&& body.TryGet<CharacterLifeComponent>() is { IsAlive: true } && TeamPermissions.OwnerOf(body) == (long)who;
+		if ((long)who != 0 && ownBody && MayUse(null, who, target, basicUse: true, useKey: use.Key)) return false;
+		if (AccessTools.Field(type, "slotIndex") is { } slot) slot.SetValue(story, -1);
+		else if (AccessTools.Field(type, "toolbarIndex") is { } toolbar) toolbar.SetValue(story, -1);
+		else interactor?.SetValue(story, new SkipOnReplicationFail<Entity>(target));
+		Refused++;
+		if (LogDue(sender, "block-use")) GameLog.Instance.Info($"access: refused identity {(long)who}'s {type.DeclaringType?.Name}.{StoryName(type)} on {target.GetComposition()?.DebugNameShort} (no access; further ones within 5 s not logged)");
+		return true;
+	}
+
+	/// <summary>
+	/// A player's story that reads or edits a block toolbar by id, or writes a toolbar model's selection, on a block the
+	/// player may not use (use.toolbar). A read or edit runs with no toolbar (index -1, an id nothing has), so the player's
+	/// game gets the answer of a toolbar that is gone (null); a selection write is cancelled, which the game's client takes
+	/// as a settled write. A faulted one reached the async void screens that await these.
+	/// </summary>
+	private static bool ToolbarUseRefused(ClientId sender, ref IAsyncStateMachine story)
+	{
+		var type = story.GetType();
+		if (InteractionsOff || Y51_SE2Online.Sync.InteractionRules.ToolbarStory(type.DeclaringType?.Name, StoryName(type)) is not { } field) return false;
+		Entity? block;
+		try
+		{
+			block = AccessTools.Field(type, field)?.GetValue(story) switch
+			{
+				Keen.VRage.Multiplayer.SecureIds.EntityId id when type.DeclaringType == typeof(Keen.Game2.Simulation.StreamedUI.Terminal.ControlPanel.StreamedControlPanelSessionComponent)
+					=> Field<Keen.Game2.Simulation.StreamedUI.Terminal.ControlPanel.ControlPanelListModel>(story, "controlPanel") is { } panel
+						? Field<Keen.Game2.Simulation.StreamedUI.Terminal.ControlPanel.StreamedControlPanelSessionComponent>(story, "<>4__this")?.AsEntity(id, panel) : null,
+				Keen.VRage.Multiplayer.SecureIds.EntityId id => ToolbarBlock(id),
+				Keen.VRage.Multiplayer.Replications.ReplicatedObjectRef { Value: Keen.Game2.Simulation.WorldObjects.CubeBlocks.Toolbar.BlockToolbarModel model } => ToolbarBlock(model.Id),
+				_ => null,
+			};
+		}
+		catch (Exception ex)
+		{
+			GameLog.Instance.WarnOnce("toolbar-check-failed", $"access: could not find the toolbar a story names ({ex.GetType().Name}: {ex.Message}); allowed");
+			return false;
+		}
+		if (block == null) return false;
+		var who = IdentityOf(sender);
+		if ((long)who != 0 && MayUse(null, who, block, useKey: "use.toolbar")) return false;
+		if (AccessTools.Field(type, "toolbarIndex") is { } index) index.SetValue(story, -1);
+		else if (field == "id") AccessTools.Field(type, field).SetValue(story, new Keen.VRage.Multiplayer.SecureIds.EntityId());
+		else story = new CancelledStory("a toolbar the player may not use");
+		Refused++;
+		if (LogDue(sender, "toolbar-read")) GameLog.Instance.Info($"access: refused identity {(long)who}'s {type.DeclaringType?.Name}.{StoryName(type)} on {block.GetComposition()?.DebugNameShort} toolbar (no access; further ones within 5 s not logged)");
+		return true;
+	}
+
+	private static Entity? ToolbarBlock(Keen.VRage.Multiplayer.SecureIds.EntityId id)
+		=> MpPlugin.App?.ServerSession?.SessionComponents.TryGet<Keen.Game2.Simulation.StreamedUI.Terminal.ControlPanel.BlockToolbarReplicationServerSessionComponent>() is { } toolbars
+			&& toolbars._idToToolbar.TryGetValue(id, out var toolbar) ? toolbar.Entity : null;
 
 	/// <summary>The checks a player's story gets past the generic ones, by story; null lets it run.</summary>
 	private static string? RequestRefusal(ClientId sender, long caller, IAsyncStateMachine story)
@@ -121,7 +209,7 @@ internal static partial class ServerAccess
 		{
 			var pilot = Field<SkipOnReplicationFail<Entity>>(story, "pilot").Value;
 			bool leaving = pilot != null && TeamPermissions.OwnerOf(pilot) == caller;
-			if (!leaving && !MayUse(null, new IdentityId(caller), seat._block.Entity)) return "a seat the player may not use";
+			if (!leaving && !MayUse(null, new IdentityId(caller), seat._block.Entity, useKey: "use.seat")) return "a seat the player may not use";
 		}
 		if (owner == typeof(BlueprintHelpers) && name == "SerializeGrid" && !CopyOff)
 		{
@@ -154,7 +242,8 @@ internal static partial class ServerAccess
 	{
 		if (!Enforcing || _signalClient is not { } client || client == ClientId.Server) return true;
 		long caller = (long)IdentityOf(client);
-		if (IsAdminIdentity(caller)) return true;
+		if (!HasClient(client, "use.deposit_all", unknownAllowed: true)) { Refused++; return false; }
+		if (HasClient(client, "bypass.requests")) return true;
 		Entity? from = fromInventoryHolder.Value, to = toInventoryHolder.Value;
 		string? refused = from == null || to == null ? "an inventory that is gone"
 			: from.TryGet<CharacterLifeComponent>() is not { IsAlive: true } || TeamPermissions.OwnerOf(from) != caller ? "items out of someone else's inventory"

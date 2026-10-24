@@ -79,6 +79,12 @@ internal static class SyncProperties
 		}
 	}
 
+	/// <summary>The entity's values go to players at the next refresh as if they had just changed.</summary>
+	internal static void Touch(Entity entity)
+	{
+		lock (ChangedMs) ChangedMs[entity] = MpClock.NowMs();
+	}
+
 	private static bool ChangedSince(Entity entity, long sinceMs)
 	{
 		lock (ChangedMs) return ChangedMs.TryGetValue(entity, out long at) && at >= sinceMs;

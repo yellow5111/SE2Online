@@ -110,6 +110,8 @@ public sealed class SocialState
     public List<TaggedAntenna> TaggedAntennas { get; set; } = new();
     /// <summary>The world's block lists carry their owner (<see cref="BlockAcl.Owner"/>); older lists were stamped once.</summary>
     public bool AclOwners { get; set; }
+    /// <summary>The first load of this world since 0.18.0 has reviewed its grids' sharing (<see cref="SharingAtLoad"/>).</summary>
+    public bool SharingReviewed { get; set; }
     /// <summary>Players whose suit broadcast was last off; their parked character gets no name tag while they are offline.</summary>
     public HashSet<long> Silent { get; set; } = new();
     /// <summary>
@@ -135,6 +137,20 @@ public sealed class SocialState
     public bool MayTag(long owner, long actor)
         => PlayerIdentities.IsHuman(actor) && PlayerIdentities.IsHuman(owner) && (owner == actor || FactionOf(owner) is { } f && f.Members.Contains(actor) && f.RoleOf(actor) >= FactionRole.Admin);
     public static bool CanManageGrid(long owner, long actor) => PlayerIdentities.IsHuman(actor) && (owner == actor || owner == 0);
+
+    /// <summary>
+    /// Host, world load: the sharing a player's grid gets, or null to keep it. <paramref name="chosen"/>: the grid carries
+    /// SE2 Online's own sharing. Team grids share the grids of a world SE2 Online never hosted (an older or single-player
+    /// world), once. A grid with SE2 Online's sharing always keeps it: up to 0.18.0-pre4 team grids wrote "everyone" at
+    /// every load, and that value cannot be told apart from an owner's own choice (see <see cref="SharingUndecided"/>).
+    /// </summary>
+    public static GridSharing? SharingAtLoad(bool chosen, GridSharing current, bool teamGrids, bool hostedBefore, bool reviewed)
+        => chosen ? null : teamGrids && !hostedBefore ? GridSharing.Everyone : current;
+
+    /// <summary>The first load since 0.18.0-pre5 of a world hosted with team grids: a grid shared with everyone may be the old
+    /// team grids rule or its owner's choice. It stays shared and is counted in the log.</summary>
+    public static bool SharingUndecided(bool chosen, GridSharing current, bool teamGrids, bool hostedBefore, bool reviewed)
+        => chosen && current == GridSharing.Everyone && teamGrids && hostedBefore && !reviewed;
 
     /// <summary>
     /// Host: the stable key (Steam id) of the player playing as <see cref="PlayerIdentities.HotfixIdentity"/>, the identity

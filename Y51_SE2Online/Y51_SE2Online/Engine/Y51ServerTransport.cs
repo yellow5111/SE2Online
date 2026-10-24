@@ -351,6 +351,20 @@ internal sealed class Y51ServerTransport : Y51PeerTransport, IServerPeerTranspor
 
 	protected override bool AcceptData(int typeId, Entity target, bool removal) => Y51Replication.ClientMayWrite(PeerClientId, typeId, target, _writes, FramesIn);
 
+	// Doors, on/off and landing gear need the block's use access (SE2 4.0 checks none of them). The player's game already
+	// flipped a refused on/off itself: the block's values go back to it.
+	protected override bool AcceptSignal(OwnSignal signal)
+	{
+		if (signal.Target is not Entity target || !KeenNetcode.ServerAccess.RefusesSignal(PeerClientId, signal.Name, target, out bool predicted)) return true;
+		if (predicted)
+		{
+			long at = MpClock.NowMs();
+			SyncProperties.Touch(target);
+			RefreshSyncProperties(new[] { target }, at);
+		}
+		return false;
+	}
+
 	// A player's request whose arguments did not survive the trip arrives with nulls and faults inside the game's own code;
 	// this names the request and the argument, once per kind.
 	private static void NoteNullArguments(IAsyncStateMachine machine)

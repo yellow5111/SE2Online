@@ -6,14 +6,18 @@ using Y51_SE2Online.Sync;
 
 namespace Y51_SE2Online.Core;
 
-public sealed class OnlineSettings
+public sealed class OnlineSettings : System.Text.Json.Serialization.IJsonOnDeserializing
 {
     public string SessionName { get; set; } = "My SE2 session";
     public string Description { get; set; } = "";
-    /// <summary>Publishes the session (host SteamID64, names, player counts) to the public directory; off unless the host turns it on.</summary>
-    public bool Advertise { get; set; }
-    /// <summary>Set once the host has saved the Host screen, so Advertise reflects a real choice.</summary>
-    public bool AdvertiseChosen { get; set; }
+    /// <summary>Publishes the session (host SteamID64, names, player counts) to the public directory. On for new settings; a file without the key keeps the old default, off.</summary>
+    public bool Advertise { get; set; } = true;
+    /// <summary>Set once the host has saved the Host screen (and for new settings), so Advertise reflects a real choice.</summary>
+    public bool AdvertiseChosen { get; set; } = true;
+
+    // Runs before a file's values are read: a key the file leaves out keeps the default it was written under (listing off),
+    // only new settings start public. FriendsOnly is left alone: a dedicated server.json that omits it must stay false.
+    void System.Text.Json.Serialization.IJsonOnDeserializing.OnDeserializing() { Advertise = false; AdvertiseChosen = false; }
     /// <summary>Asks se2-online.yellow51.dev for the newest release once per game start.</summary>
     public bool CheckForUpdates { get; set; } = true;
     /// <summary>Plain -plugins: installs download, verify and install a newer release themselves, then offer a restart.</summary>
@@ -21,6 +25,7 @@ public sealed class OnlineSettings
     public bool AllowDirectIp { get; set; } = true;
     public string BindAddress { get; set; } = "0.0.0.0";
     public int ListenPort { get; set; } = 7742;
+    /// <summary>Advanced override: the address the server is listed at. Empty lists the one the directory sees (see ListedAddress).</summary>
     public string PublicAddress { get; set; } = "";
     public string ServersDirectory { get; set; } = "https://se2-online-servers.yellow51.dev";
     public string SessionsDirectory { get; set; } = "https://se2-online-sessions.yellow51.dev";
@@ -28,9 +33,12 @@ public sealed class OnlineSettings
     public const string UnstablePlayersWarning = "More than 64 players may be unstable (lag, desync, long saves).";
     public static bool Unstable(int maxPlayers) => maxPlayers > StablePlayers;
     public int MaxPlayers { get; set; } = 8;
-    public bool FriendsOnly { get; set; } = true;
+    /// <summary>New hosts start public (listed, anyone can join); every saved settings file states its own choice.</summary>
+    public bool FriendsOnly { get; set; }
     public string PlayerName { get; set; } = "";
-    public bool TeamGrids { get; set; } = true;
+    /// <summary>A world SE2 Online never hosted shares its grids with everyone when it is first hosted. Off for new hosts: up
+    /// to 0.18.0-pre4 it shared every grid without SE2 Online's sharing at every load.</summary>
+    public bool TeamGrids { get; set; }
     public bool SharedResearch { get; set; } = true;
     public bool Nametags { get; set; } = true;
     public double NametagRange { get; set; } = 200;
@@ -54,8 +62,7 @@ public sealed class OnlineSettings
         {
             string text = PublicAddress?.Trim() ?? "";
             if (text.Length == 0) return "";
-            if (System.Net.IPAddress.TryParse(text, out var ip))
-                return (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 ? "[" + ip + "]" : ip.ToString()) + ":" + ListenPort.ToString(CultureInfo.InvariantCulture);
+            if (System.Net.IPAddress.TryParse(text, out var ip)) return ListedAddress.Endpoint(ip, ListenPort);
             return text.Contains(':') ? text : text + ":" + ListenPort.ToString(CultureInfo.InvariantCulture);
         }
     }
@@ -87,7 +94,11 @@ public sealed class OnlineSettings
     public bool DesyncChecks { get; set; } = true;
     /// <summary>Hosting: players see the placement outline of anyone building near them.</summary>
     public bool BuildGhosts { get; set; } = true;
-    /// <summary>Hosting: the respawn ships players may choose (Pathfinder, ...); empty offers every ship.</summary>
+    /// <summary>Hosting: the respawn ships built from blueprints (the Banana Boat and the Atmospheric Lander by default).</summary>
+    public List<Sync.RespawnBlueprint> RespawnBlueprints { get; set; } = Sync.RespawnShips.DefaultBlueprints();
+    /// <summary>Hosting: also offer the vanilla encounter ships (Pathfinder, Nova 35, ...) as respawn ships.</summary>
+    public bool VanillaRespawnShips { get; set; }
+    /// <summary>Hosting: with <see cref="VanillaRespawnShips"/>, the vanilla ships players may choose (Pathfinder, ...); empty offers every ship.</summary>
     public List<string> RespawnShips { get; set; } = new();
     /// <summary>Hosting: minutes before a player can take another respawn ship; 0 for no wait.</summary>
     public int RespawnShipCooldownMinutes { get; set; } = 10;
@@ -136,6 +147,38 @@ public sealed class OnlineSettings
     /// <summary>Hosting: wait before the same grid can be locked down again.</summary>
     public int HackLockdownCooldownSeconds { get; set; } = 300;
     public string HackKey { get; set; } = "Alt+H";
+    /// <summary>Tap: ping what you look at. Hold: the radial menu (Go, Danger, Mine, Build, Regroup, Look). Ctrl+key on a ping keeps it as a GPS marker.</summary>
+    public string PingKey { get; set; } = "Alt+G";
+    /// <summary>Tap: cycle the marker filter (All, Relevant, Pings only, Off). Hold: the per-category toggles.</summary>
+    public string MarkerFilterKey { get; set; } = "Alt+M";
+    /// <summary>The player's marker filter, "" for the server's default.</summary>
+    public string MarkerMode { get; set; } = "";
+    /// <summary>The player's marker categories turned off (pings, gps, players, signals, quest, ore); null for the server's default.</summary>
+    public List<string> MarkersOff { get; set; }
+    /// <summary>How many of our markers show in full in the Relevant filter (3 to 10).</summary>
+    public int MarkerFullCount { get; set; } = Sync.MarkerRelevance.DefaultFullCount;
+    /// <summary>Markers within this many degrees of the crosshair always show in full (2 to 30).</summary>
+    public double MarkerAimDegrees { get; set; } = 8;
+    /// <summary>Hosting: who sees a player's pings: faction (default), allies (faction and allied factions), all, or range.</summary>
+    public string PingAudience { get; set; } = "faction";
+    /// <summary>Hosting, with PingAudience range: players within this many metres of the pinger see it (their faction always does).</summary>
+    public double PingRangeMeters { get; set; } = 5000;
+    /// <summary>Hosting: seconds a ping stays.</summary>
+    public int PingLifetimeSeconds { get; set; } = 60;
+    /// <summary>Hosting: pings in a burst, then one every PingRefillSeconds.</summary>
+    public int PingBurst { get; set; } = 3;
+    public double PingRefillSeconds { get; set; } = 5;
+    /// <summary>Hosting: how far from their character a player may ping, in metres.</summary>
+    public double PingMaxRangeMeters { get; set; } = 2000;
+    /// <summary>Hosting: words replaced by *** in ping labels (none by default).</summary>
+    public List<string> PingWordFilter { get; set; } = new();
+    /// <summary>Hosting: the marker filter players start with (a player's own choice overrides it).</summary>
+    public Sync.MarkerDefaults MarkerDefaults { get; set; } = new();
+
+    /// <summary>The ping settings as the host uses them.</summary>
+    public Sync.PingSettings PingSettingsOf()
+        => new(Sync.PingRules.TryAudience(PingAudience, out var audience) ? audience : Sync.PingAudience.Faction, PingRangeMeters, PingLifetimeSeconds, PingBurst, PingRefillSeconds, PingMaxRangeMeters,
+            (PingWordFilter ?? new()).Where(w => !string.IsNullOrWhiteSpace(w)).Select(w => w.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
 
     public string Validate()
     {
@@ -160,6 +203,17 @@ public sealed class OnlineSettings
         if (!Sync.VoiceRelay.ValidRadius(VoiceRadiusMeters)) return $"Voice radius must be 0 (off) or between {Sync.VoiceRelay.MinRadius:0} and {Sync.VoiceRelay.MaxRadius:0} metres.";
         if (VoiceVolume < 0 || VoiceVolume > 200) return "Voice volume must be between 0 and 200 percent.";
         if (Sync.RespawnShips.Validate(RespawnShips, RespawnShipCooldownMinutes) is { } ships) return ships;
+        if (Sync.RespawnShips.ValidateBlueprints(RespawnBlueprints) is { } blueprints) return blueprints;
+        if (!Sync.PingRules.TryAudience(PingAudience, out _)) return "PingAudience must be faction, allies, all or range.";
+        if (!(PingRangeMeters >= 50 && PingRangeMeters <= 1_000_000)) return "Ping range must be between 50 and 1000000 metres.";
+        if (PingLifetimeSeconds < Sync.PingRules.MinLifetimeS || PingLifetimeSeconds > Sync.PingRules.MaxLifetimeS) return $"Ping lifetime must be between {Sync.PingRules.MinLifetimeS} and {Sync.PingRules.MaxLifetimeS} seconds.";
+        if (PingBurst < 1 || PingBurst > 20 || !(PingRefillSeconds >= 0.5 && PingRefillSeconds <= 600)) return "Ping burst must be 1 to 20 and the refill 0.5 to 600 seconds.";
+        if (!(PingMaxRangeMeters >= 10 && PingMaxRangeMeters <= 1_000_000)) return "Ping maximum range must be between 10 and 1000000 metres.";
+        if (PingWordFilter == null || PingWordFilter.Count > 500) return "PingWordFilter must be a list of at most 500 words.";
+        if (!(MarkerAimDegrees >= 2 && MarkerAimDegrees <= 30)) return "MarkerAimDegrees must be between 2 and 30.";
+        if (MarkerFullCount < Sync.MarkerRelevance.MinFullCount || MarkerFullCount > Sync.MarkerRelevance.MaxFullCount) return $"MarkerFullCount must be between {Sync.MarkerRelevance.MinFullCount} and {Sync.MarkerRelevance.MaxFullCount}.";
+        if (MarkerDefaults == null || !Sync.PingRules.TryMode(MarkerDefaults.Mode, out _)) return "MarkerDefaults.Mode must be all, relevant, pings or off.";
+        if ((MarkerDefaults.Off ?? new()).Any(c => !Sync.PingRules.TryCategory(c, out _))) return "MarkerDefaults.Off may list pings, gps, players, signals, quest and ore.";
         if (MaxModDownloadGiB < 1 || MaxModDownloadGiB > ModDownloads.MaxGiBLimit) return $"Workshop download limit must be between 1 and {ModDownloads.MaxGiBLimit} GiB.";
         if (MutedVoices == null|| MutedVoices.Count > MaxMutedVoices) return "Too many muted players.";
         if (HackRules.Validate(this) is string hacking) return hacking;
@@ -171,7 +225,7 @@ public sealed class OnlineSettings
         if (Motd == null || Motd.Length > Core.Motd.MaxText) return $"The message of the day can be at most {Core.Motd.MaxText} characters.";
         if (MotdTitle == null || MotdTitle.Length > Core.Motd.MaxTitle || MotdTitle.Any(char.IsControl)) return $"The message of the day title must be at most {Core.Motd.MaxTitle} characters on one line.";
         if (PcuLimit < 0) return "PCU limit must be 0 (unlimited) or more; leave it empty to keep the world's limit.";
-        foreach (var (label, key) in new[] { ("Chat", ChatKey), ("Players", PlayersKey), ("Admin panel", AdminKey), ("Suit broadcast", BroadcastKey), ("Push to talk", VoiceKey), ("Emotes", EmoteKey), ("Hack", HackKey) })
+        foreach (var (label, key) in new[] { ("Chat", ChatKey), ("Players", PlayersKey), ("Admin panel", AdminKey), ("Suit broadcast", BroadcastKey), ("Push to talk", VoiceKey), ("Emotes", EmoteKey), ("Hack", HackKey), ("Ping", PingKey), ("Marker filter", MarkerFilterKey) })
             if (!KeyBinding.TryParse(key, out _)) return label + " key binding '" + key + "' is not a valid key.";
         return null;
     }
@@ -241,6 +295,8 @@ public sealed class OnlineSettings
         options.OnePilot = OnePilot;
         options.DesyncChecks = DesyncChecks;
         options.VoiceRadiusMeters = VoiceRadiusMeters;
+        options.Pings = PingSettingsOf();
+        options.MarkerDefaults = MarkerDefaults ?? new();
         options.UsageMultipliers = UsageMultipliers;
         options.InventorySizes = InventorySizes;
         options.ServersDirectory = ServersDirectory;

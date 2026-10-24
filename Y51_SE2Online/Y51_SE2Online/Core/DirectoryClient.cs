@@ -15,6 +15,8 @@ public sealed class DirectoryLease
 {
     public string Id { get; set; } = "";
     public string Token { get; set; } = "";
+    /// <summary>The address the directory listed the server at when it registered (0.18.0 directories); "" when it did not say.</summary>
+    public string Address { get; set; } = "";
 }
 
 public sealed class DirectoryClient : IDisposable
@@ -33,6 +35,22 @@ public sealed class DirectoryClient : IDisposable
         _http.Timeout = TimeSpan.FromSeconds(8);
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("Y51_SE2Online/0.10");
     }
+
+    /// <summary>A publisher whose announce reaches the directory over IPv4, so the IP it sees is the one an IPv4 game port listens on.</summary>
+    public static DirectoryClient Ipv4(string service) => new(service, new SocketsHttpHandler
+    {
+        ConnectCallback = async (context, cancellation) =>
+        {
+            var addresses = await Dns.GetHostAddressesAsync(context.DnsEndPoint.Host, System.Net.Sockets.AddressFamily.InterNetwork, cancellation).ConfigureAwait(false);
+            var socket = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp) { NoDelay = true };
+            try
+            {
+                await socket.ConnectAsync(addresses, context.DnsEndPoint.Port, cancellation).ConfigureAwait(false);
+                return new System.Net.Sockets.NetworkStream(socket, ownsSocket: true);
+            }
+            catch { socket.Dispose(); throw; }
+        }
+    });
 
     public static void ValidateServiceUrl(string service)
     {
@@ -74,8 +92,10 @@ public sealed class DirectoryClient : IDisposable
         }, Json)!.AsObject();
         // Sent only when configured: the directory locates "auto" servers itself, and directories older than 0.15.2 refuse unknown fields.
         if (Countries.IsCode(listing.Country)) body["country"] = listing.Country;
-        bool extras = Environment.TickCount64 >= _extrasAfterMs && (listing.PingLocation.Length > 0 || listing.Mods.Length > 0);
+        bool extras = Environment.TickCount64 >= _extrasAfterMs && (listing.PingLocation.Length > 0 || listing.Mods.Length > 0 || listing.AutoAddressPort > 0);
         if (extras && listing.PingLocation.Length > 0) body["pingLocation"] = listing.PingLocation;
+        // Directories before 0.18.0 refuse it and list the Address sent (the server's own guess) instead.
+        if (extras && listing.AutoAddressPort > 0) body["autoAddressPort"] = listing.AutoAddressPort;
         if (extras && listing.Mods.Length > 0) body["mods"] = JsonSerializer.SerializeToNode(listing.Mods, Json);
         request.Content = new StringContent(body.ToJsonString(Json), Encoding.UTF8, "application/json");
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellation).ConfigureAwait(false);
@@ -90,6 +110,9 @@ public sealed class DirectoryClient : IDisposable
         if (lease != null) return lease;
         var result = JsonSerializer.Deserialize<DirectoryLease>(await ReadBounded(response, cancellation).ConfigureAwait(false), Json);
         if (result == null || result.Id.Length is < 1 or > 128 || result.Token.Length is < 16 or > 256) throw new InvalidDataException("The directory returned an invalid publication token.");
+        try { if (!string.IsNullOrEmpty(result.Address)) ServerEndpoint.Parse(result.Address); }
+        catch (FormatException) { result.Address = ""; }
+        result.Address ??= "";
         return result;
     }
 

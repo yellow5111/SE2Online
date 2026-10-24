@@ -76,6 +76,7 @@ internal sealed partial class HostWorld
 
     public void OnPunch(ushort fromClientId, ushort targetClientId)
     {
+        if (_host != null && !_host.AllowedClient(fromClientId, "emote.use")) return;
         if (_punchShare.Admit(fromClientId)) _punches.Enqueue((fromClientId, targetClientId));
     }
 
@@ -93,6 +94,7 @@ internal sealed partial class HostWorld
         string? refused = null;
         long now = MpClock.NowMs();
         if (character == null || character != CharacterOf(clientId)) refused = "You can only play emotes on your own character.";
+        else if (_host != null && !_host.AllowedClient(clientId, "emote.use")) refused = "Your group may not play emotes.";
         else if (_lastEmote.TryGetValue(clientId, out long last) && now - last < 500) refused = "Slow down with the emotes.";
         else _lastEmote[clientId] = now;
         if (_emoteLogs++ < 40) _log.Info($"emotes: ClientId {clientId} asks for {emote.DebugNameShort}: {refused ?? "playing it"}");

@@ -48,6 +48,68 @@ internal sealed partial class HostWorld
         return rows.Count == 0 ? "no planets" : string.Join("\n", rows);
     }
 
+    /// <summary>The planet's picture name under Content\Textures\GUI\Planets: the generator name in lower case, letters and
+    /// digits ("verdure"). Not the generator GUID: Keen gives each planet version a new one, and old versions stay in use.</summary>
+    internal static string PlanetBody(VoxelPlanetComponent p)
+    {
+        string name = new string((p.Generator.Name ?? "").ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
+        return RespawnShips.SafePreview(name.Length > 0 ? name : p.Generator.Guid.ToString("N"));
+    }
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> PlanetInfos = new();
+
+    private static readonly Guid Oxygen = new("d129d38e-116d-4424-a1a8-bbb298ac9dba");
+
+    // Weather prefabs by the start of their definition GUID (PlanetWeatherDefinition.DefaultWeatherProbability).
+    private static readonly (string Prefix, string Name)[] Weathers =
+        { ("649948d9", "rain"), ("c2bfe3ae", "acid rain"), ("a86c3ea1", "snow"), ("7782a2fb", "snowstorms"), ("216bf3d2", "sandstorms"), ("d1e9b263", "sandstorms"), ("4b636df6", "meteor showers") };
+
+    /// <summary>A destination card's extra line: breathable air, weather and ores, as the planet's definitions say.</summary>
+    private static string PlanetInfo(Entity planet, VoxelPlanetComponent p)
+        => PlanetInfos.GetOrAdd(p.Generator.Guid.ToString("N") + (planet.TryGet<PlanetBiomeMapComponent>()?.Definition?.Guid.ToString("N") ?? ""), _ =>
+        {
+            var parts = new List<string>();
+            try
+            {
+                var atmosphere = planet.TryGet<AtmosphereGeneratorComponent>()?._definition;
+                parts.Add(atmosphere == null || atmosphere.Density <= 0 ? "No air: wear your helmet outside"
+                    : atmosphere.Resource?.Guid == Oxygen ? "Breathable air" : "Air you cannot breathe: keep your helmet on");
+            }
+            catch (Exception) { }
+            try
+            {
+                if (planet.TryGet<Keen.Game2.Simulation.GameSystems.Weather.PlanetWeatherServerComponent>()?._definition is { } weather)
+                {
+                    var kinds = new List<string>();
+                    foreach (var w in weather.DefaultWeatherProbability)
+                        if (w.Probability > 0 && w.Prefab != null && Weathers.FirstOrDefault(k => w.Prefab.Guid.ToString("N").StartsWith(k.Prefix, StringComparison.Ordinal)).Name is { } kind && !kinds.Contains(kind))
+                            kinds.Add(kind);
+                    if (kinds.Count > 0) parts.Add("Weather: " + string.Join(", ", kinds));
+                }
+            }
+            catch (Exception) { }
+            try
+            {
+                if (planet.TryGet<PlanetBiomeMapComponent>()?.Definition?.BiomeMap is { } map)
+                {
+                    var ores = map.SurfaceBiomes.Cast<Keen.VRage.Voxels.Storage.Planet.IPlanetBiome>().Concat(map.UndergroundBiomes.Cast<Keen.VRage.Voxels.Storage.Planet.IPlanetBiome>())
+                        .Where(b => b?.OresByProbability != null).SelectMany(b => b.OresByProbability.GetRegions()).SelectMany(r => r.PossibleValues)
+                        .Select(o => OreName(o.Material?.DebugNameShort)).Where(n => n.Length > 0).Distinct().ToList();
+                    if (ores.Count > 0) parts.Add("Ores: " + string.Join(", ", ores));
+                }
+            }
+            catch (Exception) { }
+            return string.Join(". ", parts) + (parts.Count > 0 ? "." : "");
+        });
+
+    // "IronOre" or "Ore_Iron" style debug names read as "iron"; the planet's core is not an ore.
+    private static string OreName(string? debug)
+    {
+        if (string.IsNullOrWhiteSpace(debug)) return "";
+        string name = debug.Replace("Ore", "", StringComparison.OrdinalIgnoreCase).Replace("_", " ").Trim().ToLowerInvariant();
+        return name.Contains("core") || name.Length == 0 ? "" : name;
+    }
+
     /// <summary>Surface air density of a planet (its atmosphere generator's density; 0 without one).</summary>
     private static double AirDensity(Entity planet) => planet.TryGet<AtmosphereGeneratorComponent>()?._definition?.Density ?? 0;
 
@@ -72,13 +134,17 @@ internal sealed partial class HostWorld
         {
             if (EngineCodec.IsDead(planet)) continue;
             var p = planet.Get<VoxelPlanetComponent>();
-            double gravity = SurfaceGravity(session, planet);
-            foreach (var ship in RespawnShips.ForPlanet(ShipSettings?.RespawnShips, gravity, AirDensity(planet)))
+            double gravity = SurfaceGravity(session, planet), air = AirDensity(planet);
+            var place = RespawnShips.Classify(p.Generator.IsMoon, air);
+            foreach (var ship in ShipsFor(place, gravity, air))
             {
-                bool hasShip = Singleton<DefinitionManager>.Instance.TryGetDefinition(ship.Prefab, out PrefabDefinition _);
-                string detail = !hasShip ? "Not available in this game version" : wait > 0 ? $"Available again in {(wait + 59_999) / 60_000} min"
+                bool hasShip = ShipExists(ship);
+                string detail = !hasShip ? (ship.Blueprint != null ? "Its blueprint is missing on the server" : "Not available in this game version") : wait > 0 ? $"Available again in {(wait + 59_999) / 60_000} min"
                     : $"{ship.Detail}; lands on {p.Name} ({gravity / 9.81:0.0#} g), fuelled and yours to keep";
-                targets.Add(new(new SpawnOption(SpawnKind.Ship, $"{p.Name} surface: {ship.Name}", detail, hasShip && wait <= 0), null, ship, p.Id));
+                targets.Add(new(new SpawnOption(SpawnKind.Ship, SocialState.Clean(p.Name, 64), detail, hasShip && wait <= 0, Place: SocialState.Clean(p.Name, 64),
+                    Status: !hasShip ? SpawnStatus.Unavailable : wait > 0 ? SpawnStatus.Cooldown : SpawnStatus.Available, Preview: ship.Preview, Tag: RespawnShips.Tag(ship),
+                    Group: ship.Name, Destination: p.Generator.IsMoon ? SpawnDestination.Moon : SpawnDestination.Planet, Gravity: gravity / 9.81, Air: air,
+                    Body: PlanetBody(p), Info: PlanetInfo(planet, p)), null, ship, p.Id));
             }
         }
     }
@@ -108,7 +174,8 @@ internal sealed partial class HostWorld
         if (target.Planet == default) return StartShip(session, j, respawn, target.Ship!);
         var planet = session.GetEntitiesOfType<VoxelPlanetComponent>().FirstOrDefault(e => !EngineCodec.IsDead(e) && e.Get<VoxelPlanetComponent>().Id == target.Planet);
         var encounters = session.SessionComponents.TryGet<EncounterSessionComponent>();
-        if (planet == null || encounters == null || !Singleton<DefinitionManager>.Instance.TryGetDefinition(target.Ship!.Prefab, out PrefabDefinition prefab)) return false;
+        PrefabDefinition? prefab = null;
+        if (planet == null || target.Ship!.Blueprint == null && (encounters == null || !Singleton<DefinitionManager>.Instance.TryGetDefinition(target.Ship.Prefab, out prefab))) return false;
         var site = FindSite(session, planet, respawn.WorldSpawn.Position);
         if (site == null)
         {
@@ -116,25 +183,35 @@ internal sealed partial class HostWorld
             return false;
         }
         site.Ship = target.Ship;
+        if (target.Ship.Blueprint != null)
+        {
+            // Spawned outside the gravity well (nothing falls while its creation reaches the players); PlaceOnPlanet then
+            // moves it over the site like an encounter lander.
+            if (!StartBlueprintShip(session, j, target.Ship, new WorldTransform(OpenSpace(session, site.Ground), respawn.WorldSpawn.Orientation), lander: true)) return false;
+            _planetSites.AddOrUpdate(j, site);
+            return true;
+        }
         _planetSites.AddOrUpdate(j, site);
         _shipChosen[j.ClientId] = target.Ship;
         j.ShipRoots = null;
+        j.ShipBlueprint = false;
         j.ShipDeadline = MpClock.NowMs() + ShipSpawnTimeoutMs;
         j.ShipPending = true;
+        long request = ++j.ShipRequest;
         // A cargo encounter needs open space for its route (it fails inside a gravity well); the lander is moved to the site anyway.
         var anchor = new WorldTransform(OpenSpace(session, site.Ground), respawn.WorldSpawn.Orientation);
-        SpawnLander(session, encounters, prefab, anchor, j);
+        SpawnLander(session, encounters!, prefab!, anchor, j, request);
         _log.Info($"host spawn: landing site for ClientId {j.ClientId} on {planet.Get<VoxelPlanetComponent>().Name} at ({site.Ground.X:0},{site.Ground.Y:0},{site.Ground.Z:0})");
         return true;
     }
 
-    private async void SpawnLander(Session session, EncounterSessionComponent encounters, PrefabDefinition prefab, WorldTransform at, Joiner j)
+    private async void SpawnLander(Session session, EncounterSessionComponent encounters, PrefabDefinition prefab, WorldTransform at, Joiner j, long request)
     {
-        try { j.ShipRoots = await SpawnEncounter(session, encounters, prefab, at, missions: false); }
+        try { HandOver(j, request, await SpawnEncounter(session, encounters, prefab, at, missions: false)); }
         catch (Exception ex)
         {
             _log.Warn("host spawn: spawning the planet lander failed: " + ex.Message);
-            j.ShipRoots = Array.Empty<Entity>();
+            HandOver(j, request, Array.Empty<Entity>());
         }
     }
 

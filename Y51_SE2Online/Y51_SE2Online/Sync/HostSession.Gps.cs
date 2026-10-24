@@ -9,6 +9,7 @@ public sealed partial class HostSession
 	private void HandleGpsShare(RemoteClient c, byte[] data)
 	{
 		if (c.Status != ClientStatus.Synced || data.Length > 1024) return;
+		if (!Allowed(PeerAlias.SteamOf(c.Peer.Value), "gps.share")) { Reply(c.Peer, "Your group may not share GPS markers."); return; }
 		Share(c.Player.ClientId, DisplayName(c.Player), c.Peer.Value, SocialMessage.Decode<GpsShare>(data));
 	}
 
@@ -17,7 +18,7 @@ public sealed partial class HostSession
 
 	private void Share(ushort from, string fromName, ulong sender, GpsShare share)
 	{
-		if (share.To == from) return;
+		// To yourself: "Keep" on a ping saves it as your own GPS marker.
 		if (!_chatThrottle.Allow(sender, _clock()))
 		{
 			GpsNotice(from, "You are sharing markers too quickly.");

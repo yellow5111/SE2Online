@@ -221,7 +221,18 @@ internal sealed class JoinStatusUi
 			detail = info.What;
 		}
 		var tip = LoadScreenLayout.Tip(info.Seed, now);
-		return new LoadScreenLayout.View(info.Server, info.World, line, detail, LoadScreenLayout.Percent(stage, info.Percent, readiness), tip.Key, tip.Title + ": " + tip.Text);
+		return new LoadScreenLayout.View(info.Server, info.World, line, detail, LoadScreenLayout.Percent(stage, info.Percent, readiness), BoundKey(tip.Key), tip.Title + ": " + tip.Text);
+	}
+
+	// The tips name the default keys; a player who rebound one sees their own key.
+	private static string BoundKey(string key)
+	{
+		var settings = MpMenu.Settings;
+		return key switch
+		{
+			"Ctrl+F10" => settings.AdminKey, "F3" => settings.PlayersKey, "Enter" => settings.ChatKey, "I" => settings.VoiceKey,
+			"N" => settings.EmoteKey, "O" => settings.BroadcastKey, _ => key
+		} is { Length: > 0 } bound ? bound : key;
 	}
 
 	internal void Apply(SharedUIComponent shared, JoinProgress progress, long now)

@@ -13,6 +13,7 @@ public sealed partial class HostSession
 	private void HandleVoice(RemoteClient c, byte[] data)
 	{
 		if (c.Status != ClientStatus.Synced || c.Player == null || !VoiceMessage.TryDecodeUp(data, out uint seq, out byte[] frame)) return;
+		if (!Allowed(PeerAlias.SteamOf(c.Peer.Value), "voice.speak")) return;
 		Relay(c.Player.ClientId, seq, frame);
 	}
 

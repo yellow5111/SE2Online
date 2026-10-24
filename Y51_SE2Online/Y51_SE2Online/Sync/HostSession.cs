@@ -253,6 +253,7 @@ public sealed partial class HostSession : IStorySink
 		Keys = keys;
 		_o = options;
 		_clock = clock ?? new Func<long>(MpClock.NowMs);
+		InitPermissions();
 		_fan = new StateFanout(IntervalFor);
 		_t.PeerConnected += OnConnected;
 		_t.PeerDisconnected += OnDisconnected;
@@ -329,6 +330,8 @@ public sealed partial class HostSession : IStorySink
 			_world.CancelCapture(peer);
 		}
 		PlayerRecord player = client.Player;
+		if (player != null && client.Status == ClientStatus.Synced) NoteSeen(PeerAlias.SteamOf(peer.Value), player.Name, player.IdentityId);
+		lock (_sync) _chatReplies.Remove(peer);
 		_world.ForgetStories(peer);
 		_world.PeerLeft(peer);
 		if (player != null)
@@ -377,6 +380,7 @@ public sealed partial class HostSession : IStorySink
 			case SyncMsg.ChatSend:
 			case SyncMsg.AdminRequest:
 			case SyncMsg.GpsShare:
+			case SyncMsg.PingSend:
 			case SyncMsg.Punch:
 			case SyncMsg.OwnMotion:
 			case SyncMsg.ServerInfo:
@@ -493,7 +497,8 @@ public sealed partial class HostSession : IStorySink
 		}
 		lock (_sync)
 		{
-			if (client.Player == null && _clients.Values.Count(c => c.Player != null && c.Peer != peer) >= _o.MaxPlayers - (_o.HostCountsAsPlayer ? 1 : 0))
+			if (client.Player == null && _clients.Values.Count(c => c.Player != null && c.Peer != peer) >= _o.MaxPlayers - (_o.HostCountsAsPlayer ? 1 : 0)
+				&& !Allowed(PeerAlias.SteamOf(peer.Value), "join.bypass_full"))
 			{
 				Reject(peer, "The session is full.");
 				return;
@@ -540,7 +545,7 @@ public sealed partial class HostSession : IStorySink
 				// Reuse the record when it is offline or this is the same PC rejoining; otherwise try the next suffix.
 				if (!record.Peer.HasValue || !(record.Peer != peer))
 				{
-					record.Name = name;
+					record.Name = GuardName(name, peer);
 					record.Peer = peer;
 					record.Joins++;
 					record.CharacterNetId = 0;
@@ -556,7 +561,7 @@ public sealed partial class HostSession : IStorySink
 			record = new PlayerRecord
 			{
 				Key = key,
-				Name = name,
+				Name = GuardName(name, peer),
 				ClientId = _nextClientId++,
 				Peer = peer,
 				Joins = 1
@@ -576,9 +581,9 @@ public sealed partial class HostSession : IStorySink
 
 	public void PlayerIdentified(ushort clientId, long identity, long player)
 	{
+		PlayerRecord record = null;
 		lock (_sync)
 		{
-			PlayerRecord record = null;
 			foreach (PlayerRecord p in _players.Values)
 			{
 				if (p.ClientId == clientId)
@@ -593,6 +598,7 @@ public sealed partial class HostSession : IStorySink
 			record.IdentityId = identity;
 			record.PlayerId = player;
 		}
+		if (identity != 0L && record.Peer is PeerId seen) NoteSeen(PeerAlias.SteamOf(seen.Value), record.Name, identity);
 		if (identity != 0L)
 		{
 			PushPlayerTable();
@@ -751,6 +757,9 @@ public sealed partial class HostSession : IStorySink
 			break;
 		case SyncMsg.GpsShare:
 			HandleGpsShare(client, data);
+			break;
+		case SyncMsg.PingSend:
+			HandlePing(client, data);
 			break;
 		case SyncMsg.Punch:
 			if (client.Status == ClientStatus.Synced && data.Length <= 64) _world.OnPunch(client.Player.ClientId, SocialMessage.Decode<PunchRequest>(data).Target);
@@ -1438,7 +1447,8 @@ public sealed partial class HostSession : IStorySink
 			password = client.JoinPassword;
 		}
 		// Bans, the whitelist or the password may have changed since this player was accepted (mod downloads take minutes).
-		if (_o.Access.CheckJoin(PeerAlias.SteamOf(peer.Value), password, _o.Password, _o.SessionName, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) is { } verdict)
+		ulong account = PeerAlias.SteamOf(peer.Value);
+		if (_o.Access.CheckJoin(account, password, _o.Password, _o.SessionName, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), key => Allowed(account, key)) is { } verdict)
 		{
 			_log.Warn($"sync(host): {peer} no longer passes the join check ({(verdict.Code == JoinRejectCode.Removed ? "banned" : verdict.Text)}); refusing the world");
 			_t.Send(peer, Channel.Control, TextMessage.Encode(SyncMsg.JoinReject, verdict.Code, verdict.Text));
