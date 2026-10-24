@@ -287,7 +287,8 @@ internal static class Wire
 public static class BuildGhostMessage
 {
 	/// <summary>Ghosts for the local player, from the host's own relay (listen host) or a down message.</summary>
-	public static Action<ushort, BuildGhost> Received;
+	/// <summary>Builder, ghost, whether it came on the reliable lane.</summary>
+	public static Action<ushort, BuildGhost, bool> Received;
 
 	/// <summary>The host's "show build previews" setting, read live.</summary>
 	public static Func<bool> HostEnabled = () => true;
@@ -348,6 +349,8 @@ public sealed class GhostThrottle
 		if (!due) return null;
 		_sent = now;
 		_sentMs = ms;
+		// After a clear the first preview carries its shape again (viewers drop the old one), and so goes reliable.
+		if (!now.Active) { _shapeId = 0; _shapeMs = long.MinValue / 2; }
 		if (now.Pose is not { } pose || now.Shape == null) return now with { Shape = null };
 		if (pose.ShapeId == _shapeId && ms - _shapeMs < KeepAliveMs) return now with { Shape = null };
 		_shapeId = pose.ShapeId;
@@ -405,6 +408,65 @@ public sealed class GhostRelay
 	}
 }
 
+/// <summary>
+/// Which lane a ghost goes on. Poses without a shape stream on the unreliable State lane, so one lost packet does not
+/// hold every later pose for a round trip; clears and shapes stay on the reliable Control lane. Handlers on both ends
+/// read the message whatever lane it came on, so the bytes are the same as before.
+/// </summary>
+public static class GhostLane
+{
+	public static bool Reliable(BuildGhost g) => !g.Active || g.Shape != null;
+
+	/// <summary>An unreliable pose this soon after a reliable clear may be one sent before it: it would bring a cancelled preview back.</summary>
+	public const long AfterClearMs = 300;
+}
+
+/// <summary>
+/// Viewer side: eases a remote preview toward each new pose (time constant <see cref="TauMs"/>) instead of stepping at
+/// the 10 Hz send rate. It snaps on the first pose, a new shape, a jump over <see cref="JumpMeters"/> or a turn over
+/// <see cref="TurnDegrees"/>. The wire carries no time, so this is smoothing, not timed interpolation: about one tau late,
+/// like remote characters' own playback.
+/// </summary>
+public sealed class GhostSmoother
+{
+	public const double TauMs = 60, JumpMeters = 8, TurnDegrees = 60;
+
+	private static readonly double TurnDot = Math.Cos(TurnDegrees / 2 * Math.PI / 180);
+
+	private bool _has;
+	private uint _key;
+	private long _ms;
+	private Vec3D _p;
+	private float _x, _y, _z, _w;
+
+	public void Reset() => _has = false;
+
+	public (Vec3D Position, float Qx, float Qy, float Qz, float Qw) Step(uint key, Vec3D target, float qx, float qy, float qz, float qw, long nowMs)
+	{
+		float dot = _x * qx + _y * qy + _z * qz + _w * qw;
+		if (!_has || key != _key || (target - _p).Length > JumpMeters || Math.Abs(dot) < TurnDot)
+		{
+			(_has, _key, _ms, _p, _x, _y, _z, _w) = (true, key, nowMs, target, qx, qy, qz, qw);
+			return (_p, _x, _y, _z, _w);
+		}
+		double a = 1 - Math.Exp(-Math.Max(0, nowMs - _ms) / TauMs);
+		_ms = nowMs;
+		_p += (target - _p) * a;
+		if (dot < 0) (qx, qy, qz, qw) = (-qx, -qy, -qz, -qw);
+		float k = (float)a, x = _x + (qx - _x) * k, y = _y + (qy - _y) * k, z = _z + (qz - _z) * k, w = _w + (qw - _w) * k;
+		float n = MathF.Sqrt(x * x + y * y + z * z + w * w);
+		if (n > 1e-6f) (_x, _y, _z, _w) = (x / n, y / n, z / n, w / n);
+		return (_p, _x, _y, _z, _w);
+	}
+
+	/// <summary>A box eased as a whole (centre and rotation; its size snaps).</summary>
+	public GhostBox Step(GhostBox target, long nowMs)
+	{
+		var (p, x, y, z, w) = Step(0, target.Center, target.Qx, target.Qy, target.Qz, target.Qw, nowMs);
+		return target with { Center = p, Qx = x, Qy = y, Qz = z, Qw = w };
+	}
+}
+
 /// <summary>Viewer side: the latest ghost and shape per builder; one not refreshed by the keep-alive is gone.</summary>
 public sealed class GhostBoard
 {
@@ -412,15 +474,22 @@ public sealed class GhostBoard
 
 	private readonly Dictionary<ushort, (BuildGhost Ghost, long AtMs, GhostShape Shape)> _ghosts = new();
 
-	public void Put(ushort builder, BuildGhost g, long ms)
+	private readonly Dictionary<ushort, long> _clearedMs = new();
+
+	public void Put(ushort builder, BuildGhost g, long ms) => Put(builder, g, ms, reliable: true);
+
+	/// <summary><paramref name="reliable"/>: it came on the Control lane (<see cref="GhostLane"/>).</summary>
+	public void Put(ushort builder, BuildGhost g, long ms, bool reliable)
 	{
 		lock (_ghosts)
 		{
 			if (!g.Active)
 			{
 				_ghosts.Remove(builder);
+				if (reliable) _clearedMs[builder] = ms;
 				return;
 			}
+			if (!reliable && _clearedMs.TryGetValue(builder, out long cleared) && ms - cleared < GhostLane.AfterClearMs) return;
 			GhostShape shape = g.Shape ?? (_ghosts.TryGetValue(builder, out var old) ? old.Shape : null);
 			_ghosts[builder] = (g with { Shape = null }, ms, shape);
 		}
@@ -428,7 +497,7 @@ public sealed class GhostBoard
 
 	public void Clear()
 	{
-		lock (_ghosts) _ghosts.Clear();
+		lock (_ghosts) { _ghosts.Clear(); _clearedMs.Clear(); }
 	}
 
 	/// <summary>Live ghosts; Shape is set only when it is the one the ghost's pose shows.</summary>

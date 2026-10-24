@@ -57,6 +57,7 @@ internal static class BuildGhostModels
 		public RelativeTransform InverseRoot;
 		public bool? Blocked;
 		public int Blocks;
+		public readonly GhostSmoother Smooth = new();
 	}
 
 	internal static int Count => Models.Count;
@@ -201,7 +202,8 @@ internal static class BuildGhostModels
 
 	private static void Place(Model model, GhostPose pose, bool blocked)
 	{
-		WorldTransform at = HostTransform(pose, model.InverseRoot);
+		var (p, x, y, z, w) = model.Smooth.Step(pose.ShapeId, pose.Position, pose.Qx, pose.Qy, pose.Qz, pose.Qw, MpClock.NowMs());
+		WorldTransform at = HostTransform(pose with { Position = p, Qx = x, Qy = y, Qz = z, Qw = w }, model.InverseRoot);
 		model.Preview.Data.SetWorldTransform(in at);
 		// Before its preview grids exist an opacity change would not reach the blocks made later.
 		if (model.Blocked == blocked || model.Preview._previewGrids.Count == 0) return;

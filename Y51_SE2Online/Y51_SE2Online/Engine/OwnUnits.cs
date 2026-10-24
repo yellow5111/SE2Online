@@ -53,10 +53,13 @@ internal static class OwnArchive
 
 	/// <summary>Every value of an archive; one that cannot be read here (it names an object this side does not have) is a
 	/// failure of its own, the rest still read.</summary>
-	public static Leaves Read(byte[] bytes, ServiceLocatorContext.Builder services)
+	public static Leaves Read(byte[] bytes, ServiceLocatorContext.Builder services) => Read(new ArraySegment<byte>(bytes), services);
+
+	/// <summary>The archive read where it lies inside a received unit: a big world's batch (52 MiB) is not copied out first.</summary>
+	public static Leaves Read(ArraySegment<byte> bytes, ServiceLocatorContext.Builder services)
 	{
-		if (bytes.Length == 0) return new Leaves(Array.Empty<object?>(), Array.Empty<Exception?>());
-		using var stream = new MemoryStream(bytes, writable: false);
+		if (bytes.Count == 0) return new Leaves(Array.Empty<object?>(), Array.Empty<Exception?>());
+		using var stream = new MemoryStream(bytes.Array!, bytes.Offset, bytes.Count, writable: false);
 		using var context = new SerializationContext(stream, "SE2 Online values", services);
 		CheckSizes(bytes, context);
 		stream.Position = 0;
@@ -115,15 +118,15 @@ internal static class OwnArchive
 	// what a length claims before its read fails (caught, garbage afterwards; the game's own netcode had the same). A
 	// bound needs a hook in the game's collection serializers, which are precompiled and inline their length reads.
 
-	private static void CheckSizes(byte[] bytes, SerializationContext context)
+	private static void CheckSizes(ArraySegment<byte> bytes, SerializationContext context)
 	{
-		using var probe = new MemoryStream(bytes, writable: false);
+		using var probe = new MemoryStream(bytes.Array!, bytes.Offset, bytes.Count, writable: false);
 		var header = BinaryArchiveParser.TryReadHeader(probe, out var validation) ?? throw new InvalidDataException("values: " + validation);
-		long limit = Math.Min(ArchiveCap(_fromServer && !_budgeted), bytes.Length * 16L + 4096), total = 0;
+		long limit = Math.Min(ArchiveCap(_fromServer && !_budgeted), bytes.Count * 16L + 4096), total = 0;
 		// Tables may be packed (the game's writer packs its type table) but inflate at most 16:1; chunks are written unpacked.
 		void Entry(long offset, long size, long inflated, CompressionType compression, bool chunk)
 		{
-			if (offset < 0 || size < 0 || offset + size > bytes.Length) throw new InvalidDataException($"values: an entry at {offset} of {size} bytes in {bytes.Length}");
+			if (offset < 0 || size < 0 || offset + size > bytes.Count) throw new InvalidDataException($"values: an entry at {offset} of {size} bytes in {bytes.Count}");
 			if (chunk && compression != CompressionType.None && inflated != 0) throw new InvalidDataException("values: a packed chunk");
 			long most = compression == CompressionType.None ? size : Math.Min(limit, size * 16 + 4096);
 			if (inflated < 0 || inflated > most) throw new InvalidDataException($"values: an entry claims {inflated} bytes from {size}");
@@ -155,7 +158,7 @@ internal static class OwnArchive
 	/// name an entry that exists, without cycles and no deeper than <see cref="MaxTypeDepth"/>; the counts must fit the
 	/// table (the game allocates by them first).
 	/// </summary>
-	private static void CheckTypeTable(byte[] bytes, in ArchiveHeader header)
+	private static void CheckTypeTable(ArraySegment<byte> bytes, in ArchiveHeader header)
 	{
 		var entry = header.TypeTable;
 		if (entry.UncompressedSize == 0) return;
@@ -164,7 +167,7 @@ internal static class OwnArchive
 		else
 		{
 			table = new byte[entry.UncompressedSize];
-			using var packed = new MemoryStream(bytes, (int)entry.Offset, (int)entry.EntrySize, writable: false);
+			using var packed = new MemoryStream(bytes.Array!, bytes.Offset + (int)entry.Offset, (int)entry.EntrySize, writable: false);
 			using Stream unpack = entry.CompressionType switch
 			{
 				CompressionType.Brotli => new BrotliStream(packed, CompressionMode.Decompress),
@@ -593,8 +596,11 @@ internal static class OwnUnits
 
 	public static object? ReadPayload(byte[] unit, int archiveAt, ServiceLocatorContext.Builder services)
 	{
-		using var r = new BinaryReader(new MemoryStream(unit, archiveAt, unit.Length - archiveAt, writable: false), Encoding.UTF8);
-		var leaves = ReadArchive(r, services);
+		// [i32 length][archive], read in place (WriteArchive's layout; ReadArchive copies, which for a world batch is 52 MiB more).
+		if (archiveAt < 0 || archiveAt > unit.Length - 4) throw new InvalidDataException("an object batch without its values");
+		int length = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(unit.AsSpan(archiveAt));
+		if (length < 0 || length > unit.Length - archiveAt - 4) throw new InvalidDataException($"a unit claims {length} bytes of values");
+		var leaves = OwnArchive.Read(new ArraySegment<byte>(unit, archiveAt + 4, length), services);
 		return leaves.Count > 0 ? leaves.Get(0) : null;
 	}
 

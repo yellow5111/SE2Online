@@ -186,6 +186,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		Optional("join and leave toasts", () => JoinLeaveToasts.Install(_harmony));
 		Optional("leaving a joined world", () => LeaveDetect.Install(_harmony));
 		Optional("server-side access checks", () => ServerAccess.Install(_harmony));
+		Optional("admin creative tools weld without components", () => CreativeWeld.Install(_harmony));
 		Optional("tool reach for remote players", () => ToolReach.Install(_harmony));
 		Optional("hand drill on planet boulders for remote players", () => DrillReach.Install(_harmony));
 		Optional("streaming radius", () => Streaming.Install(_harmony));
@@ -415,10 +416,10 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		{
 			// -y51online:autojoin:local[:port]: a game this Steam account hosts on this PC (test play).
 			int port = address.Length > 6 && int.TryParse(address.Substring(6), out int p) ? p : MpMenu.Settings?.ListenPort ?? MpOptions.DefaultIpPort;
-			Controller.Request(MpOptions.Parse(new[] { MpOptions.Prefix + "join-address:127.0.0.1:" + port }), MpClock.NowMs());
+			Controller.Request(PlayerJoinOptions("127.0.0.1:" + port), MpClock.NowMs());
 			return;
 		}
-		Controller.Request(MpOptions.Parse(new[] { MpOptions.Prefix + "join-address:" + address }), MpClock.NowMs());
+		Controller.Request(PlayerJoinOptions(address), MpClock.NowMs());
 	}
 
 	// Every SE2 4.0 join (join code screen, Steam invite, -localDedicatedClient) goes through SE2 Online first: it reads and
@@ -438,6 +439,13 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		return false;
 	}
 
+	// Joins started by a launch option or by the game's own join screens carry the player's settings (name, name tags,
+	// smoothing) like the SE2 Online menu's joins; they used to start from bare defaults.
+	private static MpOptions PlayerJoinOptions(string address)
+	{
+		try { return MpMenu.Settings.JoinAddressOptions(address); }
+		catch (Exception ex) when (ex is ArgumentException or FormatException) { return MpOptions.Parse(new[] { MpOptions.Prefix + "join-address:" + address }); }
+	}
 	private static Keen.VRage.Core.Services.GameSessions.GameSessionID? _parkedJoin;
 
 	private static void RequestKeenJoin(Keen.VRage.Core.Services.GameSessions.GameSessionID sessionID)
@@ -449,7 +457,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			return;
 		}
 		GameLog.Instance.Info($"session: the game asked to join {sessionID}; SE2 Online joins {address}");
-		Controller!.Request(MpOptions.Parse(new[] { MpOptions.Prefix + "join-address:" + address }), MpClock.NowMs());
+		Controller!.Request(PlayerJoinOptions(address.ToString()), MpClock.NowMs());
 	}
 
 	/// <summary>Main thread: a game join parked while the controller was busy goes once it is free.</summary>

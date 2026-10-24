@@ -36,8 +36,25 @@ internal sealed class SteamDedicatedSession : IDisposable
         }
         throw new OperationCanceledException("Dedicated-server startup was stopped.");
     }
+    private static int _publishedAccess = -1;
+
+    /// <summary>
+    /// Password and whitelist in the Steam server list: the lock flag plus rules "password" and "whitelist" ("1"/"0").
+    /// Servers before 0.17.5 publish no such rules, which readers take as unknown. Only changes reach Steam.
+    /// </summary>
+    public static void PublishAccess(bool password, bool whitelist)
+    {
+        int access = (password ? 1 : 0) | (whitelist ? 2 : 0);
+        if (access == _publishedAccess) return;
+        SteamGameServer.SetPasswordProtected(password);
+        SteamGameServer.SetKeyValue("password", password ? "1" : "0");
+        SteamGameServer.SetKeyValue("whitelist", whitelist ? "1" : "0");
+        _publishedAccess = access;
+    }
+
     public void Dispose()
     {
+        _publishedAccess = -1;
         if (!_initialized) return;
         SteamGameServer.LogOff();
         GameServer.Shutdown();

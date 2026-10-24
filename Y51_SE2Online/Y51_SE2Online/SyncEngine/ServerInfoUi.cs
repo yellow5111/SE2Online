@@ -34,6 +34,8 @@ internal static class ServerInfoUi
         return tags.Take(8).ToArray();
     }
 
+    private static string YesNo(bool? value) => value switch { true => "Yes", false => "No", null => "Not published" };
+
     public static ServerInfoRow[] FromListing(DirectoryListing e)
     {
         var rows = new List<ServerInfoRow>
@@ -45,8 +47,8 @@ internal static class ServerInfoUi
             new("Server", "Players", e.Players + " / " + e.MaxPlayers),
             new("Server", "Access", e.FriendsOnly ? "Steam friends only" : "Public"),
             new("Server", "Mode", DirectoryListing.Mode(e.Tags) switch { "PvP" => "PvP: players can hurt each other", "PvE" => "PvE: players can't hurt each other", _ => "-" }),
-            new("Server", "Password", e.Tags?.Contains("Password") == true ? "Yes" : "No"),
-            new("Server", "Whitelist only", e.Tags?.Contains("Whitelist") == true ? "Yes" : "No"),
+            new("Server", "Password", YesNo(e.PasswordRequired())),
+            new("Server", "Whitelist only", YesNo(e.WhitelistOnly())),
             new("Server", "Version", $"Space Engineers 2 Online {e.PluginVersion}, protocol {e.SyncVersion}, SE2 {e.GameVersion}"),
             new("Server", "Listed", e.UpdatedAt == default ? "-" : e.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")),
         };

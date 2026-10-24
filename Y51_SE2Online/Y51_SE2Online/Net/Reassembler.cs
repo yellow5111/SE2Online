@@ -16,6 +16,8 @@ public sealed class Reassembler
 		public long LastActivityMs;
 
 		public long StartedMs;
+
+		public long Bytes;
 	}
 
 	private readonly Dictionary<uint, Pending> _pending = new();
@@ -38,6 +40,11 @@ public sealed class Reassembler
 	public long BufferedBytes { get; private set; }
 
 	public int InProgress => _pending.Count;
+
+	/// <summary>Bytes in of the messages still being reassembled, and those messages' declared lengths (join progress).</summary>
+	public long PendingBytes { get; private set; }
+
+	public long PendingTotalBytes { get; private set; }
 
 	public long Completed { get; private set; }
 
@@ -112,6 +119,7 @@ public sealed class Reassembler
 				StartedMs = nowMs
 			};
 			_pending.Add(h.TransferId, pending);
+			PendingTotalBytes += h.TotalLength;
 		}
 		else if (pending.First.Count != h.Count || pending.First.TotalLength != h.TotalLength || pending.First.FragmentSize != h.FragmentSize)
 		{
@@ -148,6 +156,8 @@ public sealed class Reassembler
 		}
 		payload.CopyTo(pending.Buffer.AsSpan((int)offset));
 		pending.Received++;
+		pending.Bytes += payload.Length;
+		PendingBytes += payload.Length;
 		if (pending.Received < h.Count)
 		{
 			return ReassemblyResult.Partial;
@@ -186,6 +196,8 @@ public sealed class Reassembler
 	{
 		_pending.Remove(id);
 		BufferedBytes -= p.Buffer.Length;
+		PendingBytes -= p.Bytes;
+		PendingTotalBytes -= p.First.TotalLength;
 	}
 
 	private void Remember(uint id)

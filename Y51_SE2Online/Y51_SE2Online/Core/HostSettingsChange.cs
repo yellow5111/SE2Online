@@ -50,7 +50,7 @@ public static class HostSettingsChange
         if (before.OwnReplication != after.OwnReplication) next.Add("replication engine");
         if (before.TeamGrids != after.TeamGrids) next.Add("grid sharing");
         if (before.SharedResearch != after.SharedResearch) next.Add("shared research");
-        if (before.Nametags != after.Nametags || before.NametagRange != after.NametagRange) next.Add("name tags");
+        if (before.Nametags != after.Nametags) next.Add("name tags");
         if (before.SpawnNearHost != after.SpawnNearHost) next.Add("spawn near host");
         if (before.StateBudgetKiB != after.StateBudgetKiB) next.Add("bandwidth per player");
         if ((before.PlayerName ?? "").Trim() != (after.PlayerName ?? "").Trim()) next.Add("player name");

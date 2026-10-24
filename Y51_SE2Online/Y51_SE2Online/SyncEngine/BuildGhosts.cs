@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using HarmonyLib;
 using Keen.Game2.Client.GameSystems.BlockPlacement.BlockPlacer;
@@ -40,8 +41,15 @@ internal static class BuildGhosts
 	private static long _capturedMs = long.MinValue / 2;
 	private static volatile bool _inSession;
 	private static bool _captureFailed, _drawFailed;
+	private static long _placingMs = long.MinValue / 2;
+	private static readonly bool PlaceSmoothOff = Array.IndexOf(MpPlugin.LaunchArgs, MpOptions.Prefix + "placesmooth:off") >= 0;
+	private static readonly Dictionary<ushort, GhostSmoother> BoxSmooth = new();
 
 	internal static bool InSession => _inSession;
+
+	/// <summary>The local block or blueprint placer drew within <see cref="StaleMs"/> (own-motion corrections go slow meanwhile).
+	/// The kill switch covers that only; the viewer smoothing and the unreliable pose lane have none.</summary>
+	internal static bool LocalPlacing => !PlaceSmoothOff && MpClock.NowMs() - System.Threading.Volatile.Read(ref _placingMs) <= StaleMs;
 
 	internal static void Install(Harmony harmony)
 	{
@@ -50,7 +58,7 @@ internal static class BuildGhosts
 		if (Dedicated.DedicatedRuntime.Headless) return;
 		harmony.Patch(AccessTools.Method(typeof(BlockPlacerEntityComponent), "DrawBlockPlacement"), postfix: new HarmonyMethod(typeof(BuildGhosts), nameof(CapturePostfix)));
 		harmony.Patch(AccessTools.Method(typeof(UI3DSessionComponent), nameof(UI3DSessionComponent.UpdateTransform)), postfix: new HarmonyMethod(typeof(BuildGhosts), nameof(DrawPostfix)));
-		BuildGhostMessage.Received += (builder, ghost) => Board.Put(builder, ghost, MpClock.NowMs());
+		BuildGhostMessage.Received += (builder, ghost, reliable) => Board.Put(builder, ghost, MpClock.NowMs(), reliable);
 		try { BuildGhostModels.Install(harmony); }
 		catch (Exception ex) { GameLog.Instance.Warn("build ghosts: holograms off for this game build, outlines only (" + ex.GetType().Name + ": " + ex.Message + ")"); }
 	}
@@ -75,22 +83,28 @@ internal static class BuildGhosts
 
 	private static void CapturePostfix(BlockPlacerEntityComponent __instance)
 	{
+		if (__instance.ActivePrefab != null && __instance.Controller != null) System.Threading.Volatile.Write(ref _placingMs, MpClock.NowMs());
 		if (!_inSession) return;
 		try
 		{
 			var prefab = __instance.ActivePrefab;
-			if (prefab == null || __instance.Controller == null || __instance.Building != null || __instance.Symmetry?.Setup != null) return;
+			if (prefab == null || __instance.Controller == null || __instance.Symmetry?.Setup != null) return;
+			// Dragging a line or plane: the whole volume as the outline box, no hologram (one prefab would be wrong).
+			bool dragging = __instance.Building != null;
 			var v = __instance.Validation;
 			GhostBox? box = null, target = null;
 			GhostPose? pose = null;
 			GhostShape shape = null;
 			// The same condition SE2 uses for its own placement box.
 			if ((__instance.NewGridMode || v.SupportedInVoxel || !v.NewGrid || __instance.IsPasteMode) && (v.CanPlace & BuildResultEnum.FailedDistance) == 0)
-				box = Box(new OrientedBoundingBoxD((BoundingBoxD)CubeGridCoords.GridToLocal(prefab.AABB), (MatrixD)__instance.Preview.PreviewTransform));
+			{
+				var single = new OrientedBoundingBoxD((BoundingBoxD)CubeGridCoords.GridToLocal(prefab.AABB), (MatrixD)__instance.Preview.PreviewTransform);
+				box = Box(dragging ? DragVolume(__instance.Preview, single) ?? single : single);
+			}
 			if (__instance.AlignedBlock.Target is { } aimed && __instance.Alignment.Normal != default)
 				target = Box(CubeGridCoords.GridToWorldOriented(aimed.AABB, aimed.Grid.WorldTransform));
 			EntityBundle bundle = prefab.Bundle.Bundle;
-			if (__instance.Preview.PreviewVisible && __instance.Preview._centerHost is { } center && bundle.Roots == 1 && (shape = ShapeOf(bundle)) != null)
+			if (!dragging && __instance.Preview.PreviewVisible && __instance.Preview._centerHost is { } center && bundle.Roots == 1 && (shape = ShapeOf(bundle)) != null)
 			{
 				// Where SE2 put the hologram grid, so viewers need none of the placer's snapping maths.
 				WorldTransform grid = bundle.GetWorldTransform(0, center.Entity.Data.GetWorldTransform());
@@ -111,6 +125,32 @@ internal static class BuildGhosts
 			_captureFailed = true;
 			GameLog.Instance.Warn("build ghosts: could not read the local block placer, previews not sent: " + ex.Message);
 		}
+	}
+
+	/// <summary>
+	/// The box around every copy of a line or plane drag: SE2 moves one preview host per copy (BlockPlacementPreview.
+	/// UpdatePreview), all at the preview's orientation, so the single prefab box is stretched over their spread (the
+	/// first symmetry volume only). Null when there is nothing to stretch or it would pass the wire's size cap.
+	/// </summary>
+	private static OrientedBoundingBoxD? DragVolume(Keen.Game2.Client.GameSystems.BlockPlacement.BlockPlacer.BlockPlacementPreview preview, OrientedBoundingBoxD single)
+	{
+		var hosts = preview._activeHosts;
+		if (hosts.Count < 2) return null;
+		int count = hosts.Count / Math.Max(1, preview._numVolumes);
+		// UpdatePreview puts hosts[0] at the preview transform (the single box); _centerHost is the far end of a negative drag.
+		Vector3D origin = hosts[0].Entity.Data.GetWorldTransform().Position;
+		var inverse = Quaternion.Inverse(single.Orientation);
+		Vector3 min = Vector3.Zero, max = Vector3.Zero;
+		for (int i = 0; i < count; i++)
+		{
+			Vector3 local = inverse * (Vector3)(hosts[i].Entity.Data.GetWorldTransform().Position - origin);
+			min = Vector3.Min(min, local);
+			max = Vector3.Max(max, local);
+		}
+		Vector3 spread = (max - min) / 2;
+		var half = new Vector3D(single.HalfExtent.X + spread.X, single.HalfExtent.Y + spread.Y, single.HalfExtent.Z + spread.Z);
+		if (half.X > GhostBox.MaxHalfMeters || half.Y > GhostBox.MaxHalfMeters || half.Z > GhostBox.MaxHalfMeters) return null;
+		return new OrientedBoundingBoxD(single.Center + single.Orientation * ((min + max) / 2), half, single.Orientation);
 	}
 
 	/// <summary>The blocks of the preview's one grid, once per bundle; null over the size cap or for anything but blocks.</summary>
@@ -136,15 +176,19 @@ internal static class BuildGhosts
 		if (!_inSession) return;
 		lock (Drawn)
 		{
-			if (Board.Live(MpClock.NowMs(), Drawn) == 0) return;
+			long now = MpClock.NowMs();
+			if (Board.Live(now, Drawn) == 0) { BoxSmooth.Clear(); return; }
 			try
 			{
+				foreach (ushort gone in BoxSmooth.Keys.Where(k => !Drawn.Exists(d => d.Builder == k)).ToList()) BoxSmooth.Remove(gone);
 				foreach (var (builder, ghost, _) in Drawn)
 				{
 					bool blocked = (ghost.Flags & BuildGhost.Blocked) != 0;
 					if (ghost.Box is { } b)
 					{
-						var obb = Obb(b);
+						if (!BoxSmooth.TryGetValue(builder, out var smooth)) BoxSmooth[builder] = smooth = new GhostSmoother();
+						// The placement box eases with the hologram; the aimed-block box below always snaps.
+						var obb = Obb(smooth.Step(b, now));
 						__instance.DrawPlacementPreview(obb, Tint(builder, blocked ? 0.3f : 0.6f), Thickness(__instance, obb), 0.15f, 0.15f);
 					}
 					if (ghost.Target is { } t)

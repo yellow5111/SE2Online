@@ -18,6 +18,9 @@ public sealed class MpTransport : ITransport, IDisposable
 		public uint Count;
 
 		public uint Next;
+
+		/// <summary>A big message being deflated on a worker; it goes (and everything queued after it waits) once done.</summary>
+		public System.Threading.Tasks.Task<ReadOnlyMemory<byte>?>? Packing;
 	}
 
 	private sealed class PeerState
@@ -366,6 +369,7 @@ public sealed class MpTransport : ITransport, IDisposable
 		while (p.Bulk.Count > 0 && _link.GetPendingReliableBytes(p.Conn) < (_link.HasLanePriorities(p.Conn) ? _o.BulkHighWaterLanesBytes : _o.BulkHighWaterBytes))
 		{
 			var bulk = p.Bulk.Peek();
+			if (bulk.Packing != null && !Packed(p, bulk)) return;
 			var chunk = Fragmenter.Slice(bulk.Data, bulk.Next, (uint)_o.FragmentPayload);
 			var fragment = new FragmentHeader(bulk.TransferId, bulk.Next, bulk.Count, (uint)bulk.Data.Length, (uint)_o.FragmentPayload);
 			byte[] frame = new byte[Frame.HeaderSize + FragmentHeader.Size + chunk.Length];
@@ -394,6 +398,26 @@ public sealed class MpTransport : ITransport, IDisposable
 			}
 		}
 	}
+
+	// The head of a player's bulk queue once its worker is done: the envelope, or the message as it was if deflating did not
+	// pay or failed. Order holds because only the head is ever sent.
+	private bool Packed(PeerState p, BulkOut bulk)
+	{
+		if (!bulk.Packing!.IsCompleted) return false;
+		ReadOnlyMemory<byte>? packed = null;
+		if (bulk.Packing.IsCompletedSuccessfully) packed = bulk.Packing.Result;
+		else _log.WarnOnce("bulk-pack-failed", $"peer {p.Id}: deflating a {bulk.Data.Length} B bulk message failed, it goes as it is ({bulk.Packing.Exception?.GetBaseException().Message})");
+		bulk.Packing = null;
+		if (packed is { } envelope)
+		{
+			p.BulkQueuedBytes += envelope.Length - bulk.Data.Length;
+			bulk.Data = envelope;
+		}
+		bulk.Count = Fragmenter.CountFor((uint)bulk.Data.Length, (uint)_o.FragmentPayload);
+		return true;
+	}
+
+	private static readonly System.Threading.SemaphoreSlim PackGate = new(2);
 
 	private void Dispatch(in OutRequest req, long now)
 	{
@@ -429,14 +453,23 @@ public sealed class MpTransport : ITransport, IDisposable
 			break;
 		case Channel.Bulk:
 			var data = req.Payload;
-			// A big message (a world's initial batch) is deflated here, on the network thread, not on the sender's frame.
-			if (data.Length >= BulkCompression.PackLaterBytes && !BulkCompression.IsEnvelope(data.Span) && BulkCompression.Pack(data.Span, MaxInflatedOut) is { } packed) data = packed;
-			p.Bulk.Enqueue(new BulkOut
+			var bulk = new BulkOut { TransferId = p.NextTransferId++, Data = data, Count = Fragmenter.CountFor((uint)data.Length, (uint)_o.FragmentPayload) };
+			// A big message (a world's initial batch: ~0.3 s for 52 MiB) is deflated on a worker; pings and acks of every
+			// player keep flowing meanwhile (0.17.4 deflated it here, on the network thread).
+			if (data.Length >= BulkCompression.PackLaterBytes && !BulkCompression.IsEnvelope(data.Span))
 			{
-				TransferId = p.NextTransferId++,
-				Data = data,
-				Count = Fragmenter.CountFor((uint)data.Length, (uint)_o.FragmentPayload)
-			});
+				int max = MaxInflatedOut;
+				bulk.Packing = System.Threading.Tasks.Task.Run(async () =>
+				{
+					// Players rejoining a restarted server together: two worlds deflate at a time, not every one at once.
+					await PackGate.WaitAsync().ConfigureAwait(false);
+					try { return Volatile.Read(ref p.Closed) || _disposed ? null : BulkCompression.PackLarge(data.Span, max); }
+					finally { PackGate.Release(); }
+				});
+				// A pack whose player left is never looked at again; its fault is observed here, not by the game's crash handler.
+				bulk.Packing.ContinueWith(t => _ = t.Exception, System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted | System.Threading.Tasks.TaskContinuationOptions.ExecuteSynchronously);
+			}
+			p.Bulk.Enqueue(bulk);
 			p.BulkQueuedBytes += data.Length;
 			Core.LatencyTrace.Mark(Core.LatencyTrace.BulkQueued, req.Payload.Span, (int)Channel.Bulk, p.Id.Value);
 			break;
@@ -901,6 +934,8 @@ public sealed class MpTransport : ITransport, IDisposable
 		stats.BulkQueuedMessages = p.Bulk.Count;
 		stats.BulkQueuedBytes = p.BulkQueuedBytes;
 		stats.ReassemblyInProgress = p.Reassembler.InProgress;
+		stats.ReassemblyBytes = p.Reassembler.PendingBytes;
+		stats.ReassemblyTotalBytes = p.Reassembler.PendingTotalBytes;
 		stats.SeqGaps = p.ControlRx.Gaps + p.BulkRx.Gaps;
 		stats.SeqDuplicates = p.ControlRx.Duplicates + p.BulkRx.Duplicates;
 		stats.StateLate = p.StateRx.Late;

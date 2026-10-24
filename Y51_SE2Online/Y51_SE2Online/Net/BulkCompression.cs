@@ -22,7 +22,8 @@ internal static class BulkCompression
 
 	public const int MinBytes = 8192;
 
-	/// <summary>Messages from this size on are deflated when the network thread sends them (MpTransport.Dispatch), not when queued.</summary>
+	/// <summary>Messages from this size on are deflated on a worker once the network thread takes them (MpTransport.Dispatch),
+	/// not on the sender's frame or the network thread; they still go out in the order they were sent.</summary>
 	public const int PackLaterBytes = 1 << 20;
 
 	/// <summary>
@@ -34,7 +35,19 @@ internal static class BulkCompression
 	/// <summary>The envelope, or null when the message is small, over <paramref name="maxBytes"/> (the receiver's
 	/// inflate cap; such a message goes as it is), or deflating saves under a fifth or more than <see cref="MaxRatio"/>.
 	/// Deflates as a stream: besides the message, it holds only the envelope, which stays under four fifths of it.</summary>
-	public static byte[]? Pack(ReadOnlySpan<byte> message, int maxBytes = int.MaxValue)
+	public static byte[]? Pack(ReadOnlySpan<byte> message, int maxBytes = int.MaxValue) => Deflate(message, maxBytes)?.ToArray();
+
+	/// <summary>
+	/// <see cref="Pack"/> for a big message: the envelope is the deflate buffer itself unless that would keep over a quarter
+	/// of it unused (then it is copied out, as Pack does). Data that deflates well (most worlds) still takes the copy.
+	/// </summary>
+	public static ReadOnlyMemory<byte>? PackLarge(ReadOnlySpan<byte> message, int maxBytes)
+	{
+		if (Deflate(message, maxBytes) is not { } output) return null;
+		return output.Length * 4 >= output.Capacity * 3L ? new ReadOnlyMemory<byte>(output.GetBuffer(), 0, (int)output.Length) : output.ToArray();
+	}
+
+	private static MemoryStream? Deflate(ReadOnlySpan<byte> message, int maxBytes)
 	{
 		if (message.Length < MinBytes || message.Length > maxBytes) return null;
 		var output = new MemoryStream(message.Length / 3 + Prefix);
@@ -44,7 +57,7 @@ internal static class BulkCompression
 		output.Write(length);
 		output.Write(message[..Head]);
 		using (var deflate = new DeflateStream(output, CompressionLevel.Fastest, leaveOpen: true)) deflate.Write(message[Head..]);
-		return output.Length <= message.Length * 4L / 5 && !OverRatio(message.Length, (int)output.Length) ? output.ToArray() : null;
+		return output.Length <= message.Length * 4L / 5 && !OverRatio(message.Length, (int)output.Length) ? output : null;
 	}
 
 	/// <summary>Rewrites the LifeSeq (bytes 1-4 of the original) inside an envelope's uncompressed head.</summary>

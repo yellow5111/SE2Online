@@ -253,6 +253,7 @@ internal sealed partial class NetSession
 				{
 					_nextPlayerCountMs = now + 5000;
 					try { SteamGameServer.SetBotPlayerCount(host.Players().Count(p => p.Peer.HasValue)); } catch (Exception) { }
+					try { Y51_SE2Online.Steam.SteamDedicatedSession.PublishAccess(host.HasPassword, host.Access.WhitelistOnly); } catch (Exception) { }
 				}
 			}
 			UpdateDirectory(now);

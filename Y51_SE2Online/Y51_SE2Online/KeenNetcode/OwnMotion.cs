@@ -351,7 +351,8 @@ internal static class OwnMotion
 			own.Data.TryGet<ControlData>(out var ownControl);
 			own.Data.TryGet<RigidBodyData>(out var ownBody);
 			bool atRest = ownControl.Movement == Vector3.Zero && !_jumpPending && RelativeSpeed(own, ownBody) < 0.3f;
-			switch (Correction.Measure(a.Seq, a.Parent, a.Position, a.Velocity, a.Rotation, standing: atRest, steady: ownControl.Rotation == Vector3.Zero))
+			// Aiming a placement turns the mouse, which would leave only the 0.5 deg band: placing uses the steady 2 deg one.
+			switch (Correction.Measure(a.Seq, a.Parent, a.Position, a.Velocity, a.Rotation, standing: atRest, steady: ownControl.Rotation == Vector3.Zero || SyncEngine.BuildGhosts.LocalPlacing))
 			{
 			case OwnCorrection.Outcome.Rebase:
 				Correction.Reset();
@@ -424,6 +425,7 @@ internal static class OwnMotion
 		var velocity = frame is { } g ? WorldTransform.TransformDirectionInv(body.LinearVelocity, g) : body.LinearVelocity;
 		Correction.Record(++_seq, parent, new Vec3D(local.X, local.Y, local.Z), new System.Numerics.Vector3(velocity.X, velocity.Y, velocity.Z),
 			new System.Numerics.Quaternion(relative.Orientation.X, relative.Orientation.Y, relative.Orientation.Z, relative.Orientation.W));
+		Correction.Placing = SyncEngine.BuildGhosts.LocalPlacing;
 		var (dp, dv) = Correction.Step(TickSeconds, velocity.Length());
 		var turn = FacingOff ? System.Numerics.Quaternion.Identity : Correction.StepTurn();
 		if (dp != default || dv != default || !turn.IsIdentity) Shift(own, frame, dp, dv, turn);

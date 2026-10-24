@@ -80,9 +80,9 @@ public sealed class AdminScreen : ScreenView
         var creativeOn = OnlineUi.Button("Enable creative tools", () => Send(new AdminRequest(AdminAction.Creative, Value: true)), "AdminCreativeOn", true);
         var creativeOff = OnlineUi.Button("Disable creative tools", () => Send(new AdminRequest(AdminAction.Creative, Value: false)), "AdminCreativeOff", true);
         var tools = OnlineUi.Section("CREATIVE TOOLS",
-            OnlineUi.Text("Creative tools apply to you only. Blocks you place and blueprints you paste are built instantly without resources, creative-only blocks appear in the block menu, and whole grids can be deleted.", null, 24),
+            OnlineUi.Text("Creative tools apply to you only. Blocks you place and blueprints you paste are built instantly without resources, your hand welder welds without components, creative-only blocks appear in the block menu, and whole grids can be deleted.", null, 24),
             OnlineUi.Row(creativeOn, creativeOff),
-            OnlineUi.Text("Paste blueprints with the game's normal blueprint screen while creative tools are on. Welding speed is world-wide and stays survival.", "SubtleNotice", 22),
+            OnlineUi.Text("Paste blueprints with the game's normal blueprint screen while creative tools are on. Welding speed is world-wide and stays survival. Creative tools end when you stop being an admin. Blocks built with them give their components back when ground, as in the game's creative mode.", "SubtleNotice", 22),
             OnlineUi.Text("The game's F12 debug menu is limited to admins on this server.", "SubtleNotice", 22));
         _bypass.IsCheckedChanged += (_, _) => { if (!_syncingBypass) Send(new AdminRequest(AdminAction.AccessBypass, Value: _bypass.IsChecked)); };
         var bypass = OnlineUi.Section("ACCESS BYPASS",

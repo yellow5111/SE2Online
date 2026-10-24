@@ -628,7 +628,8 @@ public sealed class MpOptions
 			{
 				parts.Add("spawn=host");
 			}
-			parts.Add(Nametags ? $"nametags<={NametagRange.ToString(CultureInfo.InvariantCulture)}m" : "nametags=off");
+			// The HUD's range is the player's saved one (Core.NametagRange), whatever these options were built with.
+			parts.Add(Nametags ? $"nametags<={Core.NametagRange.Metres.ToString(CultureInfo.InvariantCulture)}m" : "nametags=off");
 			if (Host)
 			{
 				parts.Add(Identities

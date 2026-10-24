@@ -719,7 +719,7 @@ public sealed partial class HostSession : IStorySink
 	{
 		try
 		{
-			HandleUpstreamCore(peer, data);
+			HandleUpstreamCore(peer, data, ch);
 		}
 		catch (Exception ex) when (ex is not ArgumentOutOfRangeException and not IndexOutOfRangeException)
 		{
@@ -727,7 +727,7 @@ public sealed partial class HostSession : IStorySink
 		}
 	}
 
-	private void HandleUpstreamCore(PeerId peer, byte[] data)
+	private void HandleUpstreamCore(PeerId peer, byte[] data, Channel ch = Channel.Control)
 	{
 		RemoteClient client;
 		lock (_sync)
@@ -762,7 +762,7 @@ public sealed partial class HostSession : IStorySink
 			HandleVoice(client, data);
 			break;
 		case SyncMsg.BuildGhost:
-			HandleBuildGhost(client, data);
+			HandleBuildGhost(client, data, ch != Channel.State);
 			break;
 		case SyncMsg.TradeRequest:
 		case SyncMsg.TradeAction:

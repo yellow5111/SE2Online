@@ -29,7 +29,8 @@ internal sealed class NametagOverlay
 
 	public static bool Enabled = true;
 
-	public static double Range = 200.0;
+	/// <summary>The player's saved name tag range, read every update (Core.NametagRange).</summary>
+	public static double Range => NametagRange.Metres;
 
 	public const double HeadOffset = 2.1;
 
@@ -151,7 +152,9 @@ internal sealed class NametagOverlay
 	public static void Configure(MpOptions o)
 	{
 		Enabled = o.Nametags;
-		Range = o.NametagRange;
+		// A game client shows its player's saved range (a join the game started or a rejoin carries options without it);
+		// a dedicated server draws no tags.
+		NametagRange.Set(Y51_SE2Online.Dedicated.DedicatedRuntime.Headless ? o.NametagRange : MpMenu.Settings.NametagRange);
 	}
 
 	/// <summary>The other players this client last saw (for the look-at player options), with their session.</summary>
@@ -284,7 +287,7 @@ internal sealed class NametagOverlay
 			{
 				tag.Marker.Position = head;
 			}
-			bool tooFar = anchor.HasValue && Vector3D.Distance(anchor.GetValueOrDefault(), in head) > Range;
+			bool tooFar = anchor.HasValue && NametagRange.TooFar(Vector3D.Distance(anchor.GetValueOrDefault(), in head));
 			if (tag.Marker.Hidden != tooFar)
 			{
 				tag.Marker.Hidden = tooFar;

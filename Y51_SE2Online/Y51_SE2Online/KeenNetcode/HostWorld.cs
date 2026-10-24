@@ -240,6 +240,7 @@ internal sealed partial class HostWorld : IHostWorld
 	{
 		TeamPermissions.Enabled = settings.Grids == GridPermissionMode.Team;
 		_research = settings.Research;
+		IdentitiesOn = settings.Identities;
 	}
 
 	// The world goes to the player once its game asks for the snapshot (SnapshotRequested), after any mod downloads.

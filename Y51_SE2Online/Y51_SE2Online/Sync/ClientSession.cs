@@ -139,7 +139,7 @@ public sealed class ClientSession
 	public void SendBuildGhost(BuildGhost ghost)
 	{
 		if (Host.HasValue && CurrentPhase == Phase.Accepted)
-			_t.Send(Host.Value, Channel.Control, BuildGhostMessage.EncodeUp(ghost));
+			_t.Send(Host.Value, GhostLane.Reliable(ghost) ? Channel.Control : Channel.State, BuildGhostMessage.EncodeUp(ghost));
 	}
 
 	public void SendTrade(byte[] data)
@@ -439,6 +439,8 @@ public sealed class ClientSession
 			// Bulk bytes received before the accept are not world data; join progress counts from here.
 			long? bulkBase = Host is PeerId host && _t.TryGetStats(host, out PeerStats stats) ? stats.Channels[1].BytesReceived : null;
 			_o.Progress?.Accepted(Accept.WorldName, Accept.SnapshotBytes + Accept.WorldBytes + Accept.WorldBlobBytes, Accept.WorldParts, now, bulkBase);
+			if (Host is PeerId accepted && _t.TryGetStats(accepted, out PeerStats atAccept))
+				_o.Progress?.Download(now, atAccept.Channels[0].BytesReceived + atAccept.Channels[1].BytesReceived + atAccept.Channels[2].BytesReceived, 0, 0);
 			_o.Progress?.SetWorldEntities(Accept.WorldEntities);
 			_log.Info($"sync(client): JOIN ACCEPTED: world '{Accept.WorldName}', snapshot {MpLogExtensions.Bytes(Accept.SnapshotBytes)}, world {MpLogExtensions.Bytes(Accept.WorldBytes)} in {Accept.WorldParts} part(s) ({Accept.WorldEntities} entities), {Accept.WorldBlobs} offloaded blobs ({MpLogExtensions.Bytes(Accept.WorldBlobBytes)}) on the way; this player is ClientId {Accept.ClientId}");
 			_log.Info($"sync(client): host settings: {Accept.Settings}; " + (Accept.IdentityId != 0L ? $"this player is IdentityId {Accept.IdentityId} (PlayerIdentity {Accept.PlayerId}); players: {DescribePlayers(Accept.Players)}" : "this player plays as the host's identity (identities off on the host)"));
@@ -631,7 +633,7 @@ public sealed class ClientSession
 			break;
 		}
 		case SyncMsg.BuildGhost:
-			if (BuildGhostMessage.TryDecodeDown(data, out ushort builder, out BuildGhost ghost)) BuildGhostMessage.Received?.Invoke(builder, ghost);
+			if (BuildGhostMessage.TryDecodeDown(data, out ushort builder, out BuildGhost ghost)) BuildGhostMessage.Received?.Invoke(builder, ghost, ch != Channel.State);
 			break;
 		case SyncMsg.VoiceDown:
 			if (VoiceMessage.TryDecodeDown(data, out ushort speaker, out Vec3D at, out byte[] frame)) VoiceMessage.Received?.Invoke(speaker, at, frame);
@@ -1017,7 +1019,12 @@ public sealed class ClientSession
 		if ((progress || nowMs - _rttCheckMs >= 250) && _t.TryGetStats(Host.Value, out PeerStats stats))
 		{
 			_rttCheckMs = nowMs;
-			if (progress) _o.Progress.BulkBytes(stats.Channels[1].BytesReceived);
+			if (progress)
+			{
+				_o.Progress.BulkBytes(stats.Channels[1].BytesReceived);
+				// SE2 Online's own netcode sends the world after the accept (object batches, one large message for the shared part).
+				_o.Progress.Download(nowMs, stats.Channels[0].BytesReceived + stats.Channels[1].BytesReceived + stats.Channels[2].BytesReceived, stats.ReassemblyBytes, stats.ReassemblyTotalBytes);
+			}
 			// The transport's 1 s pings keep the round trip current while no input changes (and so nothing is acked).
 			if (stats.PongsReceived != _pongsSeen && stats.LastRttMs >= 0 && stats.LastRttMs < 2000 && InputRttMs >= 0)
 			{

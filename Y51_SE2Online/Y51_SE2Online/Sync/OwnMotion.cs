@@ -396,6 +396,15 @@ public sealed class OwnCorrection
 	public const double StandingDeadbandMeters = 0.1, SteadyFacingDeadbandDegrees = 2;
 	public const int Ring = 512, MismatchLimit = 30;
 
+	// While the build or blueprint placer is active its aim starts at the character's own transform
+	// (PlayerOriginProviderComponent), so each corrected tick moved the ghost: 0.5 deg is 9 cm at 10 m, 22 cm at 25 m.
+	// Placing, corrections ease in at most this much a tick (2 cm at 25 m); a gap over PlacingFreeMeters still eases at
+	// the normal rate and one over SnapMeters still snaps. Placements are sent as transforms, the server checks reach only.
+	public const double PlacingTurnStepDegrees = 0.05, PlacingStepMeters = 0.01, PlacingFreeMeters = 0.5, PlacingFreeDegrees = 5;
+
+	/// <summary>The player is aiming a block or blueprint placement (set each tick by the caller).</summary>
+	public bool Placing;
+
 	private struct Predicted
 	{
 		public uint Seq, Parent;
@@ -507,7 +516,8 @@ public sealed class OwnCorrection
 	{
 		double left = Degrees(_pendingTurn);
 		if (left < 1e-3) return Quaternion.Identity;
-		var turn = left <= MaxTurnStepDegrees ? _pendingTurn : Quaternion.Slerp(Quaternion.Identity, _pendingTurn, (float)(MaxTurnStepDegrees / left));
+		double most = Placing && left <= PlacingFreeDegrees ? PlacingTurnStepDegrees : MaxTurnStepDegrees;
+		var turn = left <= most ? _pendingTurn : Quaternion.Slerp(Quaternion.Identity, _pendingTurn, (float)(most / left));
 		_pendingTurn = Quaternion.Normalize(_pendingTurn * Quaternion.Conjugate(turn));
 		_appliedTurn = Quaternion.Normalize(turn * _appliedTurn);
 		return turn;
@@ -528,7 +538,7 @@ public sealed class OwnCorrection
 		{
 			double share = 1 - Math.Exp(-dt / BlendSeconds);
 			dp = _pending * share;
-			double cap = MaxStep + SpeedShare * speed * dt, size = dp.Length;
+			double cap = Placing && _pending.Length <= PlacingFreeMeters ? PlacingStepMeters : MaxStep + SpeedShare * speed * dt, size = dp.Length;
 			if (size > cap) dp = dp * (cap / size);
 			else if (_pending.Length < 0.002) dp = _pending;
 			dv = _pendingVelocity * (float)share;

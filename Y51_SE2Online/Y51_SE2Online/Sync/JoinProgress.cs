@@ -56,6 +56,8 @@ public sealed class JoinProgress
 
 	private int _entitiesTotal;
 
+	private readonly DownloadMeter _download = new();
+
 	private static readonly string[] Tips =
 	{
 		"Press Enter to chat with everyone on the server",
@@ -182,10 +184,30 @@ public sealed class JoinProgress
 			_entitiesBuilt = 0;
 			_received = 0L;
 			_receivedBase = bulkBase ?? -1;
+			_download.Reset();
 			if (_stage <= JoinStage.WaitingForHostWorld)
 			{
 				Set(JoinStage.Receiving, now);
 			}
+		}
+	}
+
+	/// <summary>Network thread: the join's download from the server (<see cref="DownloadMeter.Sample"/>); it also feeds the
+	/// received and expected sizes the join texts show.</summary>
+	public void Download(long now, long receivedTotal, long inFlightReceived, long inFlightTotal)
+	{
+		lock (_sync)
+		{
+			_download.Sample(now, receivedTotal, inFlightReceived, inFlightTotal);
+		}
+	}
+
+	/// <summary>"12.4 / 52.0 MiB · 4.1 MiB/s · 0:09 left" while this join has received anything, else null.</summary>
+	public string? DownloadLine()
+	{
+		lock (_sync)
+		{
+			return _download.Started && _download.Received > 0 ? _download.Describe() : null;
 		}
 	}
 
@@ -262,6 +284,7 @@ public sealed class JoinProgress
 			_attempt = _maxAttempts = _partsReceived = _partsTotal = _partsBuilt = 0;
 			_received = _expected = 0L;
 			_receivedBase = -1L;
+			_download.Reset();
 			_entitiesBuilt = _entitiesTotal = 0;
 			_inGame = false;
 			_stage = JoinStage.Connecting;
@@ -295,7 +318,8 @@ public sealed class JoinProgress
 	{
 		string host = Cut(_host, 20);
 		string retryHint = " Open Multiplayer to retry.";
-		string progress = _expected > 0 ? Mib(Math.Min(_received, _expected)) + "/" + Mib(_expected) + " MiB" : Mib(_received) + " MiB";
+		// SE2 Online's own join announces no size (_expected 0): the meter's wire bytes, with the size while a big part is in flight.
+		string progress = _expected > 0 ? Mib(Math.Min(_received, _expected)) + "/" + Mib(_expected) + " MiB" : _download.Started ? _download.Describe() : Mib(_received) + " MiB";
 		bool allReceived = _expected > 0 && _received >= _expected;
 		string detail = string.IsNullOrWhiteSpace(_detail) ? null : _detail.Trim();
 		switch (_stage)
@@ -431,20 +455,21 @@ public sealed class JoinProgress
 		case JoinStage.Receiving:
 		{
 			double seconds = Math.Max(0.5, (now - _receivingSinceMs) / 1000.0);
-			double rate = _received / seconds;
+			double rate = _download.BytesPerSecond > 0 ? _download.BytesPerSecond : _received / seconds;
 			// SE2 4.0 does not say how big the world is: without a size the bar eases towards 40% as data comes in.
 			double got = _expected > 0 ? Math.Min(1.0, (double)_received / _expected) : 1 - Math.Exp(-_received / (16.0 * 1024 * 1024));
 			percent = got * 40;
 			string eta = _expected > 0 && rate > 1024 && _received < _expected ? "  /  " + Clock((long)((_expected - _received) / rate * 1000)) + " left" : "";
 			what = _expected > 0
 				? $"{Mib(Math.Min(_received, Math.Max(_expected, _received)))} of {Mib(_expected)} MiB from {Cut(_host, 32)}  /  {Mib((long)rate)} MiB/s{eta}"
+				: _download.Started ? $"{_download.Describe()} from {Cut(_host, 32)}"
 				: $"{Mib(_received)} MiB from {Cut(_host, 32)}  /  {Mib((long)rate)} MiB/s";
 			if (_mods != null) what += "\n" + _mods;
 			break;
 		}
 		case JoinStage.Loading:
 			percent = 40 + 55 * (1 - Math.Exp(-(now - _loadingSinceMs) / 15000.0));
-			what = _mods ?? (_received > 0 ? $"Building the world, {Mib(_received)} MiB received  /  {Clock(now - _loadingSinceMs)}" : $"Terrain, planets and physics  /  {Clock(now - _loadingSinceMs)}");
+			what = _mods ?? (_download.Received > 0 || _received > 0 ? $"Building the world, {(_download.Started ? _download.Describe() : Mib(_received) + " MiB")} received  /  {Clock(now - _loadingSinceMs)}" : $"Terrain, planets and physics  /  {Clock(now - _loadingSinceMs)}");
 			break;
 		case JoinStage.Building:
 		{

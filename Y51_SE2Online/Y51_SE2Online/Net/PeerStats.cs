@@ -38,6 +38,11 @@ public sealed class PeerStats
 
 	public int ReassemblyInProgress;
 
+	/// <summary>Bytes in of the messages still being reassembled, and their declared lengths.</summary>
+	public long ReassemblyBytes;
+
+	public long ReassemblyTotalBytes;
+
 	public long SeqGaps;
 
 	public long SeqDuplicates;

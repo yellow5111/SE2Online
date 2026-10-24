@@ -20,6 +20,11 @@ internal sealed class OnlineDirectoryView : UserControl
     private readonly CheckBox _compatible = OnlineUi.Check("Compatible builds");
     private readonly CheckBox _notFull = OnlineUi.Check("Available slots");
     private readonly CheckBox _favorites = OnlineUi.Check("Favorites");
+    // Password and whitelist: Any, Yes, No (the BrowserFilter order); remembered per list in Y51_SE2Online.browser.json.
+    private readonly ComboBox _password = Choice("Password: any", "Password required", "No password");
+    private readonly ComboBox _whitelist = Choice("Whitelist: any", "Whitelist only", "No whitelist");
+    private static ComboBox Choice(params string[] items) => new() { ItemsSource = items, SelectedIndex = 0, MinWidth = 210, FontSize = 24 };
+    private BrowserFilters Filters => _servers ? MpMenu.Filters.Servers : MpMenu.Filters.Sessions;
     private readonly ComboBox _sort = new() { ItemsSource = new[] { "Name", "Most players", "Newest", "Country", "Lowest ping", "PvE first", "PvP first" }, SelectedIndex = 0, MinWidth = 210, FontSize = 24 };
     private readonly ListBox _list;
     private readonly TextBlock _count = OnlineUi.Text("");
@@ -51,10 +56,15 @@ internal sealed class OnlineDirectoryView : UserControl
         _search.TextChanged += (_, _) => Refresh(true);
         foreach (var check in new[] { _compatible, _notFull, _favorites }) check.IsCheckedChanged += (_, _) => Refresh(true);
         _sort.SelectionChanged += (_, _) => Refresh(true);
+        _password.SelectedIndex = (int)Filters.Password; _whitelist.SelectedIndex = (int)Filters.Whitelist;
+        ToolTip.SetTip(_password, "Yes and No show only hosts that publish it (SE2 Online 0.15.0 and later)");
+        ToolTip.SetTip(_whitelist, "Yes and No show only hosts that publish it (SE2 Online 0.15.0 and later)");
+        _password.SelectionChanged += (_, _) => Remember();
+        _whitelist.SelectionChanged += (_, _) => Remember();
         _refresh = OnlineUi.Button("Refresh", MpMenu.RefreshDirectory, servers ? "RefreshServers" : "RefreshSessions");
         var toolbar = new Grid { ColumnDefinitions = new ColumnDefinitions("*,20,Auto") };
         toolbar.Children.Add(_search); Grid.SetColumn(_refresh, 2); toolbar.Children.Add(_refresh);
-        var filters = OnlineUi.Row(_compatible, _notFull, _favorites, _sort);
+        var filters = OnlineUi.Row(_compatible, _notFull, _favorites, _password, _whitelist, _sort);
         var header = OnlineUi.TableHeader(Columns, new Control(), OnlineUi.HeaderLabel("COUNTRY"), OnlineUi.HeaderLabel(servers ? "SERVER" : "SESSION", true), OnlineUi.HeaderLabel("WORLD", true),
             OnlineUi.HeaderLabel("MODE"), OnlineUi.HeaderLabel("PLAYERS"), OnlineUi.HeaderLabel("PING"), OnlineUi.HeaderLabel("VERSION"), OnlineUi.HeaderLabel("PASSWORD"), OnlineUi.HeaderLabel("STATUS"), new Control());
         var listings = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,Auto,Auto,*,Auto") };
@@ -72,6 +82,14 @@ internal sealed class OnlineDirectoryView : UserControl
         _serverInfo = OnlineUi.Button("Server info", () => { if (_list.SelectedItem is DirectoryListing e) ServerInfoUi.Show(e.Name, ServerInfoUi.FromListing(e)); }, servers ? "ServerInfoListing" : "SessionInfoListing");
         Content = OnlineUi.Columns(OnlineUi.Panel(listings), OnlineUi.Panel(OnlineUi.DetailPanel(_detail, _join, _serverInfo), OnlineUi.DetailPadding), "*,24,400");
         Detail();
+    }
+
+    private void Remember()
+    {
+        Filters.Password = (BrowserFilter)Math.Max(0, _password.SelectedIndex);
+        Filters.Whitelist = (BrowserFilter)Math.Max(0, _whitelist.SelectedIndex);
+        MpMenu.SaveBrowserFilters();
+        Refresh(true);
     }
 
     private static bool FromButton(object source) => source is Visual v && v.FindAncestorOfType<Button>(true) != null;
@@ -155,7 +173,7 @@ internal sealed class OnlineDirectoryView : UserControl
         _refresh.IsEnabled = !MpMenu.DirectoryBusy;
         _refresh.Content = MpMenu.DirectoryBusy ? "Refreshing..." : "Refresh";
         string query = _search.Text?.Trim() ?? "";
-        string filter = query + _compatible.IsChecked + _notFull.IsChecked + _favorites.IsChecked + _sort.SelectedIndex;
+        string filter = query + _compatible.IsChecked + _notFull.IsChecked + _favorites.IsChecked + _sort.SelectedIndex + Filters.Key;
         // Pings and whether joining is possible change every few seconds; only those cells update, so the list keeps its scroll position and selection.
         foreach (var (entry, ping, join, holder) in _rows) { ping.Text = PingText(entry); ShowJoin(entry, join, holder); }
         bool resort = _sort.SelectedIndex == 4 && MpClock.NowMs() >= _nextPingSort;
@@ -164,7 +182,7 @@ internal sealed class OnlineDirectoryView : UserControl
         _last = source; _filter = filter;
         string selected = (_list.SelectedItem as DirectoryListing)?.Id;
         var filtered = source.Where(e => (query.Length == 0 || (e.Name + " " + e.WorldName + " " + DirectoryListing.Mode(e.Tags) + " " + e.Address + " " + e.Country + " " + Countries.Name(e.Country)).Contains(query, StringComparison.OrdinalIgnoreCase))
-            && (_compatible.IsChecked != true || Compatible(e)) && (_notFull.IsChecked != true || e.Players < e.MaxPlayers) && (_favorites.IsChecked != true || MpMenu.IsFavorite(e)));
+            && (_compatible.IsChecked != true || Compatible(e)) && (_notFull.IsChecked != true || e.Players < e.MaxPlayers) && (_favorites.IsChecked != true || MpMenu.IsFavorite(e)) && Filters.Matches(e));
         filtered = _sort.SelectedIndex switch { 1 => filtered.OrderByDescending(e => e.Players).ThenBy(e => e.Name), 2 => filtered.OrderByDescending(e => e.UpdatedAt), 3 => filtered.OrderBy(e => string.IsNullOrEmpty(e.Country) ? "~" : Countries.Name(e.Country), StringComparer.OrdinalIgnoreCase).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase), 4 => filtered.OrderBy(MpMenu.PingSort).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase), 5 or 6 => filtered.OrderBy(e => ModeRank(e, _sort.SelectedIndex == 6)).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase), _ => filtered.OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase) };
         var rows = filtered.ToArray();
         if (!rows.SequenceEqual(_list.ItemsSource as DirectoryListing[] ?? Array.Empty<DirectoryListing>())) { _rows.Clear(); _list.ItemsSource = rows; }
@@ -215,8 +233,8 @@ internal sealed class OnlineDirectoryView : UserControl
             ("World", OnlineUi.Value(e.WorldName)),
             ("Country", country),
             ("Access", OnlineUi.Value(e.FriendsOnly ? "Steam friends only" : "Public")),
-            ("Password", OnlineUi.Value(Tagged(e, "Password") ? "Required" : "None")),
-            ("Whitelist", OnlineUi.Value(Tagged(e, "Whitelist") ? "Whitelisted players only" : "Off")),
+            ("Password", OnlineUi.Value(e.PasswordRequired() switch { true => "Required", false => "None", null => "Not published" })),
+            ("Whitelist", OnlineUi.Value(e.WhitelistOnly() switch { true => "Whitelisted players only", false => "Off", null => "Not published" })),
             ("Version", OnlineUi.Value(e.PluginVersion + (e.PluginVersion != MpPlugin.Version ? " (you have " + MpPlugin.Version + ")" : ""))),
             ("SE2", OnlineUi.Value(e.GameVersion + (e.GameVersion != MpMenu.GameVersion ? " (you have " + MpMenu.GameVersion + ")" : ""))),
             ("Address", OnlineUi.Value(!string.IsNullOrWhiteSpace(e.Address) ? e.Address : "Steam host " + e.SteamId)),

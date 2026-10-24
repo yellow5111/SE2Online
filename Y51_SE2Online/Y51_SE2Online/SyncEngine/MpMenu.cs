@@ -38,6 +38,8 @@ internal static class MpMenu
     private static long _nextDirectory;
     private static readonly string FavoritesPath = PluginPaths.Data("Y51_SE2Online.favorites.json");
     private static readonly HashSet<string> Favorites = LoadFavorites();
+    private static readonly string BrowserFiltersPath = PluginPaths.Data("Y51_SE2Online.browser.json");
+    public static readonly BrowserFilterFile Filters = BrowserFilterFile.Load(BrowserFiltersPath);
     public static DirectoryListing[] Servers { get; private set; } = Array.Empty<DirectoryListing>();
     public static DirectoryListing[] Sessions { get; private set; } = Array.Empty<DirectoryListing>();
     public static bool DirectoryBusy { get; private set; }
@@ -184,6 +186,11 @@ internal static class MpMenu
             File.WriteAllText(tmp, JsonSerializer.Serialize(Favorites));
             File.Move(tmp, FavoritesPath, true);
         }
+    }
+    public static void SaveBrowserFilters()
+    {
+        try { Filters.Save(BrowserFiltersPath); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { GameLog.Instance.Warn("server browser: filters not saved: " + ex.Message); }
     }
     private static HashSet<string> LoadFavorites()
     {
@@ -514,6 +521,7 @@ internal static class MpMenu
             var before = Settings;
             Settings = settings;
             Message = "Settings saved.";
+            if (NametagRange.Set(settings.NametagRange)) GameLog.Instance.Info($"nametags: range now {settings.NametagRange:0} m");
             if (current?.Host != true || current.Dedicated || Busy) return;
             // Restarting hosting drops every player (0.14.4 restarted on every save, which players saw as the world dying);
             // only a change to the listen socket needs it, and the host is asked first.

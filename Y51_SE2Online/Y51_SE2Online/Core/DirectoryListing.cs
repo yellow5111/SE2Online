@@ -33,6 +33,16 @@ public sealed class DirectoryListing
     public static string ModeOf(string tag) => tag switch { "PvP" or "PvP on" => "PvP", "PvE" or "PvP off" => "PvE", _ => null };
     /// <summary>The listing's mode, "-" when it doesn't say.</summary>
     public static string Mode(string[] tags) => tags?.Select(ModeOf).FirstOrDefault(m => m != null) ?? "-";
+    /// <summary>Whether the host requires a password: from its "Password" tag, which hosts publish since 0.15.0; null for older listings.</summary>
+    public bool? PasswordRequired() => AccessPublished() ? Tags?.Contains("Password") == true : null;
+    /// <summary>Whether the host admits whitelisted players only ("Whitelist" tag, 0.15.0 and later); null for older listings.</summary>
+    public bool? WhitelistOnly() => AccessPublished() ? Tags?.Contains("Whitelist") == true : null;
+    private static readonly System.Text.RegularExpressions.Regex VersionPrefix = new(@"^(\d{1,6})\.(\d{1,6})\.(\d{1,6})", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+    private bool AccessPublished()
+    {
+        var m = VersionPrefix.Match(PluginVersion ?? "");
+        return m.Success && new Version(int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture), int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture), int.Parse(m.Groups[3].Value, CultureInfo.InvariantCulture)) >= new Version(0, 15, 0);
+    }
     public bool MatchesBuild(string pluginVersion, string gameVersion) => PluginVersion == pluginVersion && GameVersion == gameVersion && SyncVersion == SyncProtocol.Version;
 
     public void Validate()

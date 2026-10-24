@@ -27,6 +27,11 @@ internal sealed partial class HostWorld
     private readonly ConcurrentQueue<(PeerId? Peer, ushort ClientId, AdminRequest Request)> _adminRequests = new();
     private long _nextSafeZoneScan;
 
+    /// <summary>Personally creative identities that are connected admins or the hosting player (CreativeWeld); refreshed every 2 s on the server thread.</summary>
+    public volatile System.Collections.Generic.HashSet<long> FreeWelders = new();
+
+    internal bool IdentitiesOn = true;
+
     /// <summary>Safe zones for the admin panel, refreshed on the server thread.</summary>
     public SafeZoneInfo[] SafeZones { get; private set; } = Array.Empty<SafeZoneInfo>();
 
@@ -48,8 +53,32 @@ internal sealed partial class HostWorld
         long now = MpClock.NowMs();
         if (now < _nextSafeZoneScan) return;
         _nextSafeZoneScan = now + 2000;
+        try { ReconcileCreative(session); }
+        catch (Exception ex) { FreeWelders = new(); _log.WarnOnce("creative-reconcile", "admin: checking who has creative tools failed: " + ex.Message); }
         SafeZones = session.GetEntitiesOfType<SafeZoneComponent>().Where(e => !EngineCodec.IsDead(e))
             .Select(e => { var zone = e.Get<SafeZoneComponent>(); return new SafeZoneInfo(_ids.GetOrAssign(e), SocialState.Clean(zone.ZoneName, 64), zone.Radius, 0); }).ToArray();
+    }
+
+    // Creative tools follow the admin role: a player demoted (or no longer known as an admin here) loses them, and only
+    // connected admins weld without components. The world's own creative mode is the game's business.
+    private void ReconcileCreative(Session session)
+    {
+        var mode = session.SessionComponents.TryGet<GameModeSessionComponent>();
+        if (mode == null || mode.CreativeGlobal || mode.CreativeOwners == null) { FreeWelders = new(); return; }
+        long hostIdentity = Y51_SE2Online.Dedicated.DedicatedRuntime.Requested ? 0 : _hostIdentity;
+        var players = _host?.Players() ?? Array.Empty<HostSession.PlayerRecord>();
+        // Only players this server knows (they joined since it started) are judged: an admin's creative tools survive a restart,
+        // a demoted player's end as soon as they are back. Nobody else can get into the set (AdminGuard).
+        bool Admin(long identity) => identity != 0 && (identity == hostIdentity || !players.Any(p => p.IdentityId == identity) || players.Any(p => p.IdentityId == identity && _host!.IsAdminClient(p.ClientId)));
+        bool ConnectedAdmin(long identity) => identity != 0 && (identity == hostIdentity || players.Any(p => p.IdentityId == identity && p.Peer.HasValue && _host!.IsAdminClient(p.ClientId)));
+        var creative = mode.CreativeOwners.Select(i => (long)i).ToList();
+        foreach (long identity in CreativeTools.Revoke(creative, Admin))
+        {
+            mode.CreativeChanged(new IdentityId(identity), false);
+            _log.Info($"admin: creative tools off for identity {identity} (not an admin on this server)");
+        }
+        // With identities off every player plays as the host's identity, so a free welder would be everyone.
+        FreeWelders = IdentitiesOn ? CreativeTools.FreeWelders(creative, ConnectedAdmin) : new();
     }
 
     private Entity CharacterOf(ushort clientId)

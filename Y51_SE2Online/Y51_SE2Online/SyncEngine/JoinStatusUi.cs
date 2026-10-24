@@ -211,6 +211,8 @@ internal sealed class JoinStatusUi
 			if (_readiness is not { } wait) return null;
 			line = wait.Title;
 			detail = wait.Detail ?? "";
+			// The world's objects are still on the way: how much, how fast, how long.
+			if (wait.Current == WorldReadiness.Part.World && progress.DownloadLine() is { } download) detail = download + (detail.Length > 0 ? "\n" + detail : "");
 			readiness = wait.Fraction;
 		}
 		else
