@@ -109,7 +109,7 @@ internal sealed record PingHudState(PingHudState.Tick[] Ticks, PingHudState.Row[
 /// </summary>
 internal static class PingMarkers
 {
-	private const string MarkerIdentifier = "Y51_SE2Online.Ping";
+	internal const string MarkerIdentifier = "Y51_SE2Online.Ping";
 	private static readonly ColorSRGB AdminColour = new(240, 160, 30);
 	private static readonly FieldInfo EntityBackingField = EngineMembers.Field(HookTargets.Reflected.Single(m => m.Id == "component-entity"));
 

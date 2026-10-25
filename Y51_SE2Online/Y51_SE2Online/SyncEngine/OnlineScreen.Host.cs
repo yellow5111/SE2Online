@@ -60,7 +60,7 @@ public sealed partial class OnlineScreen
 
         // The session card.
         _statusPill.Child = _statusPillText;
-        _heroTitle.TextWrapping = TextWrapping.NoWrap; _heroTitle.TextTrimming = TextTrimming.CharacterEllipsis;
+        _heroTitle.TextWrapping = TextWrapping.Wrap; _heroTitle.TextTrimming = TextTrimming.None;
         _heroDetail.HorizontalAlignment = HorizontalAlignment.Left; _heroDetail.TextAlignment = TextAlignment.Left;
         var actions = OnlineUi.Row(_host, _load, _create, _invite, _hostPlayers, _stopHost);
         actions.Margin = new Thickness(0, 12, 0, 0);

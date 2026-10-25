@@ -50,13 +50,22 @@ internal sealed class OwnSignal(string name, OwnArg[] args)
 	/// <summary>The entity the signal is raised on (the first argument).</summary>
 	public object? Target => Args.Length > 0 ? Args[0].Value : null;
 
-	/// <summary>Whether every entity the signal names has a network id (else no peer could resolve it).</summary>
+	/// <summary>Whether every entity the signal names has a network id (else no peer could resolve it). An entity inside a
+	/// SkipOnReplicationFail counts too: without an id it is written as -1, which reads as an empty reference instead of
+	/// skipping the signal as the wrapper asks.</summary>
 	public bool NamesOnly(OwnIds ids)
 	{
 		foreach (OwnArg arg in Args)
-			if (arg.Kind == ArgKind.Entity && ids.TryGetId(arg.Value!) == null && ids.TryGetRetiredId(arg.Value!) == null) return false;
+		{
+			if (arg.Kind == ArgKind.Entity && !Named(ids, arg.Value!)) return false;
+			if (arg.Kind == ArgKind.Object && arg.Value is Keen.VRage.Multiplayer.Replications.FailureStrategies.ISkipOnReplicationFail
+				&& Keen.VRage.Multiplayer.Replications.FailureStrategies.ReplicationFailureStrategyHelpers.GetWrappedValue(arg.Value) is { } inner
+				&& (inner as Entity ?? (inner as Component)?.Entity) is { } wrapped && !Named(ids, wrapped)) return false;
+		}
 		return true;
 	}
+
+	private static bool Named(OwnIds ids, object entity) => ids.TryGetId(entity) != null || ids.TryGetRetiredId(entity) != null;
 }
 
 /// <summary>

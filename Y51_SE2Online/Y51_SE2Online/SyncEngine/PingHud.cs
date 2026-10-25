@@ -190,7 +190,7 @@ public sealed class PingHudScreen : ScreenView
 		line.Children.Add(new Rectangle { Width = 3, Height = 22, Fill = colour });
 		line.Children.Add(PingHud.Glyph(row.Glyph, row.Colour, 20));
 		int colon = row.Text.IndexOf(": ", StringComparison.Ordinal);
-		var text = new TextBlock { FontSize = 18, VerticalAlignment = VerticalAlignment.Center, MaxWidth = 460, TextTrimming = TextTrimming.CharacterEllipsis };
+		var text = new TextBlock { FontSize = 18, VerticalAlignment = VerticalAlignment.Center, MaxWidth = 460, TextWrapping = TextWrapping.Wrap, TextTrimming = TextTrimming.None };
 		text.Inlines.Add(new Avalonia.Controls.Documents.Run(colon > 0 ? row.Text[..colon] : "") { Foreground = colour, FontWeight = FontWeight.Bold });
 		text.Inlines.Add(new Avalonia.Controls.Documents.Run(colon > 0 ? row.Text[colon..] : row.Text) { Foreground = Brushes.White });
 		line.Children.Add(text);

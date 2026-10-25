@@ -220,6 +220,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			Optional("pings and the marker filter", () => PingClient.Install(_harmony));
 			Optional("sound range", () => SoundRange.Install(_harmony));
 			Optional("full antenna and player names on the HUD", () => HudNameWidth.Install(_harmony));
+			Optional("HUD notices wrap instead of cutting names", () => NotificationWrap.Install(_harmony));
 			Optional("flora sector fix", () => FloraSectorSpawnFix.Install(_harmony));
 			Optional("host-only saves", () => HostOnlySaves.Install(_harmony));
 			Optional("trade UI", TradeUi.Install);

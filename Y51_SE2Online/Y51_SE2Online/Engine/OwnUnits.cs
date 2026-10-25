@@ -67,15 +67,18 @@ internal static class OwnArchive
 		int count = reader.GetChunks().Count;
 		var values = new object?[count];
 		var errors = new Exception?[count];
+		var skipped = new bool[count];
 		for (int i = 0; i < count; i++)
 		{
+			int misses = OwnIds.SkipMisses;
 			try
 			{
 				values[i] = reader.ReadChunk<object>(Chunk(i)) is IStoryFieldValue box ? box.Boxed : throw new InvalidDataException("a value of another kind");
 			}
 			catch (Exception ex) when (ex.CanHandle()) { errors[i] = ex; }
+			skipped[i] = OwnIds.SkipMisses != misses;
 		}
-		return new Leaves(values, errors);
+		return new Leaves(values, errors, skipped);
 	}
 
 	// The game's reader allocates every table and chunk at the size the archive claims before it reads a byte: a few bytes
@@ -281,9 +284,12 @@ internal static class OwnArchive
 		}
 	}
 
-	public sealed class Leaves(object?[] values, Exception?[] errors)
+	public sealed class Leaves(object?[] values, Exception?[] errors, bool[]? skipped = null)
 	{
 		public int Count => values.Length;
+
+		/// <summary>Whether a skip-on-fail reference inside the value named an object this side does not have.</summary>
+		public bool Skipped(int index) => skipped != null && (uint)index < (uint)skipped.Length && skipped[index];
 
 		public object? Get(int index)
 		{
@@ -424,7 +430,11 @@ internal static class OwnUnits
 		case ArgKind.Null:
 			return new OwnArg(ArgKind.Null, null);
 		case ArgKind.Object:
-			return new OwnArg(ArgKind.Object, leaves.Get((int)arg.Leaf) ?? throw new InvalidDataException("an object argument read as null"));
+		{
+			object value = leaves.Get((int)arg.Leaf) ?? throw new InvalidDataException("an object argument read as null");
+			if (leaves.Skipped((int)arg.Leaf)) throw new InvalidDataException("a skip-on-fail reference names an object this game does not have");
+			return new OwnArg(ArgKind.Object, value);
+		}
 		case ArgKind.Inline:
 		{
 			object value = leaves.Get((int)arg.Leaf) ?? throw new InvalidDataException("an inline argument read as null");

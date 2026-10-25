@@ -316,7 +316,8 @@ public sealed class JoinProgress
 
 	private JoinText DescribeLocked(long now)
 	{
-		string host = Cut(_host, 20);
+		// Steam names are at most 32 characters (64 UTF-16 units with emoji): a player hosting is never cut.
+		string host = Cut(_host, 64);
 		string retryHint = " Open Multiplayer to retry.";
 		// SE2 Online's own join announces no size (_expected 0): the meter's wire bytes, with the size while a big part is in flight.
 		string progress = _expected > 0 ? Mib(Math.Min(_received, _expected)) + "/" + Mib(_expected) + " MiB" : _download.Started ? _download.Describe() : Mib(_received) + " MiB";

@@ -28,7 +28,21 @@ internal sealed class OwnIds : ReplicationSerializationContextBase
 
 	public override NetworkId? TryGetId(object instance) => _toId.TryGetValue(instance, out var id) ? id : null;
 
-	public override object? TryGetObject(NetworkId id) => _toObject.GetValueOrDefault(id);
+	public override object? TryGetObject(NetworkId id)
+	{
+		object? found = _toObject.GetValueOrDefault(id);
+		if (found == null && CurrentStrategy == Keen.VRage.Multiplayer.Replications.FailureStrategies.ReplicationFailureStrategy.Skip) _skipMisses++;
+		return found;
+	}
+
+	// The game's wire path hands a SkipOnReplicationFail<T> whose object is not here to the handler as null (only Throw
+	// throws), yet the wrapper's contract is "skip the whole signal" and handlers dereference it (ProjectileVisuals'
+	// impact job crashed the player's game). A reader counts these misses around each value it reads (thread-local: one
+	// value is read on one thread).
+	[ThreadStatic] private static int _skipMisses;
+
+	/// <summary>Lookups on this thread that found nothing while a skip-on-fail value was being read.</summary>
+	internal static int SkipMisses => _skipMisses;
 
 	public override NetworkId? TryGetRetiredId(object instance) => _retired.TryGetValue(instance, out object? id) ? (NetworkId)id : null;
 

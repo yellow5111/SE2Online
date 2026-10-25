@@ -77,7 +77,7 @@ internal sealed class GridOwnershipView
         ToolTip.SetTip(_faction, "Your faction members can use this grid.");
         ToolTip.SetTip(_everyone, "All players can use this grid.");
         _details.Classes.Remove("SubTitle"); _details.FontSize = 20;
-        _details.TextWrapping = Avalonia.Media.TextWrapping.NoWrap; _details.TextTrimming = Avalonia.Media.TextTrimming.CharacterEllipsis;
+        _details.TextWrapping = Avalonia.Media.TextWrapping.Wrap; _details.TextTrimming = Avalonia.Media.TextTrimming.None;
         _transferRow = _transfer;
         var stack = new StackPanel { Spacing = 6 };
         stack.Children.Add(_details);

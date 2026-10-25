@@ -49,7 +49,7 @@ public sealed class PlayerAimView : Grid
 
     private static TextBlock Line(double size, bool bold = false)
     {
-        var text = new TextBlock { FontSize = size, TextWrapping = TextWrapping.Wrap, FontWeight = bold ? FontWeight.Bold : FontWeight.Normal };
+        var text = new TextBlock { FontSize = size, TextWrapping = TextWrapping.Wrap, TextTrimming = TextTrimming.None, FontWeight = bold ? FontWeight.Bold : FontWeight.Normal };
         text.Bind(TextBlock.ForegroundProperty, new VRageDynamicResource("HighContrast"));
         return text;
     }

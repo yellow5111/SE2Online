@@ -328,7 +328,7 @@ public sealed class MarkerFilterScreen : ScreenView
 		{
 			uint id = row.Id;
 			var text = OnlineUi.Text(row.Text, size: 17);
-			text.TextTrimming = TextTrimming.CharacterEllipsis; text.HorizontalAlignment = HorizontalAlignment.Left;
+			text.TextTrimming = TextTrimming.None; text.HorizontalAlignment = HorizontalAlignment.Left;
 			var keep = OnlineUi.SmallButton("Keep", () => MpMenu.Queue(() => PingClient.Keep(id)), "MarkerKeep" + id);
 			var line = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
 			line.Children.Add(text);

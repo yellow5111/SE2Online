@@ -48,7 +48,7 @@ internal static class OnlineUi
 
     public static TextBlock Text(string value, string style = null, double size = 24, bool inheritForeground = false)
     {
-        var text = new TextBlock { Text = value, FontSize = size, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
+        var text = new TextBlock { Text = value, FontSize = size, TextWrapping = TextWrapping.Wrap, TextTrimming = TextTrimming.None, VerticalAlignment = VerticalAlignment.Center };
         if (style != null) text.Classes.Add(style);
         if (!inheritForeground) text.Bind(TextBlock.ForegroundProperty, new VRageDynamicResource("HighContrast"));
         return text;
@@ -293,7 +293,8 @@ internal static class OnlineUi
     private static Grid Cells(string widths, string[] values, bool inheritForeground)
     {
         var cells = new Control[values.Length];
-        for (int i = 0; i < values.Length; i++) cells[i] = Fit(Text(values[i], i == 0 ? "Bright" : null, 24, inheritForeground));
+        // List rows carry names: they wrap like table names instead of shrinking to one unreadable line.
+        for (int i = 0; i < values.Length; i++) cells[i] = inheritForeground ? Cell(values[i], true, i == 0) : Fit(Text(values[i], i == 0 ? "Bright" : null, 24, inheritForeground));
         return CellRow(widths, cells);
     }
 
@@ -383,8 +384,8 @@ internal static class OnlineUi
     /// <summary>
     /// A name on one line at full size, else wrapped a little smaller: two lines at 80 %, three at 70 % (down to 58 %
     /// if needed); every row is tall enough for three. Long words break too, so the directory's longest names
-    /// (100 characters) show in full; "..." is only a safety net past that. Like FitText it asks for no width, so a long
-    /// name never widens its column.
+    /// (100 characters) show in full; a longer one keeps wrapping at the smallest size and the row grows. Nothing is ever
+    /// cut. Like FitText it asks for no width, so a long name never widens its column.
     /// </summary>
     internal sealed class NameText : Decorator
     {
@@ -414,18 +415,10 @@ internal static class OnlineUi
             // Unbounded, or a column squeezed to almost nothing: nothing sensible to wrap to.
             if (double.IsInfinity(width) || width < Size * 2) return text.DesiredSize.Height;
             var space = new Size(width, double.PositiveInfinity);
-            int lines = 1;
             foreach (var (scale, allowed) in Steps)
             {
-                lines = allowed;
                 Show(text, Full, Math.Round(Size * scale)); text.Measure(space);
                 if (text.TextLayout.TextLines.Count <= allowed) break;
-            }
-            for (int cut = Full.Length; text.TextLayout.TextLines.Count > lines && cut > 1;)
-            {
-                var last = text.TextLayout.TextLines[lines - 1];
-                cut = Math.Min(cut - 1, last.FirstTextSourceIndex + last.Length - 1);
-                Show(text, Full[..cut].TrimEnd() + "...", text.FontSize); text.Measure(space);
             }
             return text.DesiredSize.Height;
         }

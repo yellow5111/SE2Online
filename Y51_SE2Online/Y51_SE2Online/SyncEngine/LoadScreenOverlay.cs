@@ -181,6 +181,7 @@ internal static class LoadScreenOverlay
 		canvas.Children.Add(At(wordmark, L.WordmarkLeft, L.WordmarkTop));
 		canvas.Children.Add(At(_server = Text(L.ServerSize, L.Muted), L.WordmarkLeft, L.ServerTop));
 		_server.Width = L.Column - 40 - L.WordmarkLeft;
+		_server.TextWrapping = TextWrapping.Wrap; _server.TextTrimming = TextTrimming.None;
 		canvas.Children.Add(At(_stage = Text(L.StageSize, L.White, FontWeight.Bold), L.Column, L.StageTop));
 		_stage.Width = L.Right - L.Column - 120;
 		canvas.Children.Add(At(_percent = Text(L.StageSize, L.Amber, FontWeight.Bold), L.Column, L.StageTop));

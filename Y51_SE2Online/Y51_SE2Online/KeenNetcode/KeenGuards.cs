@@ -76,7 +76,33 @@ internal static class KeenGuards
 		// Recharge is also the name of the static job stub around it; the instance one reads the seat's ownership.
 		Guard("seat recharge", () => harmony.Patch(System.Linq.Enumerable.Single(AccessTools.GetDeclaredMethods(AccessTools.TypeByName("Keen.Game2.Simulation.WorldObjects.Characters.CharacterChargeStatFromSeatResourceComponent")), m => m.Name == "Recharge" && !m.IsStatic),
 			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(SeatRechargeFinalizer))));
+		Guard("impact effects", () => harmony.Patch(AccessTools.Method(typeof(Keen.Game2.Client.GameSystems.ProjectileSystems.ProjectileVisualsSessionComponent), "CreateImpactEffect"),
+			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(ImpactEffectPrefix))));
+		Guard("tracer effects", () => harmony.Patch(AccessTools.Method(typeof(Keen.Game2.Client.GameSystems.ProjectileSystems.ProjectileVisualsSessionComponent), "CreateTracerEffect"),
+			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(TracerEffectPrefix))));
 		GameLog.Instance.Info($"keen guards: {installed} of {total} installed");
+	}
+
+	// The client's impact job reads the hit entity, projectile and material of every queued request without a check; a
+	// request whose hit entity this player does not have (or that left the world before the job ran) crashed the game.
+	private static bool ImpactEffectPrefix(Keen.Game2.Client.GameSystems.ProjectileSystems.ProjectileVisualsSessionComponent.ImpactEffectRequest request)
+	{
+		var hit = request.HitEntity;
+		string? why = Sync.ImpactRequestRule.Refusal(hit != null, hit != null && hit.Data.Scene is { } scene && scene.IsEntityAlive(hit.DEntity),
+			request.Projectile != null, request.HitMaterial != null);
+		if (why == null) return true;
+		GameLog.Instance.WarnOnce("impact-effect-" + why, $"keen guards: skipped a projectile impact effect with {why} (further ones not logged)");
+		return false;
+	}
+
+	// The tracer job reads the shooter's parents before its own alive check.
+	private static bool TracerEffectPrefix(in Keen.Game2.Client.GameSystems.ProjectileSystems.ProjectileVisualsSessionComponent.TracerEffectRequest request)
+	{
+		var source = request.SourceEntity;
+		string? why = Sync.ImpactRequestRule.TracerRefusal(source != null, source != null && source.Data.Scene is { } scene && scene.IsEntityAlive(source.DEntity));
+		if (why == null) return true;
+		GameLog.Instance.WarnOnce("tracer-effect-" + why, $"keen guards: skipped a projectile tracer with {why} (further ones not logged)");
+		return false;
 	}
 
 	// A character's controller can still hold a contact with a body that was destroyed this frame (a corpse or grid piece

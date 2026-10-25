@@ -43,7 +43,7 @@ internal static class ChatUi
 
     internal static Control Line(ChatLine line, double opacity)
     {
-        var text = new TextBlock { FontSize = 18, TextWrapping = TextWrapping.Wrap, Opacity = opacity, MaxWidth = 440 };
+        var text = new TextBlock { FontSize = 18, TextWrapping = TextWrapping.Wrap, TextTrimming = TextTrimming.None, Opacity = opacity, MaxWidth = 440 };
         IBrush nameBrush = line.Kind switch { ChatKind.System => Brushes.Gold, ChatKind.Admin => new SolidColorBrush(Color.FromRgb(255, 170, 60)), _ => new SolidColorBrush(Color.FromRgb(120, 200, 255)) };
         // Role decorations come from the group's style table, drawn as their own runs: a name can never carry them.
         var style = line.Kind == ChatKind.System ? null : AdminAccess.StyleOf(line.Group);
