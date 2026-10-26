@@ -31,8 +31,16 @@ internal static class JetpackFlames
 
 	private static long _echoLoggedMs;
 
-	// Diagnostic only ("jetpack won't turn on"): the server's movement state applied over a different one this game had for
-	// its own character, which is what turns a jetpack the player just switched on back off.
+	// -y51online:jetecho:off applies the server's movement state over this game's prediction as before.
+	private static readonly bool EchoOff = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "jetecho:off");
+
+	/// <summary>Server values of the jetpack switch this game kept its own prediction over.</summary>
+	internal static long EchoesKept;
+
+	// The server's movement state for this game's own character. While this game predicts its toggles, a jetpack on/off
+	// value from the server is left out (Sync.OwnState.KeepsOwnMovement): it was sent before the server ran the input
+	// that toggled it here, and it switched a jetpack just turned on in gravity back off. The acks carry the server's
+	// state; a refusal or a change the server made itself comes back flagged there and is taken at once.
 	private static void InstallEchoLog(Harmony harmony)
 	{
 		var callbacks = AccessTools.TypeByName("Game2.Simulation.Replication.CB.InProcessReplicationReaderCallbacks");
@@ -41,17 +49,24 @@ internal static class JetpackFlames
 		harmony.Patch(apply, prefix: new HarmonyMethod(typeof(JetpackFlames), nameof(ApplyPrefix)));
 	}
 
-	private static void ApplyPrefix(Keen.VRage.DCS.Components.Entity entity, in CharacterMovementState value)
+	private static bool ApplyPrefix(Keen.VRage.DCS.Components.Entity entity, in CharacterMovementState value)
 	{
 		try
 		{
-			if (!MpPlugin.Online || !ReferenceEquals(entity, OwnMotion.OwnEntity) || !ReferenceEquals(entity.Scene, MpPlugin.App?.ClientSession?.Scene)) return;
-			if (entity.TryGet<CharacterMovementComponent>() is not { } movement || movement.CurrentMovementState == value) return;
+			if (!MpPlugin.Online || !ReferenceEquals(entity, OwnMotion.OwnEntity) || !ReferenceEquals(entity.Scene, MpPlugin.App?.ClientSession?.Scene)) return true;
+			if (entity.TryGet<CharacterMovementComponent>() is not { } movement || movement.CurrentMovementState == value) return true;
+			bool predicting = ReferenceEquals(entity, OwnMotion.TogglePredicting);
+			bool alive = !SyncEngine.EngineCodec.IsDead(entity) && entity.TryGet<CharacterLifeComponent>()?.IsAlive == true;
+			bool keep = !EchoOff && Sync.OwnState.KeepsOwnMovement(predicting, alive, (int)movement.CurrentMovementState, (int)value);
+			if (keep) EchoesKept++;
 			long now = MpClock.NowMs();
-			if (now - _echoLoggedMs < 5000) return;
-			_echoLoggedMs = now;
-			GameLog.Instance.Info($"jetpack: the server's movement state {value} replaced this game's {movement.CurrentMovementState} on its own character (input {OwnMotion.Seq}, prediction {(OwnMotion.Driving != null ? "on" : "off")}, toggle prediction {(OwnMotion.TogglePredicting != null ? "on" : "off")})");
+			if (now - _echoLoggedMs >= 5000)
+			{
+				_echoLoggedMs = now;
+				GameLog.Instance.Info($"jetpack: the server's movement state {value} {(keep ? "left out over" : "replaced")} this game's {movement.CurrentMovementState} on its own character (input {OwnMotion.Seq}, prediction {(OwnMotion.Driving != null ? "on" : "off")}, toggle prediction {(predicting ? "on" : "off")}{(keep ? "; the acks carry the server's state" : "")})");
+			}
+			return !keep;
 		}
-		catch (System.Exception) { }
+		catch (System.Exception) { return true; }
 	}
 }

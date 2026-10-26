@@ -109,6 +109,48 @@ internal sealed class OwnIds : ReplicationSerializationContextBase
 	{
 		_toId.Clear();
 		_toObject.Clear();
+		_leaving.Clear();
+	}
+
+	// A player's game: objects the server destroyed in this inbound job. The game unpairs them only at the end of its
+	// inbound replication (LegacyClientSessionComponent.RemovePendingPairings, ObservableObjectReplicationClientSessionComponent
+	// .DestroyPendingObjects), because the destroys ride ahead of the frame's stories and signals, which the server recorded
+	// before it released the objects. Dropping the id at once made those unreadable (F71).
+	private readonly Dictionary<NetworkId, object> _leaving = new();
+
+	/// <summary>
+	/// The server destroyed the object under <paramref name="id"/>: it is returned for the game to destroy, and its pairing ends
+	/// when this inbound job ends (<see cref="EndInbound"/>), or at once with <paramref name="atOnce"/> (0.18.1's way). Null when
+	/// there is nothing to destroy: no such object here, another kind, or already destroyed in this job (the game was told once).
+	/// </summary>
+	public T? BeginDestroy<T>(NetworkId id, bool atOnce) where T : class
+	{
+		if (_leaving.ContainsKey(id) || _toObject.GetValueOrDefault(id) is not T instance) return null;
+		if (atOnce) Remove(id);
+		else _leaving[id] = instance;
+		return instance;
+	}
+
+	public bool IsLeaving(NetworkId id) => _leaving.ContainsKey(id);
+
+	/// <summary>The object was destroyed in this job: it still resolves for what names it, but nothing more is written to it.</summary>
+	public bool IsLeaving(object? instance) => instance != null && TryGetId(instance) is { } id && _leaving.TryGetValue(id, out object? old) && ReferenceEquals(old, instance);
+
+	/// <summary>A new object arrives under an id whose old object is leaving in this job: the old pairing ends now.</summary>
+	public void FinishLeaving(NetworkId id)
+	{
+		if (_leaving.Remove(id, out object? old) && ReferenceEquals(_toObject.GetValueOrDefault(id), old)) Remove(id);
+	}
+
+	/// <summary>The end of an inbound job: every pairing destroyed in it ends (one paired again since is left alone).</summary>
+	public int EndInbound()
+	{
+		if (_leaving.Count == 0) return 0;
+		int ended = 0;
+		foreach (var (id, old) in _leaving)
+			if (ReferenceEquals(_toObject.GetValueOrDefault(id), old)) { Remove(id); ended++; }
+		_leaving.Clear();
+		return ended;
 	}
 }
 

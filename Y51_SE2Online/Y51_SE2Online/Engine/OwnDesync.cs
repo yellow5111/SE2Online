@@ -179,7 +179,7 @@ internal static class OwnDesync
 		var check = DesyncCheckMessage.Decode(bytes);
 		var inRange = new List<uint>();
 		foreach (var (id, instance) in ids.Resolved)
-			if (id.Value >= check.Lo && id.Value <= check.Hi && instance is Entity { Scene: not null }) inRange.Add((uint)id.Value);
+			if (id.Value >= check.Lo && id.Value <= check.Hi && instance is Entity { Scene: not null } && !ids.IsLeaving(id)) inRange.Add((uint)id.Value);
 		var mismatches = DesyncDigest.Compare(check, (id, _) => Root(ids, id), inRange, own: 0);
 		DesyncStats.Count(ref DesyncStats.ChecksIn);
 		DesyncStats.Count(ref DesyncStats.ReportedOut, mismatches.Count);

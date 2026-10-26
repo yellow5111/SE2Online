@@ -263,13 +263,28 @@ public sealed partial class HostSession
 			AuditLog.Write("admin", $"{actorName} ({actorId})", r.Action.ToString(), "refused: " + refused);
 			return refused;
 		}
+		// Each answer walks every grid in the world: one at a time per admin.
+		if (!owner && r.Action == AdminAction.PlayerInfo)
+			lock (_playerInfoAsked)
+			{
+				long at = _clock();
+				if (_playerInfoAsked.TryGetValue(actorId, out long last) && at - last < 500) return "Player info is still on its way; ask again in a moment.";
+				_playerInfoAsked[actorId] = at;
+			}
 		if (r.Action is AdminAction.Creative or AdminAction.Invulnerable or AdminAction.SpawnPrefab or AdminAction.SpawnItem or AdminAction.CreateSafeZone or AdminAction.DeleteSafeZone
 			or AdminAction.TeleportTo or AdminAction.Bring or AdminAction.Kill or AdminAction.EntityQuery or AdminAction.EntityAction
-			or AdminAction.CleanupPreview or AdminAction.CleanupRun or AdminAction.CleanupSettings or AdminAction.SetHome)
+			or AdminAction.CleanupPreview or AdminAction.CleanupRun or AdminAction.CleanupSettings or AdminAction.SetHome or AdminAction.PlayerInfo)
 		{
-			if (r.Action is AdminAction.EntityAction or AdminAction.CleanupRun or AdminAction.CleanupSettings or AdminAction.Kill)
+			if (r.Action is AdminAction.EntityAction or AdminAction.CleanupRun or AdminAction.CleanupSettings or AdminAction.Kill or AdminAction.PlayerInfo)
 				AuditLog.Write("admin", $"{actorName} ({actorId})", $"{r.Action} {r.Target} {(r.Action == AdminAction.EntityAction ? ((EntityVerb)r.Minutes).ToString() : "")} {r.Name}".Trim(), "sent to the world");
 			if (InCommand && _o.RunWorldAdmin?.Invoke(actorPeer, actorClientId, r with { Name = r.Name ?? "" }) is { } answer) return answer;
+			// RCON waits for the world's answer to player info instead of pointing at the server log.
+			if (InCommand && r.Action == AdminAction.PlayerInfo && AnswerLater is { } later)
+			{
+				AnswerLater = null;
+				_world.OnAdminRequest(actorPeer, actorClientId, r with { Name = r.Name ?? "" }, later);
+				return "";
+			}
 			if (InCommand && actorPeer is PeerId replyTo) lock (_sync) _chatReplies[replyTo] = _chatReplies.GetValueOrDefault(replyTo) + 1;
 			_world.OnAdminRequest(actorPeer, actorClientId, r with { Name = r.Name ?? "" });
 			return InCommand ? (actorPeer != null ? "" : "Sent to the world; its answer is in the server log (admin: ...).") : "";
@@ -470,6 +485,7 @@ public sealed partial class HostSession
 	}
 
 	private readonly Dictionary<PeerId, AdminQuery> _adminQueries = new();
+	private readonly Dictionary<ulong, long> _playerInfoAsked = new();
 	private long _querySerial;
 
 	/// <summary>A panel query's answer (entities, cleanup preview) for one player; it stays in their state until the next one.</summary>
@@ -544,7 +560,7 @@ public sealed partial class HostSession
 		var (bans, whitelist, _) = _o.Access.Copy(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
 		bool Can(string key) => owner || Allowed(steam, key);
 		// Acting on a player names them by SteamID, so every key that targets players shows the ids.
-		bool ids = Can("admin.players.view_ids") || Can("admin.players.kick") || Can("admin.players.ban") || Can("admin.players.set_group") || Can("admin.players.kill")
+		bool ids = Can("admin.players.view_ids") || Can("admin.players.kick") || Can("admin.players.ban") || Can("admin.players.set_group") || Can("admin.players.kill") || Can("admin.players.info")
 			|| Can("admin.teleport.to") || Can("admin.teleport.bring") || Can("admin.spawn.item_others") || Can("admin.whitelist");
 		return new AdminState
 		{

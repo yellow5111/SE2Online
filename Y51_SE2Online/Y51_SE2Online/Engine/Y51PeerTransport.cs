@@ -477,9 +477,9 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 	private IStoryCompletion ServerSafe(IStoryCompletion completion)
 		=> Host.IsServer && completion is StoryFault { Exception: not SkipNetworkStoryException } ? new StoryFault(new SkipNetworkStoryException()) : completion;
 
-	// One frame of a player's that names many stories this side cannot read is answered for the first few only, and a
-	// player that keeps sending them is disconnected (each answer costs the server a serialization).
-	private const int LostAnswersPerFrame = 32, LostStoriesPerMinute = 256;
+	// A player that keeps sending stories the server cannot read is disconnected (each answer costs a serialization);
+	// which lost stories get an answer is StoryLoss.Answer.
+	private const int LostStoriesPerMinute = StoryLoss.ServerLostPerMinute;
 	private int _lostThisFrame;
 	private long _lostWindowMs;
 	private int _lostInWindow;
@@ -507,7 +507,9 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 		catch (Exception ex) when (ex.CanHandle())
 		{
 			UnitsFailed++;
-			if (!Host.IsServer) KeenNetcode.UnitFailureLog.NoteError("story unreadable", "story", ex);
+			string name = OwnUnits.StoryName(bytes) ?? (completion ? "story completion" : "story");
+			if (!Host.IsServer) KeenNetcode.UnitFailureLog.Note("story unreadable", name, Innermost(ex));
+			else GameLog.Instance.WarnOnce("engine-story-unreadable-" + Name + name, $"engine {Name}: the player's {name} could not be read ({Innermost(ex)}); answered as skipped (further ones of this story not logged)");
 		}
 		if (handled) return;
 		StoriesLost++;
@@ -528,7 +530,7 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 			try { tcs.SetResult(new StoryProgress.Complete(new StoryFault(new SkipNetworkStoryException()))); }
 			catch (Exception ex) { GameLog.Instance.WarnOnce("engine-story-lost-end-" + Name, $"engine {Name}: ending the wait of an unreadable story failed ({Innermost(ex)})"); }
 		}
-		else if (!completion && ++_lostThisFrame <= LostAnswersPerFrame && Host.Replication.IsValidForeignStoryId(storyId))
+		else if (!completion && StoryLoss.Answer(Host.IsServer, ++_lostThisFrame, _lostInWindow) && Host.Replication.IsValidForeignStoryId(storyId))
 		{
 			GameLog.Instance.WarnOnce("engine-story-lost-" + Name, $"engine {Name}: a story ({storyId}) names something this side does not have; answered as skipped (further ones counted in the stats line)");
 			EnqueueStoryData(new StoryOut { Id = storyId, Completion = new StoryFault(new SkipNetworkStoryException()) });
@@ -707,14 +709,25 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 	public void ProcessInbound()
 	{
 		if (_disposed) return;
+		try { ProcessInboundCore(); }
+		// Where the game unpairs what the server destroyed: after everything of this job's frames was applied.
+		finally { if (!Host.IsServer) Host.Ids.EndInbound(); }
+	}
+
+	private void ProcessInboundCore()
+	{
+		long framesBefore = FramesIn;
 		TakeFrames();
 		System.Threading.Volatile.Write(ref _leftAfterTake, _frames.Ready + _frames.Buffered);
 		ApplyParked();
+		bool beat = FramesIn != framesBefore;
 		while (_state.TryDequeue(out byte[] message))
 		{
+			beat = true;
 			try { EngineWire.ReadState(message, this); }
 			catch (Exception ex) { GameLog.Instance.WarnOnce("engine-state-" + Name, $"engine {Name}: a state message could not be read ({ex.GetType().Name}: {ex.Message})"); }
 		}
+		if (beat && !Host.IsServer) KeenNetcode.MotionSmoothing.Heartbeat();
 		if (!Host.IsServer && _newestMotion != 0)
 		{
 			KeenNetcode.AnimPlayout.NoteSamples(_newestMotion);
@@ -819,6 +832,7 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 		SignalsIn++;
 		EngineCoverage.Note("signal", signal.Name, In);
 		if (!AcceptSignal(signal)) return;
+		if (!Host.IsServer && NamesLeaving(signal)) { Dropped++; return; }
 		if (!Host.IsServer && !NoSignalHold && Building(signal)) { _parkedSignals.Add((signal, MpClock.NowMs())); SignalsParked++; return; }
 		if (!Host.IsServer) { Replay(signal); return; }
 		var sender = KeenNetcode.ServerAccess.EnterSignal(PeerClientId, signal.Name);
@@ -834,12 +848,24 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 
 	protected virtual bool AcceptSignal(OwnSignal signal) => true;
 
+	// A player's game: an entity the server destroyed in this job stays resolvable for the stories that name it, but a signal
+	// on it would act on an entity being closed (0.18.1 dropped these as unreadable).
+	private bool NamesLeaving(OwnSignal signal)
+	{
+		foreach (OwnArg arg in signal.Args)
+			if (arg.Kind == ArgKind.Entity && Host.Ids.IsLeaving(arg.Value)) return true;
+		return false;
+	}
+
+	private bool Leaving(uint netId) => !Host.IsServer && Host.Ids.IsLeaving(new NetworkId(netId));
+
 	/// <summary>An object batch, destruction or acknowledgement (<see cref="OwnUnits"/>).</summary>
 	protected abstract void HandleReplication(byte[] unit);
 
 	public void OnData(uint netId, ushort key, ReadOnlySpan<byte> bytes)
 	{
 		DataIn++;
+		if (Leaving(netId)) return;
 		try
 		{
 			if (!Resolve(netId, key, bytes.Length, out var entity, out int typeId) || !AcceptData(typeId, entity, removal: false)) return;
@@ -862,6 +888,7 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 		try
 		{
 			_parkedData.Remove((netId, key));
+			if (Leaving(netId)) return;
 			if (Resolve(netId, key, -1, out var entity, out int typeId) && Scene.IsEntityAlive(entity.DEntity) && AcceptData(typeId, entity, removal: true))
 				DataMarshal.TryRemove(Scene, entity.DEntity, typeId);
 		}
@@ -893,6 +920,7 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 	private void OnSampledCore(long stamp, bool reliable, uint netId, ushort key, ReadOnlySpan<byte> bytes)
 	{
 		SampledIn++;
+		if (Leaving(netId)) return;
 		if (!Fresh(netId, key, stamp, reliable)) { StaleSampled++; return; }
 		if (!Resolve(netId, key, bytes.Length, out var entity, out int typeId) || !AcceptData(typeId, entity, removal: false)) return;
 		if (!InScene(entity))
@@ -913,6 +941,7 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 			Write(entity, typeId, bytes);
 			return;
 		}
+		if (ClientRagdolls.IgnoresSample(Host.IsServer, entity)) return;
 		var motion = MemoryMarshal.Read<Keen.VRage.Game.Multiplayer.EntityMotionState>(bytes);
 		long ticks = motion.ServerTime.Ticks;
 		// The first sample since this body was built from its bundle (a join, streaming in): playback starts here. Blending
@@ -1203,6 +1232,7 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 				// (a client could close the server by sending back a story of the right type that does not restore).
 				progress = new StoryProgress.Complete(new StoryFault(new SkipNetworkStoryException()));
 			}
+			if (progress is StoryProgress.Complete { Completion: StoryFault fault }) KeenNetcode.KeenGuards.NoteRemoteFault(fault.Exception);
 			tcs.SetResult(progress);
 			return;
 		}
@@ -1244,6 +1274,9 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 			}
 			finally { if (Host.IsServer) KeenNetcode.ServerAccess.LeaveStory(caller); }
 			result = machine == null ? new StoryProgress.Complete(new StoryFault(new SkipNetworkStoryException())) : await hosted;
+			// Named once per story: a request the server's own code failed (the trade screen's prices) left no trace before.
+			if (machine != null && result is StoryProgress.Complete { Completion: StoryFault { Exception: { } fault and not SkipNetworkStoryException } })
+				GameLog.Instance.WarnOnce("engine-story-fault-" + Name + move.Name, $"engine {Name}: {move.Name} failed here ({Innermost(fault)}); further ones of this story not logged");
 		}
 		catch (Exception ex) when (ex.CanHandle())
 		{
@@ -1252,6 +1285,8 @@ internal abstract class Y51PeerTransport : IPeerTransport, IDisposable, EngineWi
 		StoryOut back;
 		try { back = ToStoryOut(result, original); }
 		catch (Exception ex) when (ex.CanHandle()) { back = new StoryOut { Id = original, Completion = new StoryFault(ex) }; }
+		if (back.Completion is StoryFault { Exception: not OperationCanceledException } failed)
+			GameLog.Instance.WarnOnce("engine-story-faulted-" + move.Name, $"engine {Name}: a player's {move.Name} failed here ({failed.Exception.GetType().Name}: {failed.Exception.Message.Split('\n')[0]}); their game is told it failed (further ones not logged)");
 		if (!_disposed) EnqueueStoryData(back);
 	}
 

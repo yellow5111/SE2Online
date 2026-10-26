@@ -21,6 +21,10 @@ public sealed partial class HostSession
 	/// <summary>Set while a console, RCON or chat command runs on the game thread: world actions answer at once, to the command.</summary>
 	[ThreadStatic] public static bool InCommand;
 
+	/// <summary>Set by RCON while its command runs: a world action that can answer later (player info) takes it, and the
+	/// world calls it with the answer; still set afterwards means nothing waits for one.</summary>
+	[ThreadStatic] public static Action<string> AnswerLater;
+
 	private volatile Dictionary<long, ulong> _identitySteam = new();
 	private long _identityVersion = -1, _identityBuiltMs;
 
@@ -136,15 +140,16 @@ public sealed partial class HostSession
 		return $"{who}: group {Perms.GroupOf(target)}, rank {Perms.RankOf(target)}{(IsOwner(target) ? ", owner (everything)" : "")}. Allowed: " + (grants.Contains("*") ? "everything" : string.Join(", ", grants));
 	}
 
-	/// <summary>The players this actor sees in the group assignment search (only with admin.players.set_group).</summary>
+	/// <summary>The players this actor sees in the group assignment search and the offline players list (only with
+	/// admin.players.set_group or admin.players.info).</summary>
 	private KnownPlayer[] KnownFor(ulong actor, bool owner)
 	{
-		if (!owner && !Allowed(actor, "admin.players.set_group")) return Array.Empty<KnownPlayer>();
+		if (!owner && !Allowed(actor, "admin.players.set_group") && !Allowed(actor, "admin.players.info")) return Array.Empty<KnownPlayer>();
 		var seen = _o.Access.SeenCopy().ToDictionary(s => s.SteamId);
 		var all = new Dictionary<ulong, KnownPlayer>();
-		foreach (var s in seen.Values) all[s.SteamId] = new KnownPlayer(s.SteamId, s.Name, Perms.GroupOf(s.SteamId), s.LastSeenUnixMs);
+		foreach (var s in seen.Values) all[s.SteamId] = new KnownPlayer(s.SteamId, s.Name, Perms.GroupOf(s.SteamId), s.LastSeenUnixMs, Perms.RankOf(s.SteamId));
 		foreach (var a in Perms.Assignments())
-			if (!all.ContainsKey(a.SteamId)) all[a.SteamId] = new KnownPlayer(a.SteamId, a.Name, a.Group, 0);
+			if (!all.ContainsKey(a.SteamId)) all[a.SteamId] = new KnownPlayer(a.SteamId, a.Name, a.Group, 0, Perms.RankOf(a.SteamId));
 		return all.Values.OrderByDescending(k => k.LastSeenUnixMs).ThenBy(k => k.Name).Take(500).ToArray();
 	}
 

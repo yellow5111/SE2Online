@@ -13,6 +13,13 @@ public static class HostCommands
 {
 	public static readonly string[] Verbs = ["say", "kick", "ban", "unban", "bans", "admin", "deadmin", "admins", "group", "whitelist", "pvp", "raid", "pcu", "sun", "usage", "perms", "cleanup"];
 
+	/// <summary>"players info &lt;player&gt; [first grid]" (or "player info"): player info, which needs admin.players.info on top of command.players.</summary>
+	public static bool IsPlayerInfo(string command)
+	{
+		string[] words = (command ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries);
+		return words.Length > 1 && words[0].ToLowerInvariant() is "players" or "player" && words[1].Equals("info", StringComparison.OrdinalIgnoreCase);
+	}
+
 	public static string Run(HostSession host, string command)
 	{
 		bool was = HostSession.InCommand;
@@ -26,12 +33,16 @@ public static class HostCommands
 		string[] words = (command ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries);
 		if (words.Length == 0) return null;
 		string verb = words[0].ToLowerInvariant();
-		if (!Verbs.Contains(verb)) return null;
+		bool info = IsPlayerInfo(command);
+		if (!Verbs.Contains(verb) && !info) return null;
 		if (host == null) throw new InvalidOperationException("Multiplayer is not running yet.");
 		string Rest(int from) => string.Join(' ', words.Skip(from));
 		ulong Id(int index) => words.Length > index && host.FindPlayer(words[index]) is var id && id != 0 ? id : throw new ArgumentException(words.Length > index ? $"No known player '{words[index]}' (give a SteamID64 or a name; see players)." : "Give a SteamID64 or a player name (see players).");
 		long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 		var invariant = CultureInfo.InvariantCulture;
+		if (info)
+			return words.Length < 3 ? "Use players info <player> [first grid], e.g. players info Bob 25 for the second page of grids."
+				: host.LocalAdmin(new AdminRequest(AdminAction.PlayerInfo, Id(2), Minutes: words.Length > 3 && int.TryParse(words[3], NumberStyles.None, invariant, out int first) ? first : 0, Value: true));
 		switch (verb)
 		{
 			case "say": host.LocalChat(Rest(1), true); return "";

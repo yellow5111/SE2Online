@@ -110,7 +110,7 @@ internal sealed class ClientWorld
 				// Each on its own: one that throws must not keep the others, or leaving the mode, from happening.
 				foreach (var (what, reset) in new (string, Action)[]
 				{
-					("client clock", ClientClock.Reset), ("animation timing", AnimPlayout.Reset), ("motion smoothing", MotionSmoothing.Reset),
+					("client clock", ClientClock.Reset), ("animation timing", AnimPlayout.Reset), ("motion smoothing", MotionSmoothing.Reset), ("motion trace", MotionTrace.Reset),
 					("own motion", KeenNetcode.OwnMotion.ResetClient), ("replication transport", Y51_SE2Online.Engine.Y51Replication.ResetClient),
 					("flora colliders", FloraPhysicsRecovery.Reset),
 					("loading screen wait", KeenNetcode.LoadReadiness.Reset),

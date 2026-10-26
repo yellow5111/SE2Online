@@ -157,6 +157,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		Optional("offline survival stats", () => OfflineStatsGuard.Install(_harmony));
 		Optional("shared discoveries", () => SharedDiscoveries.Install(_harmony));
 		Optional("motion playback", () => MotionSmoothing.Install(_harmony));
+		Optional("motion trace", () => KeenNetcode.MotionTrace.Install(_harmony));
 		Optional("flora collider recovery", () => KeenNetcode.FloraPhysicsRecovery.Install(_harmony));
 #if !PULSAR
 		Optional("hand drill claims log", () => KeenNetcode.DrillProbe.Install(_harmony));
@@ -165,6 +166,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 #endif
 		Optional("fresh grids kept from trash removal", () => KeenNetcode.FreshGridGuard.Install(_harmony));
 		Optional("stuck fast travel cancelled", () => KeenNetcode.FastTravelGuard.Install(_harmony));
+		Optional("hosted worlds keep running while the host is in a menu", () => KeenNetcode.HostPauseGuard.Install(_harmony));
 		Optional("turrets look past targets their own grid blocks", () => TurretRelations.InstallRetarget(_harmony));
 		Optional("missions and contracts for players", () => ClientWorld.InstallMissions(_harmony));
 		Optional("4.0 crash guards", () => KeenGuards.Install(_harmony));
@@ -174,11 +176,12 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		Optional("resilient replication", () => ResilientReplication.Install(_harmony));
 		Optional("cockpit toolbars for players", () => KeenNetcode.ToolbarRequests.Install(_harmony));
 		Optional("terminal waits for this player's data", () => KeenNetcode.TerminalGuard.Install(_harmony));
+		Optional("trade station prices settle one by one", () => KeenNetcode.TradeScreenGuard.Install(_harmony));
 		Optional("jetpack flames after a repeated state", () => KeenNetcode.JetpackFlames.Install(_harmony));
 		Optional("world saves survive a reference to an unsaved entity", () => KeenNetcode.SaveGuard.Install(_harmony));
 		Optional("log noise: repeated not-serializable notes", () => KeenNetcode.LogNoise.Install(_harmony));
 		Optional("SE2 Online replication engine", () => Engine.Y51Replication.Install(_harmony));
-		Optional("death ragdolls follow the server", () => Engine.ClientRagdolls.Install(_harmony));
+		Optional("death ragdolls on joined games", () => Engine.ClientRagdolls.Install(_harmony));
 		Optional("corpses follow the server", () => Engine.CorpseMotion.Install(_harmony));
 		Optional("server sync properties reach players", () => Engine.SyncProperties.Install(_harmony));
 		Optional("spawned ships for players who join later", () => StagedReplication.Install(_harmony));
@@ -334,6 +337,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		KytheraVeh.Tick();
 		if (app.Server == null) _observedWorld = null;
 		Controller?.Tick(MpClock.NowMs());
+		KeenNetcode.HostPauseGuard.Tick();
 		ServerProfiler.Lap(ServerSection.Online, started);
 		DedicatedRuntime.Tick(app);
 		started = ServerProfiler.Now;

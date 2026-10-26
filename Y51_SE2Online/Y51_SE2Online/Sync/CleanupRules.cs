@@ -31,6 +31,15 @@ public sealed record CleanupFacts
 /// <summary>The cleanup's decisions, apart from the game so they are unit tested.</summary>
 public static class CleanupRules
 {
+	/// <summary>When a cleanup clock started for <paramref name="key"/>; one not started yet starts now only when
+	/// <paramref name="track"/> (a cleanup pass), never on a read (player info shows a grid's fate without starting it).</summary>
+	public static long Clock<TKey>(IDictionary<TKey, long> clocks, TKey key, long now, bool track) where TKey : notnull
+	{
+		if (clocks.TryGetValue(key, out long started)) return started;
+		if (track) clocks[key] = now;
+		return now;
+	}
+
 	public static bool AnyHuman(IEnumerable<long> owners) => owners.Any(PlayerIdentities.IsHuman);
 
 	/// <summary>Which category a grid group falls in by its owners: any player-owned grid makes the whole group a player

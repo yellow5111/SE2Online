@@ -27,19 +27,26 @@ namespace Y51_SE2Online.KeenNetcode;
 /// ray while flying forward. Bodies in the character's own hierarchy never obstruct its camera now.
 /// -y51online:camignore:off leaves the cast as the game has it; -y51online:camdiag logs every 2 s while flying in third
 /// person what the camera sees: distances, the first thing the cast hits, where the camera is against the character, and
-/// the last correction shift.
+/// the last correction shift. Without camdiag (0.18.2) the same line is logged by itself, at most every 15 s and 20 times a
+/// session, whenever the camera is pulled in to under 60% of its zoom (or forced into first person) while flying in third
+/// person: what pulled it in reaches the log of a normal playtest. -y51online:camwatch:off turns that off.
 /// </summary>
 internal static class CameraCreep
 {
 	private static readonly bool IgnoreOff = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "camignore:off");
 	private static readonly bool Diag = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "camdiag");
+	private static readonly bool WatchOff = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "camwatch:off");
+	private const long WatchEveryMs = 15000;
+	private const int WatchMax = 20;
+	private static long _watchMs;
+	private static int _watched;
 
 	public static void Install(Harmony harmony)
 	{
 		if (!IgnoreOff)
 			harmony.Patch(AccessTools.Method(typeof(CharacterThirdPersonAdapterComponent), nameof(CharacterThirdPersonAdapterComponent.CanObstructView)),
 				prefix: new HarmonyMethod(typeof(CameraCreep), nameof(CanObstructPrefix)));
-		if (Diag)
+		if (Diag || !WatchOff)
 			harmony.Patch(AccessTools.Method(typeof(ThirdPersonCameraComponent), "CameraCollisionDetection"),
 				postfix: new HarmonyMethod(typeof(CameraCreep), nameof(CollisionPostfix)));
 	}
@@ -62,6 +69,7 @@ internal static class CameraCreep
 	{
 		try
 		{
+			if (MotionTrace.Recording) MotionTrace.Camera(__instance._unobstructedWorldTransform);
 			var own = OwnMotion.OwnEntity;
 			if (own == null || !ReferenceEquals(__instance._observedEntity, own)
 				|| own.TryGet<CharacterMovementComponent>()?.CurrentMovementState != CharacterMovementState.Jetpack) return;
@@ -69,6 +77,18 @@ internal static class CameraCreep
 			if (cameraData.IsObstructed) { _obstructed++; _minSafe = Math.Min(_minSafe, cameraData.SafeDistance); }
 			if (cameraData.InFirstPerson) _firstPerson++;
 			long now = MpClock.NowMs();
+			if (!Diag)
+			{
+				bool pulledIn = cameraData.InFirstPerson || cameraData.IsObstructed && cameraData.SafeDistance < 0.6f * cameraData.TargetDistance;
+				if (!pulledIn || _watched >= WatchMax || now - _watchMs < WatchEveryMs) return;
+				_watchMs = now;
+				_watched++;
+				GameLog.Instance.Info("camera: pulled in while flying: " + Describe(__instance, cameraData, own));
+				_frames = _obstructed = _firstPerson = 0;
+				_minSafe = float.MaxValue;
+				_shiftsAtLog = OwnMotion.Shifts;
+				return;
+			}
 			if (now < _nextLogMs) return;
 			_nextLogMs = now + 2000;
 			GameLog.Instance.Info("camera: " + Describe(__instance, cameraData, own));

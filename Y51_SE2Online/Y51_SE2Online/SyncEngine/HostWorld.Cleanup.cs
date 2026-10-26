@@ -277,7 +277,7 @@ internal sealed partial class HostWorld
     }
 
     /// <summary>One grid group's category and the reason it goes now (null: it stays), from the world as it is.</summary>
-    private Candidate Evaluate(List<Entity> group, CleanupSettings s, ScanContext x, CleanupCategory? only)
+    private Candidate Evaluate(List<Entity> group, CleanupSettings s, ScanContext x, CleanupCategory? only, bool track = true)
     {
         var owners = group.Select(TeamPermissions.OwnerOf).Distinct().ToArray();
         var category = CleanupRules.GroupCategory(owners);
@@ -286,7 +286,7 @@ internal sealed partial class HostWorld
         string name = GridName(main);
         var at = main.Data.GetWorldTransform().Position;
         int blocks = group.Sum(g => g.Get<CubeGridComponent>().CubeBlockStorage.CubeBlockCount);
-        long first = _cleanupFirstSeen.TryGetValue(main, out long t) ? t : _cleanupFirstSeen[main] = x.NowMs;
+        long first = CleanupRules.Clock(_cleanupFirstSeen, main, x.NowMs, track);
         double age = category == CleanupCategory.NpcGrids
             ? (_cleanupState.NpcIdleSince.TryGetValue(NpcKey(name, at), out long idle) ? (x.Utc - idle) / 60000.0 : 0)
             : (x.NowMs - first) / 60000.0;
@@ -299,7 +299,7 @@ internal sealed partial class HostWorld
                 ulong steam = _host?.SteamOfIdentity(owner) ?? 0;
                 if (steam == 0) steam = _host?.Access.SeenCopy().FirstOrDefault(e => e.Identity == owner)?.SteamId ?? 0;
                 if (steam != 0 && _host!.Allowed(steam, "cleanup.exempt")) exempt = true;
-                _cleanupState.FirstTracked.TryAdd(owner.ToString(System.Globalization.CultureInfo.InvariantCulture), x.Utc);
+                CleanupRules.Clock(_cleanupState.FirstTracked, owner.ToString(System.Globalization.CultureInfo.InvariantCulture), x.Utc, track);
             }
             inactive = CleanupRules.InactiveMinutes(owners, s.PlayerGrids.FactionShared, x.Utc,
                 id => x.Seen.TryGetValue(id, out long ms) ? ms : null,

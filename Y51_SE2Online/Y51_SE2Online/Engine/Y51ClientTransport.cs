@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using Keen.VRage.DCS.Components;
 using Keen.VRage.Library.Threading;
@@ -103,6 +104,8 @@ internal sealed class Y51ClientTransport : Y51PeerTransport, IClientPeerTranspor
 		for (int i = 0; i < stubs.Length; i++)
 		{
 			var id = new NetworkId(stubs[i].Id);
+			// Destroyed earlier in this job and sent again (streamed out and back in): a new object, not the leaving one.
+			Host.Ids.FinishLeaving(id);
 			if (Host.Ids.TryGetObject(id) is { } known)
 			{
 				objects[i] = known as TObject ?? throw new InvalidOperationException($"object #{id.Value} is a {known.GetType().Name} here, not a {typeof(TObject).Name}");
@@ -163,6 +166,9 @@ internal sealed class Y51ClientTransport : Y51PeerTransport, IClientPeerTranspor
 		}
 	}
 
+	// -y51online:idretire:now: a destroyed object's id stops resolving at once (0.18.1), not at the end of the inbound job.
+	private static readonly bool RetireAtOnce = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "idretire:now");
+
 	private void Destroy<TObject>(ulong batch, ulong[] ids) where TObject : class
 	{
 		var objects = new List<TObject>(ids.Length);
@@ -171,11 +177,7 @@ internal sealed class Y51ClientTransport : Y51PeerTransport, IClientPeerTranspor
 			// 0 is the session itself; an id this side never had (its batch could not be read) has nothing to destroy.
 			if (raw == 0) continue;
 			var id = new NetworkId(raw);
-			if (Host.Ids.TryGetObject(id) is TObject instance)
-			{
-				Host.Ids.Remove(id);
-				objects.Add(instance);
-			}
+			if (Host.Ids.BeginDestroy<TObject>(id, RetireAtOnce) is { } instance) objects.Add(instance);
 			ForgetHeld(raw);
 		}
 		Destructions++;

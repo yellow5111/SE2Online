@@ -68,9 +68,26 @@ internal static class OwnMotion
 		own.Data.TryGet<ControlData>(out var control);
 		float speed = RelativeSpeed(own, body);
 		bool standing = control.Movement == Vector3.Zero && control.Rotation == Vector3.Zero && speed < 1.5f;
-		bool walking = own.TryGet<CharacterMovementComponent>()?.CurrentMovementState == CharacterMovementState.Ground && speed < 7f;
+		var state = own.TryGet<CharacterMovementComponent>()?.CurrentMovementState;
+		// A jetpack under 3 m/s too (-y51online:jetskip:off: on the ground only): flying, a 55-58 ticks/s server asked 66
+		// skips a minute and got 6, and drained the rest of its queue by merging two inputs into a tick.
+		bool walking = state == CharacterMovementState.Ground && speed < 7f || !JetSkipOff && state == CharacterMovementState.Jetpack && speed < 3f;
 		return (standing, walking, blocked);
 	}
+
+	private static readonly bool JetSkipOff = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "jetskip:off");
+
+	// A stall of this game (0.2-1.3 s a few times a minute: an autosave, a GC) is followed by the missed ticks back to
+	// back. Each of them predicted the character and sent an input: about 36 inputs in 100 ms after a 0.6 s stall, over the
+	// server's 100 a second (the rest guessed), and a queue the server drained by merging. Those ticks now hold the
+	// character still (as a skipped tick does) and send nothing. -y51online:catchupfreeze:off predicts them as before.
+	private static readonly bool CatchUpFreezeOff = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "catchupfreeze:off");
+	private static readonly System.Diagnostics.Stopwatch TickWall = System.Diagnostics.Stopwatch.StartNew();
+	private static readonly CatchUpDetector CatchUp = new();
+	internal static long CatchUpHeld;
+	private static long _inputsThisSecond, _inputSecondMs, _catchUpAtSecond, _serverTicksSecond, _serverCatchUps, _serverSecondMs;
+
+	private static bool CatchingUp() => CatchUp.Tick(TickWall.Elapsed.TotalMilliseconds) && !CatchUpFreezeOff;
 
 	public static void Install(Harmony harmony)
 	{
@@ -92,6 +109,7 @@ internal static class OwnMotion
 		OwnStatePrediction.Install(harmony);
 	}
 
+
 	private static HarmonyMethod Hook(string name) => new(typeof(OwnMotion), name);
 
 	// --- player's game ---
@@ -110,7 +128,8 @@ internal static class OwnMotion
 	private static uint _seq;
 	private static volatile bool _jumpPending;
 	private static readonly List<OwnInput> Recent = new();
-	private static readonly OwnCorrection Correction = new();
+	// -y51online:softcorrect:off: every error over the deadband eased at once, as in 0.18.1 (Sync.OwnCorrection.Soft).
+	private static readonly OwnCorrection Correction = new(soft: !System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "softcorrect:off"));
 	private static readonly OwnStateCheck StateCheck = new();
 
 	// The server answers with its movement state after each input: it takes this game's toggles from its inputs.
@@ -151,6 +170,8 @@ internal static class OwnMotion
 		_idsSession = null;
 		_boundTo = null;
 		_skipFrozen = null;
+		_deckWas = null;
+		MotionSmoothing.Deck = null;
 		lock (HeldFrames) HeldFrames.Clear();
 	}
 
@@ -265,6 +286,9 @@ internal static class OwnMotion
 	/// <summary>Client session thread, after each update (one simulation tick).</summary>
 	public static void ClientTick(Session session)
 	{
+		bool catchUp = CatchingUp();
+		// Taken (or not) by the physics step that just ran.
+		_softShiftPending = false;
 		var client = NetSession.Current?.Client;
 		if (!ReferenceEquals(client, _boundTo))
 		{
@@ -340,6 +364,8 @@ internal static class OwnMotion
 			_ackedMs = now;
 			if (own != null && !Seated(own) && now >= _vanillaUntilMs) GameLog.Instance.WarnOnce("own-motion-sim", "own motion: this player's character kept the client physics definition; the server moves it");
 			_driving = false;
+			_deckWas = null;
+			MotionSmoothing.Deck = null;
 			return;
 		}
 		_ownEntity = own;
@@ -352,7 +378,7 @@ internal static class OwnMotion
 			own.Data.TryGet<RigidBodyData>(out var ownBody);
 			bool atRest = ownControl.Movement == Vector3.Zero && !_jumpPending && RelativeSpeed(own, ownBody) < 0.3f;
 			// Aiming a placement turns the mouse, which would leave only the 0.5 deg band: placing uses the steady 2 deg one.
-			switch (Correction.Measure(a.Seq, a.Parent, a.Position, a.Velocity, a.Rotation, standing: atRest, steady: ownControl.Rotation == Vector3.Zero || SyncEngine.BuildGhosts.LocalPlacing))
+			switch (Correction.Measure(a.Seq, a.Parent, a.Position, a.Velocity, a.Rotation, standing: atRest, steady: ownControl.Rotation == Vector3.Zero || SyncEngine.BuildGhosts.LocalPlacing, onDeck: !DeckVelocityOff && OnMovingDeck(own)))
 			{
 			case OwnCorrection.Outcome.Rebase:
 				Correction.Reset();
@@ -362,6 +388,8 @@ internal static class OwnMotion
 				GameLog.Instance.Info($"own motion: the server's character is over {OwnCorrection.SnapMeters} m off this game's prediction for input {a.Seq}; applied at once ({Correction.Snaps} so far)");
 				break;
 			}
+			if (MotionTrace.Recording)
+				MotionTrace.Note("ack", "own", FormattableString.Invariant($"seq={a.Seq} age={_seq - a.Seq} error_cm={Correction.LastError.Length * 100:0.0} velocity_error={Correction.LastVelocityError.Length():0.00}"));
 		}
 		if (ack is { } measured && Correction.LastError.Length > ErrorLogMeters && now - _errorLogMs > 1000)
 		{
@@ -399,6 +427,17 @@ internal static class OwnMotion
 			return;
 		}
 
+		if (catchUp)
+		{
+			// Held where it is on what it stands on until the catch-up is over (Freeze/Thaw as for a skipped tick).
+			if (_skipFrozen is { } kept) Thaw(own, kept);
+			else _skipFrozen = Freeze(own);
+			var under = Parent(own) is { } deckUnder && !EngineCodec.IsDead(deckUnder) ? PointVelocity(deckUnder, own.Data.GetWorldTransform().Position) : Vector3.Zero;
+			if (own.Data.TryGet<RigidBodyData>(out var holding)) own.Data.Set(new RigidBodyData(under, holding.AngularVelocity));
+			CatchUpHeld++;
+			if (MotionTrace.Recording) MotionTrace.Own(own, "catchup", own.Data.GetWorldTransform(), under, "held, no input");
+			return;
+		}
 		if (_skipFrozen is { } held)
 		{
 			_skipFrozen = null;
@@ -411,6 +450,7 @@ internal static class OwnMotion
 			// Held by its velocity only: the player's ControlData (keys held) is left alone, and the frozen pose and
 			// velocity are put back on the next tick.
 			_skipFrozen = Freeze(own);
+			if (MotionTrace.Recording) MotionTrace.Own(own, "freeze", own.Data.GetWorldTransform(), Vector3.Zero, "tick skipped for the server");
 			// Still relative to what it stands on (at rest when a skip is allowed, SkipConditions), not to the world.
 			var still = Parent(own) is { } under && !EngineCodec.IsDead(under) && under.Data.TryGet<RigidBodyData>(out var deck) ? deck.LinearVelocity : Vector3.Zero;
 			if (own.Data.TryGet<RigidBodyData>(out var moving)) own.Data.Set(new RigidBodyData(still, moving.AngularVelocity));
@@ -429,6 +469,7 @@ internal static class OwnMotion
 		var (dp, dv) = Correction.Step(TickSeconds, velocity.Length());
 		var turn = FacingOff ? System.Numerics.Quaternion.Identity : Correction.StepTurn();
 		if (dp != default || dv != default || !turn.IsIdentity) Shift(own, frame, dp, dv, turn);
+		CarryOnDeck(own);
 
 #if !PULSAR
 		if (ProbeSentMovement is { } absurd) input = input with { Movement = absurd };
@@ -437,6 +478,17 @@ internal static class OwnMotion
 		Recent.Insert(0, input);
 		if (Recent.Count > OwnInputs.Redundancy) Recent.RemoveAt(Recent.Count - 1);
 		client.SendOwnInputs(OwnInputs.Encode(_epoch, _seq, Recent, toggles: !OwnStatePrediction.Off, paced: !TickPaceOff && !OwnStatePrediction.Off));
+		if (MotionTrace.Recording)
+		{
+			_inputsThisSecond++;
+			if (now - _inputSecondMs >= 1000)
+			{
+				MotionTrace.Note("inputs", "own", FormattableString.Invariant($"sent={_inputsThisSecond} catchup_held={CatchUpHeld - _catchUpAtSecond} shift_cm={dp.Length * 100:0.0}"));
+				_inputSecondMs = now;
+				_inputsThisSecond = 0;
+				_catchUpAtSecond = CatchUpHeld;
+			}
+		}
 		if (!OwnStatePrediction.Off)
 		{
 			if (TogglePredicting != null) StateCheck.Record(_seq, OwnStatePrediction.Pack(own));
@@ -446,12 +498,12 @@ internal static class OwnMotion
 		if (now - _statsLogMs >= 30000)
 		{
 			_statsLogMs = now;
-			GameLog.Instance.Info($"own motion: {DescribeCorrection()}; {OwnStatePrediction.Stats}{(_serverStates ? "" : " (the server does not take toggles from inputs)")}; {Pace.Taken} ticks skipped for the server ({Pace.Asked} asked)");
+			GameLog.Instance.Info($"own motion: {DescribeCorrection()}; {OwnStatePrediction.Stats}{(_serverStates ? "" : " (the server does not take toggles from inputs)")}; {Pace.Taken} ticks skipped for the server ({Pace.Asked} asked); carried with the deck {DeckCarried} ticks (largest speed change {DeckCarryMax:0.0} m/s), {Correction.DeckVelocityKept} deck velocity corrections left out");
 		}
 	}
 
 	internal static string DescribeCorrection()
-		=> $"{Correction.Acks} acks, error mean {Correction.MeanError * 100:0.0} cm max {Correction.ErrorMax * 100:0.0} cm, largest eased step {Correction.StepMax * 100:0.0} cm, facing off mean {(Correction.Acks == 0 ? 0 : Correction.TurnErrorSum / Correction.Acks):0.00} max {Correction.TurnErrorMax:0.00} deg, {Correction.Snaps} applied at once, {Correction.Rebases} rebased, {_shiftsTurned}/{_shifts} eased shifts kept the tick's turn, {_snaps} grounded turns snapped, {_turns} facing corrections";
+		=> $"{Correction.Acks} acks, error mean {Correction.MeanError * 100:0.0} cm max {Correction.ErrorMax * 100:0.0} cm, largest eased step {Correction.StepMax * 100:0.0} cm, facing off mean {(Correction.Acks == 0 ? 0 : Correction.TurnErrorSum / Correction.Acks):0.00} max {Correction.TurnErrorMax:0.00} deg, {Correction.Snaps} applied at once, {Correction.Rebases} rebased, {_shiftsTurned}/{_shifts} eased shifts kept the tick's turn ({_softShifts} soft), {CatchUpHeld} catch-up ticks held, {_snaps} grounded turns snapped, {_turns} facing corrections";
 
 	private static OwnInput InputOf(Entity own)
 	{
@@ -493,13 +545,28 @@ internal static class OwnMotion
 				// up beside or in front of the character, F19).
 				if (!SoftSyncOff) soft.Value.Position = to.Position;
 				if (turning || !SoftSyncOff) own.Data.Set(soft);
+				// A small shift goes in through the SoftTransform alone, which Havok's controller moves to over the step: a
+				// written WorldTransform takes precedence as a teleport of the controller (HavokSessionComponent
+				// CollectDataForCharacters), which loses its ground contact and step state, every tick an error was eased.
+				// -y51online:softshift:off writes the WorldTransform for every shift as in pre3.
+				if (!SoftShiftOff && !SoftSyncOff && shift.Length() < SoftShiftMeters)
+				{
+					_softShiftPending = true;
+					_shifts++;
+					_softShifts++;
+					LastShiftMeters = (float)(to.Position - at.Position).Length();
+					if (MotionTrace.Recording) MotionTrace.Own(own, "softshift", to, dv == default ? Vector3.Zero : new Vector3(dv.X, dv.Y, dv.Z), $"by {LastShiftMeters * 100:0.0} cm");
+					goto Velocity;
+				}
 			}
 			_shiftedTo = to.Position;
+			if (MotionTrace.Recording) MotionTrace.Own(own, "shift", to, dv == default ? Vector3.Zero : new Vector3(dv.X, dv.Y, dv.Z), $"by {LastShiftMeters * 100:0.0} cm");
 			_shiftPending = true;
 			_shifts++;
 			LastShiftMeters = (float)(to.Position - at.Position).Length();
 			own.Data.SetWorldTransform(to);
 		}
+		Velocity:
 		if (dv != default && own.Data.TryGet<RigidBodyData>(out var body))
 		{
 			var v = new Vector3(dv.X, dv.Y, dv.Z);
@@ -511,6 +578,10 @@ internal static class OwnMotion
 	// movement jobs turned, so every eased correction would drop that tick's turn and the facing would drift from the
 	// server's. The shifted position keeps the turned facing.
 	private static readonly bool SoftSyncOff = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "softsync:off");
+	private static readonly bool SoftShiftOff = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "softshift:off");
+	private const double SoftShiftMeters = 0.05;
+	private static long _softShifts;
+	private static volatile bool _softShiftPending;
 	private static volatile bool _shiftPending;
 	private static Vector3D _shiftedTo;
 	private static long _shifts, _shiftsTurned, _snaps, _turns;
@@ -539,12 +610,15 @@ internal static class OwnMotion
 
 	private static void CollectCharacterPrefix(ref WorldTransform wt, in SoftTransform st, ref TransformChangeTypeData transformChange)
 	{
+		if (MotionTrace.Recording && _driving && Vector3D.DistanceSquared(wt.Position, _ownAt) <= 1) MotionTrace.Collect(wt, (int)transformChange.ChangeTypes);
 		float yaw = _groundYaw;
 		if (yaw != 0f && Vector3D.DistanceSquared(wt.Position, _ownAt) <= 1e-6)
 		{
 			_groundYaw = 0f;
 			if (!_shiftPending)
 			{
+				// A soft shift this tick: the snap makes this a hard transform, which would drop the shifted SoftTransform.
+				if (_softShiftPending) { wt.Position = st.Value.Position; _softShiftPending = false; }
 				wt.Orientation *= Quaternion.CreateFromAxisAngle(Vector3.Up, -yaw);
 				transformChange.ChangeTypes |= TransformChangeTypeData.ModifiedTransform.HardTransform;
 				_snaps++;
@@ -572,6 +646,91 @@ internal static class OwnMotion
 		var w = new Vector3(pose.Angular.X, pose.Angular.Y, pose.Angular.Z);
 		own.Data.Set(new RigidBodyData(frame is { } f ? WorldTransform.TransformDirection(v, f) : v, frame is { } g ? WorldTransform.TransformDirection(w, g) : w));
 		GameLog.Instance.Info($"own motion: {why}; moved to {at.Position.X:0.00}, {at.Position.Y:0.00}, {at.Position.Z:0.00}");
+		if (MotionTrace.Recording) MotionTrace.Own(own, "rebase", at, Vector3.Zero, why);
+	}
+
+	// --- the deck under the character ---
+
+	// A grid someone else flies is played back here: a kinematic body Havok moves to each tick's pose by velocity, a
+	// playout delay behind the server's. The character standing on it is this game's own, carried by Havok's character
+	// controller at that grid's velocity, which it can follow at most 200 m/s^2 (CharacterPhysics MaxAcceleration): 3.3 m/s
+	// a tick. Each change of the played-back grid's speed beyond that (a blend into a late sample, the clock's catch-up, a
+	// sample carried past the newest) left the character behind on the deck for a few ticks, and the corrections that
+	// followed pushed it back: thrown around at speed. Here the character's velocity takes the change the deck will make
+	// over the next step before Havok runs it (the deck's next pose from the playback, MotionSmoothing.DeckNext), so its
+	// speed relative to the deck carries on unchanged and Havok only has its own walking to do. -y51online:deckcarry:off.
+	private static readonly bool DeckCarryOff = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "deckcarry:off");
+	private const double DeckTeleportMeters = 7;
+	// Havok moves a character at most 310 m/s (MaximumCharacterSpeedLinear): the deck's speed given to the character
+	// stays under that. The character's velocity holds the deck speed last given (_carried), so a tick the deck runs
+	// faster than that (a catch-up at top speed) costs the character only that tick's excess, not a kick back after it.
+	private const float CarryLimit = 305;
+	private static Entity? _deckWas;
+	private static long _deckWasFrame;
+	private static Vector3 _carried;
+	private static bool _carriedValid;
+	private static WorldTransform _deckWasAt;
+	internal static long DeckCarried;
+	internal static double DeckCarryMax;
+
+	// Standing or walking on a grid that moves (not one at rest, not a planet or station).
+	private static Entity? DeckUnder(Entity own)
+	{
+		var under = Parent(own, motionParent: false);
+		if (under == null || EngineCodec.IsDead(under) || !under.Data.Has<DynamicTag>()) return null;
+		return under;
+	}
+
+	private static bool OnMovingDeck(Entity own)
+		=> DeckUnder(own) is { } deck && deck.Data.TryGet<RigidBodyData>(out var b) && (b.LinearVelocity.LengthSquared() >= 0.25f || b.AngularVelocity.LengthSquared() >= 1e-3f);
+
+	// -y51online:deckvelocity:off: the server's velocity for an input on a moving deck is corrected as anywhere else.
+	// On a deck the server's velocity is the deck's at the moment it ran that input, this game's the played-back deck's a
+	// playout delay earlier: a ship speeding up at 20 m/s^2 put them 5 m/s apart, and each ack's velocity correction kicked
+	// the character along the deck (Havok's controller sets a standing character's velocity from the deck every tick
+	// anyway). There only the position, in the deck's frame, is corrected.
+	private static readonly bool DeckVelocityOff = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "deckvelocity:off");
+
+	private static void CarryOnDeck(Entity own)
+	{
+		var deck = DeckCarryOff ? null : DeckUnder(own);
+		MotionSmoothing.Deck = deck;
+		var was = _deckWas;
+		var wasAt = _deckWasAt;
+		// Only from the tick right before: a tick left out (a skip, a seat, the server moving this character) would count
+		// several ticks of the deck's travel as one step and kick the character backwards at its speed times the gap.
+		bool consecutive = _deckWasFrame + 1 == Frames;
+		_deckWas = deck;
+		_deckWasFrame = Frames;
+		if (deck == null) return;
+		var now = deck.Data.GetWorldTransform();
+		_deckWasAt = now;
+		if (!consecutive || !ReferenceEquals(deck, was) || !MotionSmoothing.DeckNext(deck, out var next, out _, out _) || !own.Data.TryGet<RigidBodyData>(out var body)) { _carriedValid = false; return; }
+		// The character's point on the deck, carried by the deck's last step and by its next one.
+		var at = own.Data.GetWorldTransform().Position;
+		var onDeck = WorldTransform.TransformInv(at, now);
+		var before = WorldTransform.Transform(in onDeck, in wasAt);
+		var after = WorldTransform.Transform(in onDeck, in next);
+		// A deck put somewhere (a teleport, a jump): not a speed to carry.
+		if ((at - before).LengthSquared() > DeckTeleportMeters * DeckTeleportMeters || (after - at).LengthSquared() > DeckTeleportMeters * DeckTeleportMeters) { _carriedValid = false; return; }
+		var given = _carriedValid ? _carried : Limited((Vector3)((at - before) / TickSeconds));
+		// Havok collides the character with the deck where it drives it: the step, not the samples' velocity.
+		var coming = Limited((Vector3)((after - at) / TickSeconds));
+		_carried = coming;
+		_carriedValid = true;
+		var change = coming - given;
+		float size = change.Length();
+		if (size < 1e-3f) return;
+		own.Data.Set(new RigidBodyData(body.LinearVelocity + change, body.AngularVelocity));
+		DeckCarried++;
+		DeckCarryMax = Math.Max(DeckCarryMax, size);
+		if (MotionTrace.Recording) MotionTrace.Own(own, "carry", own.Data.GetWorldTransform(), change, $"deck speed {coming.Length():0.0} m/s");
+	}
+
+	private static Vector3 Limited(Vector3 v)
+	{
+		float speed = v.Length();
+		return speed > CarryLimit ? v * (CarryLimit / speed) : v;
 	}
 
 	private static Entity? OwnCharacter(Session session)
@@ -652,7 +811,8 @@ internal static class OwnMotion
 		public long TokensAt, LastInputMs, Dropped;
 		public ushort Epoch;
 		public bool OldEpoch, Toggles, Paced;
-		public readonly OwnInputBuffer Inputs = new();
+		// -y51online:drain:off (server): one merge every 8 ticks whatever the depth, as in 0.18.1 (Sync.OwnInputBuffer.Adaptive).
+		public readonly OwnInputBuffer Inputs = new(adaptive: !DrainOff);
 
 		// Server thread only.
 		public Entity? Character;
@@ -665,6 +825,8 @@ internal static class OwnMotion
 		public int DepthPeak, SkipsToAsk;
 		public readonly SkipAsker Asker = new();
 	}
+
+	private static readonly bool DrainOff = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "drain:off");
 
 	private static readonly ConcurrentDictionary<ushort, Player> Players = new();
 
@@ -683,6 +845,9 @@ internal static class OwnMotion
 
 	// Inputs arrive but none is ever the one due: the queue is out of step with the player's game.
 	private const long NoRealInputMs = 1000;
+
+	// -y51online:togglegate:off: Keen's toggle requests are ignored only on ticks the inputs moved the character (0.18.1).
+	private static readonly bool ToggleGateOff = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "togglegate:off");
 
 	// Set while this code itself makes the server's jump, sprint and boost requests.
 	private static bool _ourRequest;
@@ -719,6 +884,17 @@ internal static class OwnMotion
 		// at speed).
 		bool catchingUp = stamp - _lastServerTick < System.Diagnostics.Stopwatch.Frequency * CatchUpMs / 1000;
 		_lastServerTick = stamp;
+		if (MotionTrace.Recording)
+		{
+			_serverTicksSecond++;
+			if (catchingUp) _serverCatchUps++;
+			if (now - _serverSecondMs >= 1000)
+			{
+				MotionTrace.Note("server", "server", FormattableString.Invariant($"ticks={_serverTicksSecond} catchup={_serverCatchUps}"));
+				_serverSecondMs = now;
+				_serverTicksSecond = _serverCatchUps = 0;
+			}
+		}
 		var teleported = new HashSet<Entity>();
 		while (TeleportedQueue.TryDequeue(out var entity)) teleported.Add(entity);
 		var driven = new HashSet<DEntity>();
@@ -759,6 +935,16 @@ internal static class OwnMotion
 				StopDriving(player, character);
 				Resync(host, clientId, player, character, ids, now, "the server moved this character");
 				continue;
+			}
+			// Keen's own toggle requests from this player's game are left to its inputs on every tick it sends them, not
+			// only on ticks its inputs moved the character; not on a resync tick (above), whose toggle input is dropped with its
+			// epoch, so Keen's request is the one that counts there (Sync.OwnState.IgnoresKeenToggle).
+			if (!ToggleGateOff)
+			{
+				bool togglesInInputs;
+				long inputAt;
+				lock (player.Gate) { togglesInInputs = player.Toggles; inputAt = player.LastInputMs; }
+				if (OwnState.IgnoresKeenToggle(togglesInInputs, now - inputAt, Seated(character), serverOwnCall: false)) toggles.Add(character.DEntity);
 			}
 			if (player.Frozen is { } frozen) Thaw(character, frozen);
 			bool oldEpoch;
@@ -857,7 +1043,7 @@ internal static class OwnMotion
 				var b = player.Inputs;
 				lock (player.Gate)
 				{
-					GameLog.Instance.Info($"own motion: ClientId {clientId}: {b.Applied} ticks, {b.Real} of the player's inputs applied, {b.Depth} waiting, {b.Guessed} guessed ({b.Late} late, {b.Rewound} turned into extra ticks), {b.Skipped} idle skipped, {b.Merged} merged ({b.PutOff} ticks put off while fast), deepest queue {player.DepthPeak} since the last report, {player.Asker.Asked} tick skips asked{(player.Paced ? "" : " (its game does not skip)")}, {player.Dropped} over the rate, {player.Resyncs} resyncs, catch-up ticks waited for input {_inputWaits} times ({_inputWaitsServed} got it), {_holdRuns} catch-ups held still for {_heldTicks} ticks");
+					GameLog.Instance.Info($"own motion: ClientId {clientId}: {b.Applied} ticks, {b.Real} of the player's inputs applied, {b.Depth} waiting, {b.Guessed} guessed ({b.Late} late, {b.Rewound} turned into extra ticks), {b.Skipped} idle skipped, {b.Merged} merged ({b.PutOff} ticks put off while fast), deepest queue {player.DepthPeak} since the last report, {player.Asker.Asked} tick skips asked{(player.Paced ? "" : " (its game does not skip)")}, {player.Dropped} over the rate, {player.Resyncs} resyncs, catch-up ticks waited for input {_inputWaits} times ({_inputWaitsServed} got it), {_holdRuns} catch-ups held still for {_heldTicks} ticks; {OwnStatePrediction.Blocked} of Keen's own toggle requests left to the inputs (all players)");
 					player.DepthPeak = 0;
 				}
 			}
@@ -934,7 +1120,18 @@ internal static class OwnMotion
 		var parent = Parent(character);
 		if (parent == null || EngineCodec.IsDead(parent)) return new Frozen(null, at, body.LinearVelocity, body.AngularVelocity);
 		var frame = parent.Data.GetWorldTransform();
-		return new Frozen(parent, WorldTransform.GetRelativeTransform(at, frame), WorldTransform.TransformDirectionInv(body.LinearVelocity, frame), WorldTransform.TransformDirectionInv(body.AngularVelocity, frame));
+		// Relative to the deck's own motion at the character's point: thawed on a deck that changed speed meanwhile (a 0.6 s
+		// catch-up on a ship speeding up), it gets the deck's new speed, not the old one.
+		var relative = body.LinearVelocity - PointVelocity(parent, at.Position);
+		return new Frozen(parent, WorldTransform.GetRelativeTransform(at, frame), WorldTransform.TransformDirectionInv(relative, frame), WorldTransform.TransformDirectionInv(body.AngularVelocity, frame));
+	}
+
+	// A body's velocity at a point (its linear velocity is its centre of mass's).
+	private static Vector3 PointVelocity(Entity body, Vector3D point)
+	{
+		if (!body.Data.TryGet<RigidBodyData>(out var b)) return Vector3.Zero;
+		var com = body.Data.TryGet<RigidBodyMassProperties>(out var mass) ? WorldTransform.Transform((Vector3D)mass.CenterOfMass, body.Data.GetWorldTransform()) : body.Data.GetWorldTransform().Position;
+		return b.LinearVelocity + Vector3.Cross(b.AngularVelocity, (Vector3)(point - com));
 	}
 
 	private static void Thaw(Entity character, Frozen frozen)
@@ -945,7 +1142,7 @@ internal static class OwnMotion
 			var frame = parent.Data.GetWorldTransform();
 			at = frame * frozen.At;
 			character.Data.SetWorldTransform(at);
-			character.Data.Set(new RigidBodyData(WorldTransform.TransformDirection(frozen.Velocity, frame), WorldTransform.TransformDirection(frozen.Angular, frame)));
+			character.Data.Set(new RigidBodyData(WorldTransform.TransformDirection(frozen.Velocity, frame) + PointVelocity(parent, at.Position), WorldTransform.TransformDirection(frozen.Angular, frame)));
 		}
 		else
 		{
@@ -959,6 +1156,7 @@ internal static class OwnMotion
 			soft.Value = at;
 			character.Data.Set(soft);
 		}
+		if (MotionTrace.Recording) MotionTrace.Own(character, "thaw", at, Vector3.Zero);
 	}
 
 	// One tick standing still in time: no input, no momentum, and the boost charge (game time) waits too.

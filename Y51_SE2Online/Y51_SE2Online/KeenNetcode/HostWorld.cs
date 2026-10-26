@@ -303,8 +303,6 @@ internal sealed partial class HostWorld : IHostWorld, IPingWorld
 
 	public long InputRejected => 0;
 
-	internal void SyncMenuPause() { }
-
 	private static readonly ConcurrentQueue<Action<Session>> ServerWork = new();
 
 	/// <summary>Runs <paramref name="work"/> on the loaded world's server thread, hosting or not.</summary>
@@ -328,6 +326,7 @@ internal sealed partial class HostWorld : IHostWorld, IPingWorld
 		if (ReferenceEquals(__instance, MpPlugin.App?.ClientSession))
 		{
 			ClientWorld.Current?.ClientSessionTick(__instance);
+			KeenNetcode.MotionTrace.BeforeClientWork(__instance);
 			KeenNetcode.MotionSmoothing.ClientTick(__instance);
 			KeenNetcode.FloraPhysicsRecovery.ClientTick(__instance);
 			try { KeenNetcode.OwnMotion.ClientTick(__instance); }
@@ -336,6 +335,7 @@ internal sealed partial class HostWorld : IHostWorld, IPingWorld
 			catch (Exception ex) { GameLog.Instance.WarnOnce("load-readiness-tick", "loading screen: client tick failed: " + ex); }
 			KeenNetcode.OwnAnimation.ClientTick();
 			KeenNetcode.AnimPlayout.ClientTick(__instance);
+			KeenNetcode.MotionTrace.AfterClientWork();
 #if !PULSAR
 			KeenNetcode.OwnMotionProbe.ClientTick(__instance);
 			KeenNetcode.AnimSyncProbe.ClientTick(__instance);

@@ -7,6 +7,8 @@ public interface IHostWorld
 {
 	void OnSocialRequest(PeerId peer, ushort clientId, SocialRequest request) { }
 	void OnAdminRequest(PeerId? peer, ushort clientId, AdminRequest request) { }
+	/// <summary>As above, but the world's answer goes to <paramref name="answer"/> (an RCON command waiting for it).</summary>
+	void OnAdminRequest(PeerId? peer, ushort clientId, AdminRequest request, System.Action<string> answer) { OnAdminRequest(peer, clientId, request); answer("Sent to the world."); }
 	void OnGpsShare(ushort fromClientId, string fromName, GpsShare share) { }
 	/// <summary>Network thread: a checked ping (right, rate, label); the world checks its range and sends it on.</summary>
 	void OnPing(ushort fromClientId, string fromName, PingSend ping) { }

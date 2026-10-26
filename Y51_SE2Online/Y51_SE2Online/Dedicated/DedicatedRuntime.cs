@@ -834,7 +834,7 @@ internal static class DedicatedRuntime
                     reply = verb switch
                     {
                         "status" => Status + " | Players: " + OnlinePlayers() + "/" + Config.Network.MaxPlayers + " | SE2 Online " + MpPlugin.Version,
-                        "players" => "Online: " + string.Join(", ", host.AccessPlayers().Where(p => p.Connected).Select(p => p.Name)),
+                        "players" when !HostCommands.IsPlayerInfo(line) => "Online: " + string.Join(", ", host.AccessPlayers().Where(p => p.Connected).Select(p => p.Name)),
                         _ => null
                     };
                     if (reply == null && verb == "motd") SetMotd(line.Length > 4 ? line[4..].Trim() : "");

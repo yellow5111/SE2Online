@@ -40,6 +40,7 @@ public static class AdminRules
 		AdminAction.PermsReload => "command.perms",
 		AdminAction.PermsCheck => "admin.players.set_group",
 		AdminAction.SetHome => r.Value ? "respawn.home.set" : null,
+		AdminAction.PlayerInfo => "admin.players.info",
 		_ => "admin.panel"
 	};
 
@@ -50,6 +51,7 @@ public static class AdminRules
 		EntityVerb.Delete => "admin.entities.delete",
 		EntityVerb.Transfer => "admin.entities.transfer",
 		EntityVerb.PowerOff => "admin.entities.power",
+		EntityVerb.Mark => "admin.players.info",
 		_ => "admin.entities.list"
 	};
 
@@ -64,15 +66,16 @@ public static class AdminRules
 		if (key != null && !perms.Has(actor, key)) return $"Your group ({perms.GroupOf(actor)}) may not do that ({key}).";
 		if (!RankRuled(r.Action) || r.Target == 0) return null;
 		ulong target = r.Target;
-		if (target == actor) return r.Action is AdminAction.Demote ? "You cannot demote yourself." : r.Action is AdminAction.Kill ? null : "You cannot remove yourself.";
+		if (target == actor) return r.Action is AdminAction.Demote ? "You cannot demote yourself." : r.Action is AdminAction.Kill or AdminAction.PlayerInfo ? null : "You cannot remove yourself.";
 		if (isOwner(target)) return "Nobody can do that to an owner of this server.";
 		if (perms.RankOf(target) >= perms.RankOf(actor)) return $"Only someone ranked above {name?.Invoke(target) ?? target.ToString()} ({perms.GroupOf(target)}, rank {perms.RankOf(target)}) can do that.";
 		return null;
 	}
 
 	/// <summary>Actions on another player that need the actor ranked above the target (the 0.17 "only the host can remove
-	/// another admin" rule, by rank). Unban, teleport and give keep 0.17's rule: any rank.</summary>
-	public static bool RankRuled(AdminAction action) => action is AdminAction.Kick or AdminAction.Ban or AdminAction.Demote or AdminAction.Kill;
+	/// another admin" rule, by rank). Unban, teleport and give keep 0.17's rule: any rank. Player info shows a lower rank's
+	/// details only (and one's own).</summary>
+	public static bool RankRuled(AdminAction action) => action is AdminAction.Kick or AdminAction.Ban or AdminAction.Demote or AdminAction.Kill or AdminAction.PlayerInfo;
 
 	/// <summary>
 	/// The game admin tool key for a story or signal the game guards with ValidateAdminAccess, from its declaring type's
@@ -168,5 +171,6 @@ public static class AdminRules
 	public static string CommandKey(string verb) => PermissionFiles.CommandKey(verb);
 }
 
-/// <summary>What an AdminAction.EntityAction does to the grid named by its Target (the grid's NetId); the verb rides in Minutes.</summary>
-public enum EntityVerb { None, TeleportTo, Stop, Delete, Transfer, PowerOff }
+/// <summary>What an AdminAction.EntityAction does to the grid named by its Target (the grid's NetId); the verb rides in Minutes.
+/// Mark puts a GPS marker on the grid for the admin who asked.</summary>
+public enum EntityVerb { None, TeleportTo, Stop, Delete, Transfer, PowerOff, Mark }

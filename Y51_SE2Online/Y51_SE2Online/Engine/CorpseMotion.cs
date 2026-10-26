@@ -15,7 +15,9 @@ namespace Y51_SE2Online.Engine;
 /// The game stops replicating a character's motion when it dies (NoAutoSync) and lets every game simulate its own corpse,
 /// so a body that slid or was pushed on the server lay metres away on each player's screen, and a late player saw it
 /// where it died. While a corpse moves the server sends its transform to every player on SE2 Online's transport (at most
-/// 10 times a second, only after it moved), and a resting one once to each player that has not had it.
+/// 10 times a second, only after it moved), and a resting one once to each player that has not had it. A player whose game
+/// saw the death simulates that ragdoll itself and leaves these out (<see cref="ClientRagdolls"/>); they place the corpses
+/// that game has no ragdoll for (a late player).
 /// </summary>
 internal static class CorpseMotion
 {

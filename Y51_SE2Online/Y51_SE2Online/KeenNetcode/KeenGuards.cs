@@ -19,6 +19,16 @@ namespace Y51_SE2Online.KeenNetcode;
 /// <summary>Crashes in SE2 4.0's own code that only multiplayer worlds reach; each guard turns one into a skipped frame.</summary>
 internal static class KeenGuards
 {
+	// The game's BlockToolsComponent.EquipToolImpl reads its ToolsToolbar (declared nullable) without a check: a request to
+	// equip a tile on a block without one threw on the server and faulted the player's story (a pre3 playtest, right after
+	// leaving a cockpit). Nothing is equipped instead.
+	private static bool EquipToolPrefix(Keen.Game2.Simulation.WorldObjects.CubeBlocks.Tools.BlockToolsComponent __instance, Keen.Game2.Simulation.GameSystems.Toolbars.ToolbarSelection? tile)
+	{
+		if (!tile.HasValue || __instance.Toolbar != null) return true;
+		GameLog.Instance.WarnOnce("block-tools-equip", $"keen guards: a tool was asked for on a block with no tool toolbar ({__instance.Entity}); nothing equipped");
+		return false;
+	}
+
 	public static void Install(Harmony harmony)
 	{
 		int installed = 0, total = 0;
@@ -29,6 +39,8 @@ internal static class KeenGuards
 			try { patch(); installed++; }
 			catch (Exception ex) { GameLog.Instance.Warn($"keen guards: '{name}' not installed for this game build ({ex.GetType().Name}: {ex.Message.Split('\n')[0]})"); }
 		}
+		Guard("block tools equip", () => harmony.Patch(AccessTools.Method(typeof(Keen.Game2.Simulation.WorldObjects.CubeBlocks.Tools.BlockToolsComponent), "EquipToolImpl"),
+			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(EquipToolPrefix))));
 		Guard("wheel audio", () => harmony.Patch(AccessTools.Method(AccessTools.Inner(typeof(DrivingWheelAudioComponent), "AudioAdapter"), "TryGetEffectDefinition"),
 			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(WheelAudioFinalizer))));
 		Guard("discoveries", () => harmony.Patch(AccessTools.Method(typeof(DiscoveriesServerSessionComponent), nameof(DiscoveriesServerSessionComponent.TryIncreaseDiscoveryState)),
@@ -348,13 +360,32 @@ internal static class KeenGuards
 		return false;
 	}
 
+	// Remote faults an SE2 Online session delivered to this game, and whether the player was told. Keyed by the exception
+	// itself: the game hands the same instance to its unawaited-exception finalizer, which reports it again when collected.
+	private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Exception, System.Runtime.CompilerServices.StrongBox<bool>> _ownFaults = new();
+
+	/// <summary>A story's fault an SE2 Online transport is handing to the game (the server's answer to this game's request).</summary>
+	internal static void NoteRemoteFault(Exception? fault)
+	{
+		if (fault is Keen.VRage.Multiplayer.NetworkStories.NetworkStoryRemoteFaultException) _ownFaults.AddOrUpdate(fault, new System.Runtime.CompilerServices.StrongBox<bool>(false));
+	}
+
 	private static bool RefusedRequestPrefix(Exception ex)
 	{
-		if (!Y51_SE2Online.SyncEngine.AdminAccess.InSession) return true;
+		bool inSession = Y51_SE2Online.SyncEngine.AdminAccess.InSession;
 		for (Exception? e = ex; e != null; e = e is AggregateException a && a.InnerExceptions.Count > 0 ? a.InnerExceptions[0] : e.InnerException)
 		{
 			bool ownRefusal = e is ServerAccess.AccessDeniedException || (ServerAccess.RefusedLocalRecently && e.Message.StartsWith("No Entity found for EntityId", StringComparison.Ordinal));
-			if (e is not Keen.VRage.Multiplayer.NetworkStories.NetworkStoryRemoteFaultException && !ownRefusal) continue;
+			bool own = _ownFaults.TryGetValue(e, out var told);
+			switch (RemoteFaultRule.Judge(inSession, e is Keen.VRage.Multiplayer.NetworkStories.NetworkStoryRemoteFaultException, ownRefusal, own, told?.Value == true))
+			{
+			case RemoteFaultRule.Verdict.Crash:
+				continue;
+			case RemoteFaultRule.Verdict.Quiet:
+				GameLog.Instance.WarnOnce("refused-request-late", $"keen guards: a refused request was reported again {(inSession ? "" : "after the player left the world ")}({e.Message.Split('\n')[0]}); the game goes on (further ones not logged)");
+				return false;
+			}
+			_ownFaults.AddOrUpdate(e, new System.Runtime.CompilerServices.StrongBox<bool>(true));
 			GameLog.Instance.Warn($"keen guards: the server refused a request ({e.Message.Split('\n')[0]}); the game goes on");
 			// Only SE2 Online's own refusals are about access; SE2's faults (a block gone, a bad request) are not.
 			string said = e.Message.Contains("Access denied", StringComparison.Ordinal) ? "Access denied." : "The server could not do that.";
@@ -375,7 +406,9 @@ internal static class KeenGuards
 			|| completion is not Keen.VRage.Multiplayer.Transport.StoryFault fault || !HostFaultRule.AsRemoteFault(fault.Exception)) return;
 		var raw = fault.Exception;
 		GameLog.Instance.WarnOnce("in-process-story-fault", $"keen guards: a request of the host's own game failed on the server ({raw.GetType().Name}: {raw.Message.Split('\n')[0]}); it ends the way a player's failed request does (further ones not logged)");
-		completion = new Keen.VRage.Multiplayer.Transport.StoryFault(Keen.VRage.Multiplayer.Transport.StoryFaultDescriptor.FromException(raw).ToException());
+		var converted = Keen.VRage.Multiplayer.Transport.StoryFaultDescriptor.FromException(raw).ToException();
+		NoteRemoteFault(converted);
+		completion = new Keen.VRage.Multiplayer.Transport.StoryFault(converted);
 	}
 
 	private static bool UnawaitedExceptionPrefix(System.Runtime.ExceptionServices.ExceptionDispatchInfo? ____exception)

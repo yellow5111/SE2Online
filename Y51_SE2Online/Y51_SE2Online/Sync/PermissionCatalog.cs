@@ -76,11 +76,13 @@ public static class PermissionCatalog
 		K("admin.players.set_group", false, Panel, "Put players of a lower rank into a group up to one's own rank (admin, deadmin, group set).",
 			PanelCheck + " (Perms page), the admin, deadmin and group commands and perms check; the rank rule applies.", "command.group", PermissionSet.SetGroupScope + "*");
 		K("admin.players.view_ids", false, Panel, "See players' SteamIDs.",
-			"On the server, which sends SteamIDs in the panel data only to players with this or a key that acts on players (kick, ban, set_group, kill, teleport, give to others, whitelist).", "admin.players.kick");
+			"On the server, which sends SteamIDs in the panel data only to players with this or a key that acts on players (kick, ban, set_group, kill, info, teleport, give to others, whitelist).", "admin.players.kick");
 		K("admin.players.view_bans", false, Panel, "See the ban list.",
 			"On the server, which sends the ban list in the panel data only with this key.", "admin.players.unban", "command.bans");
 		K("admin.players.kill", false, Panel, "Kill the character of a player of a lower rank.",
 			PanelCheck + "; the target must rank below the actor (killing oneself is always allowed).", "admin.players.kick");
+		K("admin.players.info", false, Panel, "See everything the server knows about a player of a lower rank, online or offline: session, group, character, inventory, faction, PCU, grids, home base, progress, bans (More info on the Players page, players info). Also marks their grids on one's GPS.",
+			PanelCheck + " and players info, on every request; the target must rank below the actor (one's own info is always allowed). Nothing is gathered until asked.", "admin.players.view_ids", "command.players");
 		K("admin.whitelist", false, Panel, "See and change the whitelist.",
 			PanelCheck + " and the whitelist command.", "command.whitelist", "join.bypass_whitelist");
 		K("admin.world.pvp", false, Panel, "Turn PvP on and off.", PanelCheck + " and the pvp command.", "command.pvp", "pvp.damage_players");

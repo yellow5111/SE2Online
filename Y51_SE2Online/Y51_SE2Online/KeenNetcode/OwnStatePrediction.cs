@@ -52,6 +52,9 @@ internal static class OwnStatePrediction
 		// The server's own calls of the jetpack toggle (leaving gravity, death) are not a player's request.
 		foreach (var own in new[] { AccessTools.Method(typeof(CharacterMovementServerComponent), "OnExitGravityAndSurface"), AccessTools.Method(typeof(CharacterDeathServerComponent), "OnCharacterDeathSignal") })
 			harmony.Patch(own, prefix: Hook(nameof(InternalEnter)), finalizer: Hook(nameof(InternalLeave)));
+		// Server diagnostic ("the jetpack turns itself back off"): who changed a predicting player's movement state.
+		harmony.Patch(AccessTools.PropertySetter(typeof(CharacterMovementComponent), nameof(CharacterMovementComponent.CurrentMovementState)), prefix: Hook(nameof(StateSetPrefix)));
+		harmony.Patch(AccessTools.Method(typeof(CharacterMovementComponent), nameof(CharacterMovementComponent.TurnOffJetpack)), prefix: Hook(nameof(TurnOffPrefix)));
 	}
 
 	private static HarmonyMethod Hook(string name) => new(typeof(OwnStatePrediction), name);
@@ -366,12 +369,15 @@ internal static class OwnStatePrediction
 
 	internal static string Describe(byte s) => $"{(CharacterMovementState)OwnState.Movement(s)}{((s & OwnState.Crouched) != 0 ? " crouched" : "")}{((s & OwnState.Dampeners) != 0 ? " dampeners" : "")}{((s & OwnState.Boosting) != 0 ? " boosting" : "")}";
 
-	internal static string Stats => $"{_predicted} toggles predicted, server state taken {_taken} times, {_blocked} of Keen's toggle requests left to the inputs, {_fuelOuts} fuel outs predicted";
+	internal static string Stats => $"{_predicted} toggles predicted, server state taken {_taken} times, {JetpackFlames.EchoesKept} late jetpack states from the server left out, {_blocked} of Keen's toggle requests left to the inputs, {_fuelOuts} fuel outs predicted";
 
 	// --- server ---
 
 	[ThreadStatic] private static int _ours, _internal;
 	private static long _blocked;
+
+	/// <summary>Server: Keen's toggle requests left to the inputs so far (all players).</summary>
+	internal static long Blocked => System.Threading.Interlocked.Read(ref _blocked);
 
 	/// <summary>Server thread: the toggles of the input applied this tick, with Keen's own server rules.</summary>
 	internal static void ApplyServer(Entity character, OwnToggles toggles)
@@ -391,6 +397,38 @@ internal static class OwnStatePrediction
 		if (_ours > 0 || _internal > 0 || !OwnMotion.TogglesFromInputs(__instance.Entity)) return true;
 		System.Threading.Interlocked.Increment(ref _blocked);
 		return false;
+	}
+
+	private static long _stateLogMs;
+
+	private static void StateSetPrefix(CharacterMovementComponent __instance, CharacterMovementState value)
+	{
+		try
+		{
+			if (_ours > 0 || _internal > 0 || __instance._currentMovementState == value || !OwnMotion.TogglesFromInputs(__instance.Entity)) return;
+			NoteServerChange(__instance._currentMovementState, value);
+		}
+		catch (Exception) { }
+	}
+
+	private static void TurnOffPrefix(CharacterMovementComponent __instance)
+	{
+		try
+		{
+			if (_ours > 0 || _internal > 0 || __instance._currentMovementState != CharacterMovementState.Jetpack || !OwnMotion.TogglesFromInputs(__instance.Entity)) return;
+			NoteServerChange(CharacterMovementState.Jetpack, CharacterMovementState.Ground);
+		}
+		catch (Exception) { }
+	}
+
+	private static void NoteServerChange(CharacterMovementState from, CharacterMovementState to)
+	{
+		long now = MpClock.NowMs();
+		if (now - _stateLogMs < 10000) return;
+		_stateLogMs = now;
+		var frames = new System.Diagnostics.StackTrace(2, false).GetFrames();
+		string callers = string.Join(" < ", frames.Take(4).Select(f => f.GetMethod() is { } m ? $"{m.DeclaringType?.Name}.{m.Name}" : "?"));
+		GameLog.Instance.Info($"own motion: the server changed a predicting player's movement state {from} -> {to} outside that player's inputs ({callers})");
 	}
 
 	private static void InternalEnter() => _internal++;

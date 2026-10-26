@@ -110,14 +110,25 @@ internal static class DedicatedRcon
 			if (Interlocked.CompareExchange(ref request.State, 1, 0) != 0) { i--; continue; }
 			var captured = new StringBuilder();
 			GameLog.Capture = captured;
+			var later = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+			HostSession.AnswerLater = answer => later.TrySetResult(answer);
 			string reply;
+			bool waits;
 			try { reply = Execute(app, request.Caller, request.Command); }
 			catch (Exception ex) { reply = "[ERROR] " + ex.GetBaseException().Message; }
-			finally { GameLog.Capture = null; }
+			finally { GameLog.Capture = null; waits = HostSession.AnswerLater == null; HostSession.AnswerLater = null; }
 			if (reply != null) captured.Append(reply);
 			string text = captured.ToString().TrimEnd('\n');
+			if (waits) { _ = Finish(request, text, later.Task); continue; }
 			request.Done.TrySetResult(text.Length > 0 ? text : "OK.");
 		}
+	}
+
+	// A command the world answers later (players info): its reply follows the world's answer, at most 15 s later.
+	private static async Task Finish(Request request, string before, Task<string> answer)
+	{
+		string text = await Task.WhenAny(answer, Task.Delay(15_000)).ConfigureAwait(false) == answer ? answer.Result : "[WARN] The world did not answer within 15 s (busy or loading).";
+		request.Done.TrySetResult((before.Length > 0 ? before + "\n" : "") + text);
 	}
 
 	// null: the command logged its own result (captured).
@@ -131,7 +142,7 @@ internal static class DedicatedRcon
 			case "": return "";
 			case "help": return Help(caller);
 			case "status": return StatusText();
-			case "players": return PlayersText(host);
+			case "players" when !HostCommands.IsPlayerInfo(command): return PlayersText(host);
 			case "json": return Json(caller, words.Skip(1).ToArray(), host);
 		}
 		// The same router as chat: the verb's key, and sub-commands with their own key (mods check).
@@ -139,7 +150,7 @@ internal static class DedicatedRcon
 			return "[WARN] " + refused;
 		if (DedicatedRuntime.Exiting) return "[WARN] The server is shutting down.";
 		// Reads are fine during a save or the load; changes wait their turn in the command file, here they are refused.
-		if (DedicatedRuntime.Busy && verb is not ("bans" or "admins" or "mods")) return "[WARN] The server is " + (DedicatedRuntime.State().Saving ? "saving" : "loading the world") + "; try again in a moment.";
+		if (DedicatedRuntime.Busy && verb is not ("bans" or "admins" or "mods" or "players")) return "[WARN] The server is " + (DedicatedRuntime.State().Saving ? "saving" : "loading the world") + "; try again in a moment.";
 		// quit/exit/shutdown are stop; "restart update" is the runner's own message after it staged an update.
 		// The dispatcher matches the prefix, so does this ("restart updates", "restart update9.9 ...").
 		if (verb == "restart" && words.Length > 1 && words[1].StartsWith("update", StringComparison.OrdinalIgnoreCase)) return "[WARN] restart update is sent by the server runner only.";

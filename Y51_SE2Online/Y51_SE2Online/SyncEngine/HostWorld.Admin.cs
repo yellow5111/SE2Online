@@ -28,7 +28,7 @@ namespace Y51_SE2Online.SyncEngine;
 
 internal sealed partial class HostWorld
 {
-    private readonly ConcurrentQueue<(PeerId? Peer, ushort ClientId, AdminRequest Request)> _adminRequests = new();
+    private readonly ConcurrentQueue<(PeerId? Peer, ushort ClientId, AdminRequest Request, Action<string> Answer)> _adminRequests = new();
     private long _nextSafeZoneScan;
 
     /// <summary>Personally creative identities that may weld without components right now (CreativeWeld); refreshed every 2 s on the server thread.</summary>
@@ -46,7 +46,13 @@ internal sealed partial class HostWorld
 
     public void OnAdminRequest(PeerId? peer, ushort clientId, AdminRequest request)
     {
-        if (_adminRequests.Count < 64) _adminRequests.Enqueue((peer, clientId, request));
+        if (_adminRequests.Count < 64) _adminRequests.Enqueue((peer, clientId, request, null));
+    }
+
+    public void OnAdminRequest(PeerId? peer, ushort clientId, AdminRequest request, Action<string> answer)
+    {
+        if (_adminRequests.Count < 64) _adminRequests.Enqueue((peer, clientId, request, answer));
+        else answer("The server is busy; try again in a moment.");
     }
 
     private volatile Session _adminSession;
@@ -72,7 +78,8 @@ internal sealed partial class HostWorld
             try { message = Admin(session, command.Peer, command.ClientId, command.Request); }
             catch (Exception ex) { message = "That admin action failed: " + ex.Message; _log.Warn("admin: " + command.Request.Action + " failed: " + ex); }
             _log.Info($"admin: ClientId {command.ClientId} {command.Request.Action}: {message}");
-            if (message != null) _host?.SendAdminMessage(command.Peer, message);
+            if (command.Answer != null) command.Answer(message ?? "Done.");
+            else if (message != null) _host?.SendAdminMessage(command.Peer, message);
         }
         // Co-op host: players' /commands run here, on the game thread, as their player.
         if (_host != null && !Y51_SE2Online.Dedicated.DedicatedRuntime.Requested)
@@ -92,7 +99,7 @@ internal sealed partial class HostWorld
     {
         string verb = RconAccess.Verb(line);
         if (verb == "status") return $"{host.Players().Count(p => p.Peer.HasValue) + 1} players online, SE2 Online {MpPlugin.Version}.";
-        if (verb == "players") return "Online: " + string.Join(", ", host.AccessPlayers().Where(p => p.Connected).Select(p => p.Name));
+        if (verb == "players" && !HostCommands.IsPlayerInfo(line)) return "Online: " + string.Join(", ", host.AccessPlayers().Where(p => p.Connected).Select(p => p.Name));
         if (verb == "motd") return host.LocalAdmin(new AdminRequest(AdminAction.Motd, Name: line.Length > 4 ? line[4..].Trim() : ""));
         return HostCommands.Run(host, line) ?? "That command runs on dedicated servers only.";
     }
@@ -252,7 +259,16 @@ internal sealed partial class HostWorld
             _host?.SendAdminQuery(peer, EntityQuery(session, here?.Position, r.Value, r.Name));
             return null;
         case AdminAction.EntityAction:
-            return EntityAction(session, body, here, (EntityVerb)r.Minutes, (uint)r.Target, r.Name);
+            return EntityAction(session, body, here, clientId, actor, (EntityVerb)r.Minutes, (uint)r.Target, r.Name);
+        case AdminAction.PlayerInfo:
+        {
+            if (PeerAlias.SteamOf(r.Target) == 0) return "Choose a player.";
+            var query = PlayerInfo(session, r.Target, r.Minutes);
+            if (query == null) return "Multiplayer is not running.";
+            if (r.Value) return PlayerDetails.Text(query, r.Minutes);
+            _host?.SendAdminQuery(peer, query);
+            return null;
+        }
         case AdminAction.CleanupPreview:
         case AdminAction.CleanupRun:
         case AdminAction.CleanupSettings:
@@ -326,7 +342,7 @@ internal sealed partial class HostWorld
     private static bool Moving(Entity grid)
         => grid.Data.Has<Keen.VRage.Physics.Data.RigidBodyData>() && grid.Data.Get<Keen.VRage.Physics.Data.RigidBodyData>().LinearVelocity.LengthSquared() > 0.25f;
 
-    private string EntityAction(Session session, Entity body, WorldTransform? here, EntityVerb verb, uint netId, string argument)
+    private string EntityAction(Session session, Entity body, WorldTransform? here, ushort clientId, long actor, EntityVerb verb, uint netId, string argument)
     {
         if (!_ids.TryGet(netId, out Entity grid) || EngineCodec.IsDead(grid) || grid.TryGet<CubeGridComponent>() is not { } cube) return "That grid no longer exists.";
         var group = cube.GridGraphHandler.GetAllConnectedEntities(grid).Where(e => e.TryGet<CubeGridComponent>() != null).Append(grid).Distinct().ToList();
@@ -375,6 +391,8 @@ internal sealed partial class HostWorld
                 g.Get<CubeGridComponent>().VisitAllBlocksWithComponent<PowerableBlockComponent>(p => { if (p.Enabled) { p.Enabled = false; off++; } }, includeSubgrids: false);
             return $"Turned off {off} block{(off == 1 ? "" : "s")} on '{name}'.";
         }
+        case EntityVerb.Mark:
+            return MarkGrid(session, clientId, actor, grid, name, owner, position);
         default: return "Unknown grid action.";
         }
     }

@@ -38,6 +38,18 @@ public sealed partial class AdminScreen
     private readonly ComboBox _groupPick = Combo<GroupInfo>(g => g.Name + "  (rank " + g.Rank + ")");
     private Button _copyId;
     private string _rosterSignature, _groupsSignature;
+    private readonly OnlineToggle _withOffline = new("Offline players too", "Players seen before: More info, bans and groups work on them") { ColumnDefinitions = new ColumnDefinitions("*,12,Auto") };
+
+    // Player info (More info): a view in place of the players list, filled from the server's answer
+    private readonly StackPanel _infoSections = new() { Spacing = 14 };
+    private readonly TextBlock _infoTitle = OnlineUi.Text("", "Bright", 24), _infoText = Hint("");
+    private readonly ListBox _infoGrids = List("AdminPlayerGrids", 380);
+    private readonly TextBox _infoReason = Box("Reason (shown to the player)", 200), _infoBanMinutes = Box("Ban minutes, 0 = permanent", 7, 250);
+    private Control _listPart, _infoPart;
+    private AccessPlayer _infoTarget;
+    private string _infoMessage;
+    private long _infoSerial;
+    private AdminQuery _info;
 
     // Spawn
     private readonly TextBox _prefabSearch = Box("Search prefabs", 64), _itemSearch = Box("Search items", 64), _amount = Box("100", 6, 110);
@@ -119,11 +131,13 @@ public sealed partial class AdminScreen
     {
         _playerList.ItemTemplate = new FuncDataTemplate<AccessPlayer>((p, _) => p == null ? null : Row(p.Name, GroupOf(p), p.Connected && p.PingMs >= 0 ? p.PingMs + " ms" : "away"));
         _playerSearch.TextChanged += (_, _) => { _rosterSignature = null; RefreshControls(); };
+        _withOffline.IsCheckedChanged += (_, _) => { _rosterSignature = null; RefreshControls(); };
         _playerList.SelectionChanged += (_, _) => RefreshActions();
         _groupPick.SelectionChanged += (_, _) => RefreshActions();
         _copyId = OnlineUi.SmallButton("Copy", () => { if (SelectedPlayer is { SteamId: not 0 } p) Copy(p.SteamId.ToString(CultureInfo.InvariantCulture)); }, "AdminCopySteamId");
         _playerName.HorizontalAlignment = HorizontalAlignment.Left;
-        var card = OnlineUi.Panel(Stack(6, _playerName, _playerGroup, Flow(_playerId, _copyId), _rankHint), new Thickness(18));
+        var more = Gate(OnlineUi.SmallButton("More info", () => OpenInfo(SelectedPlayer), "AdminPlayerInfo"), "admin.players.info", () => Targetable(self: true) && (IsMe(SelectedPlayer.SteamId) || Outranks(SelectedPlayer)));
+        var card = OnlineUi.Panel(Stack(6, _playerName, _playerGroup, Flow(_playerId, _copyId), _rankHint, more), new Thickness(18));
         var online = (Func<bool>)(() => SelectedPlayer?.Connected == true);
         var actions = Flow(
             Act("Teleport to", Key(AdminAction.TeleportTo), () => Target(AdminAction.TeleportTo), () => Targetable() && online()),
@@ -132,15 +146,104 @@ public sealed partial class AdminScreen
             Gate(OnlineUi.SmallButton("Give item", GiveItem, "AdminPlayerGive"), "admin.spawn.item_others", () => Targetable() && online()));
         bool Ruled() => Targetable() && Outranks(SelectedPlayer);
         var moderation = Gate(Section("KICK OR BAN", _reason, Flow(
-                Act("Kick", Key(AdminAction.Kick), () => Moderate(AdminAction.Kick), () => Ruled() && online()),
+                Act("Kick", Key(AdminAction.Kick), () => Moderate(AdminAction.Kick, SelectedPlayer, _reason, _banMinutes), () => Ruled() && online()),
                 _banMinutes,
-                Act("Ban", Key(AdminAction.Ban), () => Moderate(AdminAction.Ban), Ruled))),
+                Act("Ban", Key(AdminAction.Ban), () => Moderate(AdminAction.Ban, SelectedPlayer, _reason, _banMinutes), Ruled))),
             s => s.Can("admin.players.kick") || s.Can("admin.players.ban"));
         var group = Gate(Section("GROUP", Hint("Groups up to your own rank, for players ranked below you."), Flow(_groupPick,
                 Act("Set group", Key(AdminAction.SetGroup), () => SelectedPlayer is { } p && _groupPick.SelectedItem is GroupInfo g ? new AdminRequest(AdminAction.SetGroup, p.SteamId, Name: g.Name) : null,
                     () => Ruled() && _groupPick.SelectedItem is GroupInfo))),
             "admin.players.set_group");
-        return Page(_playerSearch, _playerList, card, actions, moderation, group);
+        _listPart = Page(_playerSearch, Gate(_withOffline, "admin.players.info"), _playerList, card, actions, moderation, group);
+        _infoPart = InfoPage();
+        _infoPart.IsVisible = false;
+        var views = new Grid();
+        views.Children.Add(_listPart); views.Children.Add(_infoPart);
+        return views;
+    }
+
+    // ---- Player info ----
+
+    private Control InfoPage()
+    {
+        _infoGrids.ItemTemplate = new FuncDataTemplate<QueryRow>((r, _) => r == null ? null : Row(r.Name, r.Blocks.ToString("N0") + " blocks", r.Distance >= 0 ? Distance(r.Distance) + " from them" : "", r.Note));
+        _infoGrids.SelectionChanged += (_, _) => RefreshActions();
+        _infoTitle.HorizontalAlignment = HorizontalAlignment.Left;
+        bool Online() => _infoTarget?.Connected == true;
+        bool Ruled() => _infoTarget is { SteamId: not 0 } p && !IsMe(p.SteamId) && Outranks(p);
+        bool Picked() => _infoGrids.SelectedItem is QueryRow;
+        AdminRequest OnGrid(EntityVerb verb) => _infoGrids.SelectedItem is QueryRow g ? new AdminRequest(AdminAction.EntityAction, g.NetId, Minutes: (int)verb) : null;
+        Button Do(string label, string name, string key, Func<AdminRequest> make, Func<bool> enabled)
+            => Gate(OnlineUi.SmallButton(label, () => { if (make() is { } request) Send(request); }, name), key, enabled);
+        var header = Flow(OnlineUi.SmallButton("Back to players", CloseInfo, "AdminPlayerInfoBack"), OnlineUi.SmallButton("Refresh", () => AskInfo(_info?.Offset ?? 0), "AdminPlayerInfoRefresh"));
+        var player = Flow(
+            Do("Teleport to them", "AdminInfoTeleport", Key(AdminAction.TeleportTo), () => _infoTarget is { } p ? new AdminRequest(AdminAction.TeleportTo, p.SteamId) : null, () => Online() && !IsMe(_infoTarget.SteamId)),
+            Do("Bring them", "AdminInfoBring", Key(AdminAction.Bring), () => _infoTarget is { } p ? new AdminRequest(AdminAction.Bring, p.SteamId) : null, () => Online() && !IsMe(_infoTarget.SteamId)));
+        var moderation = Gate(Section("KICK OR BAN", _infoReason, Flow(
+                Do("Kick", "AdminInfoKick", Key(AdminAction.Kick), () => Moderate(AdminAction.Kick, _infoTarget, _infoReason, _infoBanMinutes), () => Ruled() && Online()),
+                _infoBanMinutes,
+                Do("Ban", "AdminInfoBan", Key(AdminAction.Ban), () => Moderate(AdminAction.Ban, _infoTarget, _infoReason, _infoBanMinutes), Ruled))),
+            s => s.Can("admin.players.kick") || s.Can("admin.players.ban"));
+        var grids = Section("THEIR GRIDS", _infoText, _infoGrids, Flow(
+            Do("Teleport to grid", "AdminInfoGridTeleport", AdminRules.EntityKey(EntityVerb.TeleportTo), () => OnGrid(EntityVerb.TeleportTo), Picked),
+            Do("Mark on my GPS", "AdminInfoGridMark", AdminRules.EntityKey(EntityVerb.Mark), () => OnGrid(EntityVerb.Mark), Picked)),
+            Flow(Do("Previous page", "AdminInfoPrevious", "admin.players.info", () => { AskInfo((_info?.Offset ?? 0) - PlayerDetails.PageSize); return null; }, () => _info is { Offset: > 0 }),
+                Do("Next page", "AdminInfoNext", "admin.players.info", () => { AskInfo((_info?.Offset ?? 0) + PlayerDetails.PageSize); return null; }, () => _info is { } q && q.Offset + q.Rows.Length < q.Total)));
+        return Page(header, OnlineUi.Panel(Stack(6, _infoTitle, player), new Thickness(18)), _infoSections, grids, moderation);
+    }
+
+    private void OpenInfo(AccessPlayer p)
+    {
+        if (p is not { SteamId: not 0 }) return;
+        _infoTarget = p; _info = null; _infoSerial = -1; _infoMessage = _state.Message;
+        _infoTitle.Text = p.Name;
+        _infoSections.Children.Clear();
+        _infoGrids.ItemsSource = Array.Empty<QueryRow>();
+        _infoText.Text = "Asking the server...";
+        _listPart.IsVisible = false; _infoPart.IsVisible = true;
+        AskInfo(0);
+        RefreshActions();
+    }
+
+    private void AskInfo(int first)
+    {
+        if (_infoTarget is { SteamId: not 0 } p) Send(new AdminRequest(AdminAction.PlayerInfo, p.SteamId, Minutes: Math.Max(0, first)));
+    }
+
+    private void CloseInfo()
+    {
+        _infoTarget = null; _info = null;
+        _infoPart.IsVisible = false; _listPart.IsVisible = true;
+        RefreshActions();
+    }
+
+    /// <summary>Shows the server's latest player info answer once it is about the player the view is open for.</summary>
+    private void RefreshInfo()
+    {
+        // A refusal (or an older server's "Unknown action.") arrives as the panel message instead of an answer.
+        if (_infoTarget != null && _info == null && !string.IsNullOrWhiteSpace(_state.Message) && _state.Message != _infoMessage) _infoText.Text = _state.Message;
+        if (_infoTarget == null || _state.Query is not { Kind: PlayerDetails.Kind } q || q.Serial == _infoSerial || q.Target != Net.PeerAlias.SteamOf(_infoTarget.SteamId)) return;
+        _infoSerial = q.Serial; _info = q;
+        _infoSections.Children.Clear();
+        foreach (var section in q.Sections) _infoSections.Children.Add(Section(section.Title, section.Lines.Select(InfoLine).ToArray()));
+        _infoText.Text = q.Text;
+        uint selected = (_infoGrids.SelectedItem as QueryRow)?.NetId ?? 0;
+        _infoGrids.ItemsSource = q.Rows; _infoGrids.SelectedItem = q.Rows.FirstOrDefault(r => r.NetId == selected && r.NetId != 0);
+    }
+
+    private Control InfoLine(DetailLine line)
+    {
+        var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("2*,12,3*,Auto"), Margin = new Thickness(0, 1) };
+        var value = Info(line.Value);
+        grid.Children.Add(Hint(line.Label));
+        Grid.SetColumn(value, 2); grid.Children.Add(value);
+        if (line.Copy)
+        {
+            var copy = OnlineUi.SmallButton("Copy", () => Copy(line.Value), "AdminInfoCopy");
+            copy.Margin = new Thickness(8, 0, 0, 0); copy.VerticalAlignment = VerticalAlignment.Top;
+            Grid.SetColumn(copy, 3); grid.Children.Add(copy);
+        }
+        return grid;
     }
 
     private AdminRequest Target(AdminAction action) => SelectedPlayer is { SteamId: not 0 } p ? new AdminRequest(action, p.SteamId) : null;
@@ -152,19 +255,19 @@ public sealed partial class AdminScreen
         return null;
     }
 
-    private AdminRequest Moderate(AdminAction action)
+    private AdminRequest Moderate(AdminAction action, AccessPlayer target, TextBox reasonBox, TextBox minutesBox)
     {
-        if (SelectedPlayer is not { SteamId: not 0 } p) return null;
-        string reason = _reason.Text ?? "";
+        if (target is not { SteamId: not 0 } p) return null;
+        string reason = reasonBox.Text ?? "";
         int minutes = 0;
-        string length = (_banMinutes.Text ?? "").Trim();
+        string length = (minutesBox.Text ?? "").Trim();
         if (action == AdminAction.Ban && length.Length > 0 && (!int.TryParse(length, NumberStyles.None, CultureInfo.InvariantCulture, out minutes) || minutes > 5256000))
             return Note("Enter the ban length in whole minutes (up to 10 years), or 0 for a permanent ban.");
         string what = action == AdminAction.Ban ? $"Ban {p.Name} {(minutes == 0 ? "permanently" : "for " + AccessList.Remaining(minutes * 60000L))}?" : $"Kick {p.Name}? They can join again.";
         SocialUi.Confirm(action == AdminAction.Ban ? "Ban player" : "Kick player", what + (string.IsNullOrWhiteSpace(reason) ? "" : "\nReason: " + reason), () =>
         {
             AdminAccess.Send(new AdminRequest(action, p.SteamId, reason, minutes));
-            Dispatcher.UIThread.Post(() => _reason.Text = "");
+            Dispatcher.UIThread.Post(() => reasonBox.Text = "");
         });
         return null;
     }
@@ -182,8 +285,16 @@ public sealed partial class AdminScreen
     private void RefreshPlayers()
     {
         string filter = (_playerSearch.Text ?? "").Trim();
-        var players = _state.Players.Where(p => p.Connected && (filter.Length == 0 || p.Name.Contains(filter, StringComparison.OrdinalIgnoreCase))).ToArray();
-        string roster = string.Join("|", players.Select(p => p.SteamId + p.Name + GroupOf(p) + p.Rank + p.PingMs / 10));
+        bool Match(string name, ulong id) => filter.Length == 0 || (name ?? "").Contains(filter, StringComparison.OrdinalIgnoreCase) || (id != 0 && id.ToString(CultureInfo.InvariantCulture).Contains(filter, StringComparison.Ordinal));
+        var list = _state.Players.Where(p => p.Connected && Match(p.Name, p.SteamId)).ToList();
+        if (_withOffline.IsChecked && _state.Can("admin.players.info"))
+        {
+            var online = _state.Players.Where(p => p.Connected).Select(p => Net.PeerAlias.SteamOf(p.SteamId)).ToHashSet();
+            list.AddRange(_state.Known.Where(k => !online.Contains(k.SteamId) && Match(k.Name, k.SteamId)).Take(300)
+                .Select(k => new AccessPlayer(k.SteamId, k.Name, OnlineRole.Player, false, -1, k.Group ?? PermissionSet.DefaultGroup, k.Rank)));
+        }
+        var players = list.ToArray();
+        string roster = string.Join("|", players.Select(p => p.SteamId + p.Name + GroupOf(p) + p.Rank + p.Connected + p.PingMs / 10));
         if (roster != _rosterSignature)
         {
             var selected = SelectedPlayer;
@@ -547,6 +658,7 @@ public sealed partial class AdminScreen
             Act("Teleport to", AdminRules.EntityKey(EntityVerb.TeleportTo), () => Verb(EntityVerb.TeleportTo), Picked),
             Act("Stop", AdminRules.EntityKey(EntityVerb.Stop), () => Verb(EntityVerb.Stop), Picked),
             Act("Power off", AdminRules.EntityKey(EntityVerb.PowerOff), () => Verb(EntityVerb.PowerOff), Picked),
+            Act("Mark on my GPS", AdminRules.EntityKey(EntityVerb.Mark), () => Verb(EntityVerb.Mark), Picked),
             Act("Delete", AdminRules.EntityKey(EntityVerb.Delete), () =>
             {
                 if (SelectedGrid is { } g) SocialUi.Confirm("Delete grid", $"Delete '{g.Name}' of {g.Owner} and every grid attached to it? This cannot be undone.",
@@ -666,6 +778,7 @@ public sealed partial class AdminScreen
         RefreshServer();
         RefreshPerms();
         RefreshQueries();
+        RefreshInfo();
         _creative.Sync(_state.Creative); _god.Sync(_state.Invulnerable); _bypass.Sync(_state.AccessBypass);
         if (_pages[_current].Name == "Spawn") RefreshCatalogs();
     }

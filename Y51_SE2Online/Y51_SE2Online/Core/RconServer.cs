@@ -127,13 +127,13 @@ public static class RconAccess
 		[RconCaller.Player] = []
 	};
 
-	/// <summary>The command word with aliases resolved (quit/exit/shutdown are stop), lower case.</summary>
+	/// <summary>The command word with aliases resolved (quit/exit/shutdown are stop, player is players), lower case.</summary>
 	public static string Verb(string command)
 	{
 		string text = (command ?? "").Trim();
 		int space = text.IndexOf(' ');
 		string word = (space < 0 ? text : text[..space]).ToLowerInvariant();
-		return word is "quit" or "exit" or "shutdown" ? "stop" : word;
+		return word is "quit" or "exit" or "shutdown" ? "stop" : word == "player" ? "players" : word;
 	}
 
 	public static List<string> ListFor(IReadOnlyDictionary<string, List<string>> roles, string role)

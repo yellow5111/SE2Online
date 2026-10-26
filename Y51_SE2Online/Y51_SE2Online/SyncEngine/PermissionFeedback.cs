@@ -92,9 +92,17 @@ internal static class PermissionFeedback
             if (actor == 0 || AccessBypass.IsOn(actor) || WorldSocial.GridOf(targetEntity) is not { } grid) return;
             var refused = new System.Collections.Generic.List<string>();
             foreach (var ship in grid.Get<Keen.Game2.Simulation.WorldObjects.CubeGrids.CubeGridComponent>().GetAllGridsInShip())
-                ship.TryGet<Keen.Game2.Simulation.WorldObjects.CubeGrids.CubeGridComponent>()?.VisitAllBlocksWithComponent<Keen.Game2.Simulation.WorldObjects.Items.InventoryComponent>(inventory =>
+                // Blocks with several inventories (input and output) have no default InventoryComponent tag: Entity.TryGet of it
+                // asserts ("No default tag found"), so blocks are visited and their inventories enumerated as the game does.
+                ship.TryGet<Keen.Game2.Simulation.WorldObjects.CubeGrids.CubeGridComponent>()?.VisitAllBlocksWithComponent<Keen.Game2.Simulation.WorldObjects.CubeBlocks.CubeBlockComponent>(block =>
                 {
-                    if (refused.Count < 100 && WorldSocial.Access(inventory.Entity, actor) == false) refused.Add(BlockName(inventory.Entity));
+                    if (refused.Count >= 100) return;
+                    foreach (var component in block.Entity.Components)
+                    {
+                        if (component is not Keen.Game2.Simulation.WorldObjects.Items.InventoryComponent) continue;
+                        if (WorldSocial.Access(block.Entity, actor) == false) refused.Add(BlockName(block.Entity));
+                        break;
+                    }
                 }, includeSubgrids: false);
             if (InteractionRules.DeniedNotice(refused) is { } text) Notify("Inventory", text);
         }

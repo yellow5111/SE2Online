@@ -30,7 +30,10 @@ public enum AdminAction
     /// <summary>Resource usage: Name energy|hydrogen|oxygen, Size the multiplier.</summary>
     Usage,
     /// <summary>The player's own home base: Minutes is a card index of their last spawn menu (Value true), or Value false clears it.</summary>
-    SetHome
+    SetHome,
+    /// <summary>Everything about player Target (online or seen before), as an AdminQuery of kind "player"; Minutes is the
+    /// first grid row wanted, Value true answers as text (commands) instead.</summary>
+    PlayerInfo
 }
 
 /// <summary>
@@ -67,14 +70,19 @@ public sealed record AccessPlayer(ulong SteamId, string Name, OnlineRole Role, b
 /// <summary>A group players can be put into, for the admin panel's group choices.</summary>
 public sealed record GroupInfo(string Name, int Rank);
 /// <summary>A player the server knows (online now, or seen before), for finding offline players to put into a group.</summary>
-public sealed record KnownPlayer(ulong SteamId, string Name, string Group, long LastSeenUnixMs);
-/// <summary>A per-player reply to a panel query (entities, cleanup preview, permission check), sent only to who asked.</summary>
+public sealed record KnownPlayer(ulong SteamId, string Name, string Group, long LastSeenUnixMs, int Rank = 0);
+/// <summary>A per-player reply to a panel query (entities, cleanup preview, player info), sent only to who asked.</summary>
 public sealed class AdminQuery
 {
     public string Kind { get; set; } = "";
     public string Text { get; set; } = "";
     public QueryRow[] Rows { get; set; } = Array.Empty<QueryRow>();
     public long Serial { get; set; }
+    /// <summary>Player info: the player asked about, the facts, all their grid groups and the first one in Rows.</summary>
+    public ulong Target { get; set; }
+    public DetailSection[] Sections { get; set; } = Array.Empty<DetailSection>();
+    public int Total { get; set; }
+    public int Offset { get; set; }
 }
 public sealed record QueryRow(uint NetId, string Name, string Owner, int Blocks, double Distance, string Note);
 public sealed record SafeZoneInfo(uint NetId, string Name, double Radius, double Distance);

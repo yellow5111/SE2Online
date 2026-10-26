@@ -16,6 +16,7 @@ using Keen.VRage.Library.Utils;
 using Keen.VRage.Physics.Character;
 using Keen.VRage.Core.Game.Data;
 using Y51_SE2Online.Core;
+using Y51_SE2Online.Sync;
 using Y51_SE2Online.SyncEngine;
 
 namespace Y51_SE2Online.KeenNetcode;
@@ -67,6 +68,11 @@ internal static class OwnAnimation
 	private static bool _wasIdle = true;
 	private static Vector2 _lastGroundMovement;
 
+	// -y51online:landdebounce:off: every flicker of the predicted body's ground contact reaches the animation (Sync.FallDebounce).
+	private static readonly bool DebounceOff = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "landdebounce:off");
+	private static readonly FallDebounce Fall = new();
+	private static long _heldTicks, _heldLogged, _heldLogMs;
+
 	public static void Install(Harmony harmony)
 	{
 		if (MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "ownanim:off"))
@@ -110,7 +116,7 @@ internal static class OwnAnimation
 		if (own.TryGet<AnimationBlackboardComponent>() is not { Blackboard: { } blackboard }) return;
 		lock (Sync)
 		{
-			if (!ReferenceEquals(_entity, own)) { _entity = own; _lastState = (CharacterState)(-1); _averageSpeedSquared = 0; _wasIdle = true; _lastGroundVelocity = default; }
+			if (!ReferenceEquals(_entity, own)) { _entity = own; _lastState = (CharacterState)(-1); _averageSpeedSquared = 0; _wasIdle = true; _lastGroundVelocity = default; Fall.Reset(); }
 			Drive(own, blackboard, _tuning);
 			_drivenThisFrame = true;
 		}
@@ -179,7 +185,24 @@ internal static class OwnAnimation
 	{
 		var data = e.Data;
 		DriveControls(e, bb, def);
-		if (!data.TryGet<CharacterPhysicsState>(out var state)) return;
+		if (!data.TryGet<CharacterPhysicsState>(out var physics)) return;
+		var state = physics;
+		// A tick or two without ground right after a voxel cut is not a fall (and its landing would shake the view).
+		// Not a jetpack lift-off (that is a real leaving of the ground). While held the walk blend keeps the last ground speed.
+		bool jetpack = e.TryGet<CharacterMovementComponent>()?.CurrentMovementState == CharacterMovementState.Jetpack;
+		if (!DebounceOff && !jetpack && Fall.Holds(_lastState == CharacterState.OnGround, state.State == CharacterState.Falling, data.Has<GravityEffectData>()))
+		{
+			state.State = CharacterState.OnGround;
+			state.GroundVelocity = _lastGroundVelocity;
+			_heldTicks++;
+		}
+		long now = MpClock.NowMs();
+		if (_heldTicks > _heldLogged && now - _heldLogMs >= 60000)
+		{
+			_heldLogMs = now;
+			GameLog.Instance.Info($"own animation: {_heldTicks - _heldLogged} ticks without ground under {FallDebounce.Ticks} in a row not shown as falls (voxel cuts and similar) in the last minute");
+			_heldLogged = _heldTicks;
+		}
 		float baseSpeed = e.TryGet<CharacterPhysicsEntityComponent>()?.Definition?.BaseGroundVelocity ?? 1f;
 		float speed = state.GroundVelocity.Length();
 		float ratio = Math.Clamp(speed / baseSpeed, 0f, 1f);

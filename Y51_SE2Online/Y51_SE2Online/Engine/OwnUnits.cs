@@ -520,8 +520,27 @@ internal static class OwnUnits
 			fields[i] = (index, r.ReadBoolean() ? r.ReadInt32() : -1);
 		}
 		var values = ReadArchive(r, services);
-		foreach (var (index, leaf) in fields) move.Fields.Add((index, typeof(object), leaf < 0 ? null : values.Get(leaf)));
+		foreach (var (index, leaf) in fields)
+		{
+			// The game's reader leaves a skip-on-fail field naming a removed object as null and the story then dereferences it
+			// (a quick transfer of an item the server had just replaced faulted with a NullReferenceException). Unreadable,
+			// so the caller answers it as skipped, which is the wrapper's contract.
+			if (leaf >= 0 && values.Skipped(leaf)) throw new InvalidDataException($"story {OwnStories.Short(move.TypeName)}: a skip-on-fail field names an object this game does not have");
+			move.Fields.Add((index, typeof(object), leaf < 0 ? null : values.Get(leaf)));
+		}
 		return move;
+	}
+
+	/// <summary>A story move's short name for a log line, when it names a network story this game has; else null.</summary>
+	public static string? StoryName(byte[] bytes)
+	{
+		try
+		{
+			using var r = new BinaryReader(new MemoryStream(bytes, writable: false), Encoding.UTF8);
+			if (r.ReadByte() != 1) return null;
+			return OwnStories.Resolve(r.ReadString()) is { } type ? OwnStories.Short(type.FullName ?? type.Name) : null;
+		}
+		catch (Exception) { return null; }
 	}
 
 	// --- object batches ---

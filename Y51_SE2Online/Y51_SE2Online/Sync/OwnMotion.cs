@@ -164,6 +164,29 @@ public static class OwnState
 
 	/// <summary>Any disagreement, the boost included.</summary>
 	public static bool DiffersAtAll(byte predicted, byte server) => ((predicted ^ server) & ~Forced) != 0;
+
+	/// <summary>
+	/// Player side: a movement-state value the server replicated for this game's own character while this game predicts
+	/// its toggles, that this game keeps its own of instead. The value left the server a round trip ago, before the
+	/// server ran the input that toggled it here: applied, it turned a jetpack switched on in gravity back off (and the
+	/// next toggle on, and so on). Only the jetpack on/off switch; seats, death and respawn always come from the server.
+	/// The server's state still wins through the acks (<see cref="OwnStateCheck"/>; a change the server made itself is
+	/// flagged <see cref="Forced"/> and taken at once). A dead character gets no acks, so it always takes the server's.
+	/// </summary>
+	public static bool KeepsOwnMovement(bool predictingToggles, bool alive, int mine, int server)
+		=> predictingToggles && alive && mine != server && mine is Ground or Jetpack && server is Ground or Jetpack;
+
+	/// <summary>
+	/// Server side: Keen's own jetpack, crouch and dampener requests from a player's game are ignored while that game
+	/// sends its toggles inside its inputs, whether or not this tick moved the character from them (a resync, a held
+	/// catch-up, a gap in the inputs): the same press then also arrives in an input, and both together toggled twice.
+	/// The server's own calls (leaving gravity, death) always run.
+	/// </summary>
+	public static bool IgnoresKeenToggle(bool togglesInInputs, long sinceLastInputMs, bool seated, bool serverOwnCall)
+		=> !serverOwnCall && togglesInInputs && sinceLastInputMs < InputsLiveMs && !seated;
+
+	/// <summary>How long after its last input a player's game still counts as sending them.</summary>
+	public const long InputsLiveMs = 2000;
 }
 
 /// <summary>
@@ -232,11 +255,28 @@ public sealed class OwnStateCheck
 /// ticks the queue is deeper than one over <see cref="Target"/> (walking merges from 3 over, boosting never), and never
 /// past <see cref="FastCap"/> (8 ticks, 133 ms, of extra delay at most). Over <see cref="Cap"/> every tick merges one, over
 /// <see cref="HardCap"/> the queue is merged down at once. Not thread-safe; the caller locks.
+/// Adaptive (0.18.2): one merge every <see cref="DrainEvery"/> ticks only covers a server down to 52.5 ticks a second;
+/// below that the queue grew to <see cref="Cap"/> (a full second of input delay, and every correction a second late).
+/// Past <see cref="FastCap"/> it now merges every <see cref="DrainEvery"/> minus half the ticks over it (every tick at 26
+/// over), so a 50 ticks/s server settles about 9 ticks over the cap instead of 48; and a player's game that skips ticks
+/// is asked to whatever the depth (it was only asked while the queue was under <see cref="FastCap"/>, so a queue that once
+/// grew past it was never asked again).
 /// </summary>
 public sealed class OwnInputBuffer
 {
 	public const int Target = 4, DrainEvery = 8, FastCap = 12, Cap = 60, HardCap = 180, GuessTicks = 10, RewindTicks = 2, Window = 600;
 	public const float MergeSpeed = 3;
+
+	public readonly bool Adaptive;
+
+	public OwnInputBuffer(bool adaptive = false) => Adaptive = adaptive;
+
+	/// <summary>Ticks between merges at <paramref name="depth"/>; a body faster than <see cref="FastMergeSpeed"/> (a merge
+	/// costs it a tick of travel, 83 cm at boost speed) keeps the old spacing until <see cref="Cap"/>.</summary>
+	public int DrainInterval(int depth, float speed = 0)
+		=> Adaptive && depth > FastCap && (speed <= FastMergeSpeed || depth > Cap) ? Math.Max(1, DrainEvery - (depth - FastCap) / 2) : DrainEvery;
+
+	public const float FastMergeSpeed = 12;
 
 	private readonly Dictionary<uint, OwnInput> _queued = new();
 	private readonly Dictionary<uint, OwnInput> _guessed = new();
@@ -329,9 +369,16 @@ public sealed class OwnInputBuffer
 				Pop();
 				Skipped++;
 			}
-			else if (paced && depth <= FastCap) Surplus = true;
-			else if (depth <= FastCap && speed > MergeSpeed * Math.Pow(2, (depth - Target - 1) / 2.0)) PutOff++;
-			else if (++_drainTicks % DrainEvery == 0) extra = 1;
+			else
+			{
+				// Past FastCap a paced game is asked to skip only while it rests (it may skip then), not on top of the merges.
+				if (paced && (depth <= FastCap || Adaptive && resting)) Surplus = true;
+				if (paced && depth <= FastCap) { }
+				else if (depth <= FastCap && speed > MergeSpeed * Math.Pow(2, (depth - Target - 1) / 2.0)) PutOff++;
+				else if (!Adaptive) { if (++_drainTicks % DrainEvery == 0) extra = 1; }
+				// Counted down: a modulo of a changing interval merged on back-to-back ticks and then went quiet.
+				else if (++_drainTicks >= DrainInterval(depth, speed)) { _drainTicks = 0; extra = 1; }
+			}
 		}
 		for (int i = 0; i < extra; i++)
 		{
@@ -383,11 +430,27 @@ public sealed class OwnInputBuffer
 /// Facing gets the same treatment: the player's own turn inputs replay exactly on the server, but jetpack flight in
 /// gravity (alignment, dampers, collisions) can turn the two bodies apart, and nothing turned them back; a facing off by
 /// more than <see cref="FacingDeadbandDegrees"/> is eased toward the server's at <see cref="MaxTurnStepDegrees"/> a tick.
+/// Soft (0.18.2): an error under <see cref="PersistMeters"/> / <see cref="SoftDegrees"/> is only taken once it has held for
+/// <see cref="PersistAcks"/> acks in a row (a guessed or late input the server repairs itself a tick or two later no longer
+/// pulls the body one way and back); one under <see cref="SoftMeters"/> is eased out over <see cref="SoftBlendSeconds"/> at most
+/// <see cref="SoftStep"/> plus a share of the speed a tick (<see cref="SoftTurnStepDegrees"/> for facing), with no velocity
+/// kick: on a server below 60 ticks a second (merged inputs leave it a tick of travel behind every few ticks) the body
+/// slows evenly instead of being tugged back in steps of several centimetres and half a degree.
 /// </summary>
 public sealed class OwnCorrection
 {
 	public const double SnapMeters = 3, DeadbandMeters = 0.02, BlendSeconds = 0.1, MaxStep = 0.05, SpeedShare = 0.2;
 	public const double FacingDeadbandDegrees = 0.5, MaxTurnStepDegrees = 0.5;
+	public const double SoftMeters = 0.5, SoftDegrees = 3, SoftBlendSeconds = 0.3, SoftStep = 0.008, SoftSpeedShare = 0.1, SoftTurnStepDegrees = 0.1;
+	public const int PersistAcks = 6;
+	public const double PersistMeters = 0.1;
+	public const float SoftVelocity = 0.5f;
+
+	/// <summary>Small errors wait for <see cref="PersistAcks"/> and ease slowly (see the summary).</summary>
+	public readonly bool Soft;
+	private int _persist, _turnPersist;
+
+	public OwnCorrection(bool soft = false) => Soft = soft;
 
 	// Standing still, each side's physics settles the body on its own ground, a centimetre or two and a fraction of a
 	// degree apart: correcting that every few ticks fought this game's physics, and the camera shook with the body. Below
@@ -426,7 +489,7 @@ public sealed class OwnCorrection
 	private Quaternion _appliedTurn = Quaternion.Identity, _pendingTurn = Quaternion.Identity;
 	private bool _snapNow;
 
-	public long Acks, Snaps, Rebases;
+	public long Acks, Snaps, Rebases, DeckVelocityKept;
 	public double ErrorSum, ErrorMax, StepMax, TurnErrorSum, TurnErrorMax;
 
 	/// <summary>The newest measured error (diagnostics).</summary>
@@ -443,6 +506,7 @@ public sealed class OwnCorrection
 		_appliedVelocity = _pendingVelocity = default;
 		_appliedTurn = _pendingTurn = Quaternion.Identity;
 		_snapNow = false;
+		_persist = _turnPersist = 0;
 	}
 
 	/// <summary>After input <paramref name="seq"/> ran: where the character is, in <paramref name="parent"/>'s frame.</summary>
@@ -456,14 +520,16 @@ public sealed class OwnCorrection
 			_appliedVelocity = _pendingVelocity = default;
 			_appliedTurn = _pendingTurn = Quaternion.Identity;
 			_snapNow = false;
+			_persist = _turnPersist = 0;
 		}
 		_ring[seq % Ring] = new Predicted { Seq = seq, Parent = parent, Gen = _gen, Position = position, Applied = _applied, Velocity = velocity, AppliedVelocity = _appliedVelocity, Rotation = rotation, AppliedTurn = _appliedTurn };
 	}
 
 	/// <summary>The server's pose after input <paramref name="ack"/>. Rebase: frames disagree for too long, jump to the server's pose.
 	/// <paramref name="standing"/>: no movement input and at rest (<see cref="StandingDeadbandMeters"/>);
-	/// <paramref name="steady"/>: no turn input (<see cref="SteadyFacingDeadbandDegrees"/>).</summary>
-	public Outcome Measure(uint ack, uint parent, Vec3D position, Vector3 velocity, Quaternion rotation = default, bool standing = false, bool steady = false)
+	/// <paramref name="steady"/>: no turn input (<see cref="SteadyFacingDeadbandDegrees"/>);
+	/// <paramref name="onDeck"/>: standing on a moving grid, whose velocity sets the character's (the velocity is not corrected).</summary>
+	public Outcome Measure(uint ack, uint parent, Vec3D position, Vector3 velocity, Quaternion rotation = default, bool standing = false, bool steady = false, bool onDeck = false)
 	{
 		if (ack == 0 || (_newestAck != 0 && !Seq.Newer(ack, _newestAck))) return Outcome.None;
 		ref var p = ref _ring[ack % Ring];
@@ -495,10 +561,21 @@ public sealed class OwnCorrection
 			TurnErrorSum += turn;
 			TurnErrorMax = Math.Max(TurnErrorMax, turn);
 			bool turning = Degrees(_pendingTurn) >= 1e-3;
-			_pendingTurn = turn < (steady && !turning ? SteadyFacingDeadbandDegrees : FacingDeadbandDegrees) ? Quaternion.Identity : off;
+			if (turn < (steady && !turning ? SteadyFacingDeadbandDegrees : FacingDeadbandDegrees)) { _pendingTurn = Quaternion.Identity; _turnPersist = 0; }
+			else if (Soft && turn < SoftDegrees && !turning && ++_turnPersist < PersistAcks) { }
+			else { _pendingTurn = off; _turnPersist = 0; }
 		}
-		_pending = size < (standing && _pending == default ? StandingDeadbandMeters : DeadbandMeters) ? default : error;
-		_pendingVelocity = velocityError.Length() < 0.05f ? default : velocityError;
+		bool below = size < (standing && _pending == default ? StandingDeadbandMeters : DeadbandMeters);
+		if (below) { _pending = default; _persist = 0; }
+		// Soft: a small error that just appeared waits until it has held (one that is already being eased follows the newest).
+		else if (Soft && size < PersistMeters && _pending == default && ++_persist < PersistAcks) { }
+		else { _pending = error; _persist = 0; }
+		// Soft: a small velocity error is left to the position easing; a real one (a push the prediction missed, drift in
+		// zero g) is still corrected, or the body would stay shifted every tick, tens of centimetres off.
+		_pendingVelocity = velocityError.Length() < (Soft && size < SoftMeters ? SoftVelocity : 0.05f) ? default : velocityError;
+		// On a moving deck the two velocities are the deck's at two different moments (the server's when it ran the input,
+		// this game's a playout delay before): the difference is the deck's own acceleration, not the character's.
+		if (onDeck && _pendingVelocity != default) { _pendingVelocity = default; DeckVelocityKept++; }
 		if (size <= SnapMeters) return _pending == default && _pendingVelocity == default ? Outcome.None : Outcome.Blend;
 		_snapNow = true;
 		Snaps++;
@@ -516,7 +593,8 @@ public sealed class OwnCorrection
 	{
 		double left = Degrees(_pendingTurn);
 		if (left < 1e-3) return Quaternion.Identity;
-		double most = Placing && left <= PlacingFreeDegrees ? PlacingTurnStepDegrees : MaxTurnStepDegrees;
+		double hardTurn = Soft ? Math.Clamp((left - SoftDegrees / 2) / (SoftDegrees / 2), 0, 1) : 1;
+		double most = Placing && left <= PlacingFreeDegrees ? PlacingTurnStepDegrees : SoftTurnStepDegrees + (MaxTurnStepDegrees - SoftTurnStepDegrees) * hardTurn;
 		var turn = left <= most ? _pendingTurn : Quaternion.Slerp(Quaternion.Identity, _pendingTurn, (float)(most / left));
 		_pendingTurn = Quaternion.Normalize(_pendingTurn * Quaternion.Conjugate(turn));
 		_appliedTurn = Quaternion.Normalize(turn * _appliedTurn);
@@ -536,9 +614,14 @@ public sealed class OwnCorrection
 		}
 		else
 		{
-			double share = 1 - Math.Exp(-dt / BlendSeconds);
+			// Soft: from half of SoftMeters up the gentle rate ramps into the normal one, so a growing error never switches
+			// from a 1 cm to a 6 cm step between two ticks.
+			double hard = Soft ? Math.Clamp((_pending.Length - SoftMeters / 2) / (SoftMeters / 2), 0, 1) : 1;
+			double blend = SoftBlendSeconds + (BlendSeconds - SoftBlendSeconds) * hard;
+			double share = 1 - Math.Exp(-dt / blend);
 			dp = _pending * share;
-			double cap = Placing && _pending.Length <= PlacingFreeMeters ? PlacingStepMeters : MaxStep + SpeedShare * speed * dt, size = dp.Length;
+			double softCap = SoftStep + SoftSpeedShare * speed * dt, hardCap = MaxStep + SpeedShare * speed * dt;
+			double cap = Placing && _pending.Length <= PlacingFreeMeters ? PlacingStepMeters : softCap + (hardCap - softCap) * hard, size = dp.Length;
 			if (size > cap) dp = dp * (cap / size);
 			else if (_pending.Length < 0.002) dp = _pending;
 			dv = _pendingVelocity * (float)share;
@@ -780,5 +863,53 @@ public sealed class FuelLedger
 				}
 			}
 		return (flightLeft, boostLeft);
+	}
+}
+
+/// <summary>
+/// Player side, for the animation of this game's predicted character: a fall that starts on the ground counts only once it
+/// has lasted <see cref="Ticks"/> ticks in gravity. Underground on a planet every voxel cut re-cooks the rock colliders
+/// around the character here a moment after the server's cut, so for a tick or two it stood on nothing: the animation went
+/// Falling, then OnGround with a landing, and the landing's camera shake (CameraShakeConfiguration "Landing") shook the view
+/// on every cut (Xero, 0.18.1; the server's own body, which drives single player, never loses its ground). A real step off
+/// a ledge shows its fall 5 ticks (83 ms) later. Not thread-safe.
+/// </summary>
+public sealed class FallDebounce
+{
+	public const int Ticks = 5;
+
+	private int _falling;
+
+	/// <summary>Whether the animation keeps showing the character on the ground this tick: it was on the ground, it is
+	/// falling now in gravity, and the fall is not yet <see cref="Ticks"/> old.</summary>
+	public bool Holds(bool wasOnGround, bool falling, bool gravity)
+	{
+		if (!falling) { _falling = 0; return false; }
+		if (!wasOnGround || !gravity) return false;
+		return ++_falling < Ticks;
+	}
+
+	public void Reset() => _falling = 0;
+}
+
+/// <summary>
+/// This game's ticks in wall time: after a gap of at least 4 frames (a stall), the ticks that follow within half a frame
+/// of the one before, as many as the stall missed, are the game catching up. Under 60 frames a second two ticks share a
+/// frame now and then (no gap of 4 frames before them): not a catch-up.
+/// </summary>
+public sealed class CatchUpDetector
+{
+	private const double FrameMs = 1000.0 / 60;
+	private double _lastMs = double.NaN, _owed;
+
+	/// <summary>Once per tick: true when this tick is one of a catch-up's.</summary>
+	public bool Tick(double nowMs)
+	{
+		double gap = double.IsNaN(_lastMs) ? FrameMs : nowMs - _lastMs;
+		_lastMs = nowMs;
+		if (gap >= 4 * FrameMs) { _owed = Math.Min(gap / FrameMs - 1, 90); return false; }
+		if (gap < FrameMs / 2 && _owed >= 1) { _owed--; return true; }
+		_owed = 0;
+		return false;
 	}
 }
