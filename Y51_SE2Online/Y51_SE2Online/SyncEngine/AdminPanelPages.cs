@@ -109,7 +109,7 @@ public sealed partial class AdminScreen
     private readonly TextBox _cEvery = Box("", 5, 130), _cProtect = Box("", 7, 130), _cKeep = Box("", 32, 130), _cFloatAge = Box("", 6, 130), _cDebrisBlocks = Box("", 3, 130),
         _cNpcDays = Box("", 4, 130), _cPlayerDays = Box("", 5, 130), _cPlayerHours = Box("", 6, 130);
 
-    private static CheckBox Check(string label) => new() { Content = label, FontSize = 19, MinHeight = 36 };
+    private static CheckBox Check(string label) => new LampToggle(label) { FontSize = 16, MinHeight = 30 };
 
     private static Control Pair(string label, Control input)
     {

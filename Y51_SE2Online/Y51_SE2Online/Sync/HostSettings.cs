@@ -1,19 +1,19 @@
 namespace Y51_SE2Online.Sync;
 
-public readonly record struct HostSettings(bool Identities, GridPermissionMode Grids, ResearchMode Research, bool WaterSync = false, bool ClientMovement = false, bool OwnReplication = false)
+public readonly record struct HostSettings(bool Identities, GridPermissionMode Grids, ResearchMode Research, bool WaterSync = false, bool ClientMovement = false, bool OwnReplication = false, bool ProgressionOff = false)
 {
 	public byte Pack()
 	{
-		return (byte)((Identities ? 1u : 0u) | (uint)((Grids == GridPermissionMode.Strict) ? 2 : 0) | (uint)((Research == ResearchMode.Own) ? 4 : 0) | (WaterSync ? 8u : 0u) | (ClientMovement ? 16u : 0u) | (OwnReplication ? 32u : 0u));
+		return (byte)((Identities ? 1u : 0u) | (uint)((Grids == GridPermissionMode.Strict) ? 2 : 0) | (uint)((Research == ResearchMode.Own) ? 4 : 0) | (WaterSync ? 8u : 0u) | (ClientMovement ? 16u : 0u) | (OwnReplication ? 32u : 0u) | (uint)((Research == ResearchMode.Faction) ? 64 : 0) | (ProgressionOff ? 128u : 0u));
 	}
 
 	public static HostSettings Unpack(byte b)
 	{
-		return new HostSettings((b & 1) != 0, ((b & 2) != 0) ? GridPermissionMode.Strict : GridPermissionMode.Team, ((b & 4) != 0) ? ResearchMode.Own : ResearchMode.Shared, (b & 8) != 0, (b & 16) != 0, (b & 32) != 0);
+		return new HostSettings((b & 1) != 0, ((b & 2) != 0) ? GridPermissionMode.Strict : GridPermissionMode.Team, ((b & 64) != 0) ? ResearchMode.Faction : ((b & 4) != 0) ? ResearchMode.Own : ResearchMode.Shared, (b & 8) != 0, (b & 16) != 0, (b & 32) != 0, (b & 128) != 0);
 	}
 
 	public override string ToString()
 	{
-		return $"identities {(Identities ? "per player" : "shared (off)")}, grids {((Grids == GridPermissionMode.Team) ? "team" : "strict")}, research {((Research == ResearchMode.Shared) ? "shared" : "own")}, water sync {(WaterSync ? "on (experimental)" : "off")}, predicted movement {(ClientMovement ? "on" : "off")}, replication {(OwnReplication ? "SE2 Online engine" : "Keen's")}";
+		return $"identities {(Identities ? "per player" : "shared (off)")}, grids {((Grids == GridPermissionMode.Team) ? "team" : "strict")}, research {Sharing.Name(Research)}, progression {(ProgressionOff ? "off" : "on")}, water sync {(WaterSync ? "on (experimental)" : "off")}, predicted movement {(ClientMovement ? "on" : "off")}, replication {(OwnReplication ? "SE2 Online engine" : "Keen's")}";
 	}
 }

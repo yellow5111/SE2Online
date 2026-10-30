@@ -245,6 +245,7 @@ internal sealed partial class HostWorld : IHostWorld, IPingWorld
 	public void ConfigureIdentities(HostSettings settings)
 	{
 		_research = settings.Research;
+		_progressionOff = settings.ProgressionOff;
 		IdentitiesOn = settings.Identities;
 	}
 

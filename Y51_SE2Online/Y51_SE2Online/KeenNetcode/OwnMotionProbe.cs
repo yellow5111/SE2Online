@@ -76,9 +76,9 @@ internal static class OwnMotionProbe
 		(4, new Vector3(1, 0, 0), 0, Act.None),
 		(6, Vector3.Zero, 0, Act.None),
 		(7, new Vector3(0, 1, 1), 0, Act.None),
-		(9, new Vector3(0, 0, -1), 0.01f, Act.None),
+		(9, new Vector3(0, 0, -1), 0.01f, Act.Boost),
 		(11, Vector3.Zero, 0, Act.None),
-		(12, new Vector3(0, 0, -1), 0, Act.Boost),
+		(12, new Vector3(0, 0, -1), 0, Act.None),
 		(14, Vector3.Zero, 0, Act.Unboost),
 	};
 
@@ -162,6 +162,7 @@ internal static class OwnMotionProbe
 				}
 			}
 			own.Data.Set(new ControlData { Movement = move, Rotation = new Vector3(0, yaw, 0) });
+			own.Data.GetWritePtr<AdvancedCharacterControlData>().IsBoosting = _boosting;
 			if (_steps % 30 == 0) GameLog.Instance.Info($"selftest: own motion params t={t:0.0}: {Params(own)}");
 			if (_waitingMove && step > 0.001)
 			{

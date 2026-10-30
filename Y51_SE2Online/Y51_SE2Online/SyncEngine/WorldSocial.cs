@@ -13,7 +13,9 @@ using Keen.Game2.Simulation.GameSystems.Identities;
 using Keen.Game2.Simulation.GameSystems.Ownership;
 using Keen.Game2.Simulation.GameSystems.Permissions;
 using Keen.Game2.Simulation.WorldObjects.CubeBlocks;
+using Keen.Game2.Simulation.WorldObjects.CubeBlocks.MechanicalBlocks;
 using Keen.Game2.Simulation.WorldObjects.CubeGrids;
+using Keen.Game2.Simulation.WorldObjects.Characters;
 using Keen.VRage.Core.Game.Systems;
 using Keen.VRage.Core.Worlds;
 using Keen.VRage.Core;
@@ -51,6 +53,8 @@ internal sealed class WorldSocial
     {
         harmony.Patch(AccessTools.Method(typeof(GameWorldBuilder), nameof(GameWorldBuilder.CreateBaseGame)), postfix: new HarmonyMethod(typeof(WorldSocial), nameof(BaseGameBuilt)));
         harmony.Patch(AccessTools.Method(typeof(GridPermissionsComponent), "Init"), postfix: new HarmonyMethod(typeof(WorldSocial), nameof(GridInitialized)));
+        harmony.Patch(AccessTools.Method(typeof(ToppedMechanicalBlockComponent), nameof(ToppedMechanicalBlockComponent.RequestSpawnTop)),
+            prefix: new HarmonyMethod(typeof(WorldSocial), nameof(SpawnTopPrefix)), finalizer: new HarmonyMethod(typeof(WorldSocial), nameof(SpawnTopFinalizer)));
     }
 
     private static void BaseGameBuilt(ref EntityBuilder builder, bool isServer)
@@ -61,8 +65,14 @@ internal sealed class WorldSocial
     // Single-player grids keep the game's own defaults; a world that starts hosting later gets its sharing from InitializeGrids.
     private static void GridInitialized(GridPermissionsComponent __instance, GridPermissionsObjectBuilder ob)
     {
-        if (!ob.BuildPermissions.HasValue && Online) __instance._buildPermissions = Private;
+        if (!ob.BuildPermissions.HasValue && Online) __instance._buildPermissions = _topBase?.TryGet<GridPermissionsComponent>()?.BuildPermissions ?? Private;
     }
+
+    // A piston, rotor or hinge builds its head as a new grid. Private, only the owner could build on the head of a piston a
+    // faction member placed on a faction grid (or place one on another's head); the head takes its base grid's sharing.
+    [ThreadStatic] private static Entity? _topBase;
+    private static void SpawnTopPrefix(ToppedMechanicalBlockComponent __instance) => _topBase = GridOf(__instance.Entity);
+    private static Exception? SpawnTopFinalizer(Exception? __exception) { _topBase = null; return __exception; }
 
     private static bool Online => MpPlugin.Online;
 
@@ -270,6 +280,9 @@ internal sealed class WorldSocial
     // Our own transfers reset block access themselves (after setting the new sharing).
     [ThreadStatic] private static bool _ownTransfer;
     private static readonly ConditionalWeakTable<Entity, object> Watched = new();
+    // SE2 works out a character's connected state only when it enters the scene or a player joins or leaves, so an NPC
+    // spawned under the default owner and then handed to NPC keeps "disconnected" and dies after the disconnect timeout.
+    private static readonly System.Reflection.MethodInfo UpdateConnectedStatus = AccessTools.Method(typeof(ConnectedStatusComponent), "UpdateConnectedStatus");
 
     /// <summary>
     /// Server: SE2's own transfers (accepted transfer requests, mission triggers, NPC handovers) reset block access as
@@ -285,6 +298,9 @@ internal sealed class WorldSocial
     private static void Transferred(Entity session, Entity target, IdentityId from, IdentityId to)
     {
         if (PlayerIdentities.IsHuman((long)to) && target != null && target.TryGet<CubeGridComponent>() != null) KeenNetcode.PlayerGridGuard.Queue(target);
+        if (target?.TryGet<ConnectedStatusComponent>() is { } status)
+            try { UpdateConnectedStatus?.Invoke(status, null); }
+            catch (Exception ex) { GameLog.Instance.Warn("connected state: recheck after an owner change failed: " + ex.Message); }
         if (_ownTransfer || (long)from == (long)to || target == null || EngineCodec.IsDead(target) || target.TryGet<CubeGridComponent>() == null) return;
         try { ResetBlockAccess(target); }
         catch (Exception ex) { GameLog.Instance.Warn("grid ownership: resetting block access after a native transfer failed: " + ex.Message); }

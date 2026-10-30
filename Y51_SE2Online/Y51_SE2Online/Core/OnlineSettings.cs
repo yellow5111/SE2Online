@@ -6,7 +6,7 @@ using Y51_SE2Online.Sync;
 
 namespace Y51_SE2Online.Core;
 
-public sealed class OnlineSettings : System.Text.Json.Serialization.IJsonOnDeserializing
+public sealed class OnlineSettings : System.Text.Json.Serialization.IJsonOnDeserializing, System.Text.Json.Serialization.IJsonOnDeserialized
 {
     public string SessionName { get; set; } = "My SE2 session";
     public string Description { get; set; } = "";
@@ -17,7 +17,9 @@ public sealed class OnlineSettings : System.Text.Json.Serialization.IJsonOnDeser
 
     // Runs before a file's values are read: a key the file leaves out keeps the default it was written under (listing off),
     // only new settings start public. FriendsOnly is left alone: a dedicated server.json that omits it must stay false.
-    void System.Text.Json.Serialization.IJsonOnDeserializing.OnDeserializing() { Advertise = false; AdvertiseChosen = false; }
+    void System.Text.Json.Serialization.IJsonOnDeserializing.OnDeserializing() { Advertise = false; AdvertiseChosen = false; ResearchSharing = null; _sharedResearch = null; }
+    // A file from before 0.18.3 has only SharedResearch: false there meant each player on their own.
+    void System.Text.Json.Serialization.IJsonOnDeserialized.OnDeserialized() => ResearchSharing ??= _sharedResearch == false ? Sync.Sharing.Individual : Sync.Sharing.Everyone;
     /// <summary>Asks se2-online.yellow51.dev for the newest release once per game start.</summary>
     public bool CheckForUpdates { get; set; } = true;
     /// <summary>Plain -plugins: installs download, verify and install a newer release themselves, then offer a restart.</summary>
@@ -39,7 +41,18 @@ public sealed class OnlineSettings : System.Text.Json.Serialization.IJsonOnDeser
     /// <summary>A world SE2 Online never hosted shares its grids with everyone when it is first hosted. Off for new hosts: up
     /// to 0.18.0-pre4 it shared every grid without SE2 Online's sharing at every load.</summary>
     public bool TeamGrids { get; set; }
-    public bool SharedResearch { get; set; } = true;
+    /// <summary>Hosting: who shares research (block unlocks and discoveries): everyone, faction (members of the same SE2 Online faction) or individual.</summary>
+    public string ResearchSharing { get; set; } = Sync.Sharing.Everyone;
+    private bool? _sharedResearch;
+    /// <summary>Read only, from settings saved before 0.18.3; ResearchSharing replaces it.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public bool? SharedResearch { get => null; set => _sharedResearch = value; }
+    /// <summary>Hosting: who shares contracts (accepting, progress and rewards): everyone (SE2's own), faction or individual.</summary>
+    public string ContractSharing { get; set; } = Sync.Sharing.Everyone;
+    /// <summary>Hosting: blocks unlock through research; off makes every block available to everyone (unlocks are kept).</summary>
+    public bool Progression { get; set; } = true;
+    [System.Text.Json.Serialization.JsonIgnore] public Sync.ResearchMode Research => Sync.Sharing.TryParse(ResearchSharing, out var mode) ? mode : Sync.ResearchMode.Shared;
+    [System.Text.Json.Serialization.JsonIgnore] public Sync.ResearchMode Contracts => Sync.Sharing.TryParse(ContractSharing, out var mode) ? mode : Sync.ResearchMode.Shared;
     public bool Nametags { get; set; } = true;
     public double NametagRange { get; set; } = 200;
     public bool SpawnNearHost { get; set; }
@@ -212,6 +225,8 @@ public sealed class OnlineSettings : System.Text.Json.Serialization.IJsonOnDeser
         if (PingWordFilter == null || PingWordFilter.Count > 500) return "PingWordFilter must be a list of at most 500 words.";
         if (!(MarkerAimDegrees >= 2 && MarkerAimDegrees <= 30)) return "MarkerAimDegrees must be between 2 and 30.";
         if (MarkerFullCount < Sync.MarkerRelevance.MinFullCount || MarkerFullCount > Sync.MarkerRelevance.MaxFullCount) return $"MarkerFullCount must be between {Sync.MarkerRelevance.MinFullCount} and {Sync.MarkerRelevance.MaxFullCount}.";
+        if (!Sync.Sharing.TryParse(ResearchSharing, out _)) return "ResearchSharing must be everyone, faction or individual.";
+        if (!Sync.Sharing.TryParse(ContractSharing, out _)) return "ContractSharing must be everyone, faction or individual.";
         if (MarkerDefaults == null || !Sync.PingRules.TryMode(MarkerDefaults.Mode, out _)) return "MarkerDefaults.Mode must be all, relevant, pings or off.";
         if ((MarkerDefaults.Off ?? new()).Any(c => !Sync.PingRules.TryCategory(c, out _))) return "MarkerDefaults.Off may list pings, gps, players, signals, quest and ore.";
         if (MaxModDownloadGiB < 1 || MaxModDownloadGiB > ModDownloads.MaxGiBLimit) return $"Workshop download limit must be between 1 and {ModDownloads.MaxGiBLimit} GiB.";
@@ -256,7 +271,7 @@ public sealed class OnlineSettings : System.Text.Json.Serialization.IJsonOnDeser
         {
             MpOptions.Prefix + mode,
             MpOptions.Prefix + "grids:" + (TeamGrids ? "team" : "strict"),
-            MpOptions.Prefix + "research:" + (SharedResearch ? "shared" : "own"),
+            MpOptions.Prefix + "research:" + (Research switch { Sync.ResearchMode.Own => "own", Sync.ResearchMode.Faction => "faction", _ => "shared" }),
             MpOptions.Prefix + "nametags:" + (Nametags ? NametagRange.ToString(CultureInfo.InvariantCulture) : "off"),
             MpOptions.Prefix + "spawn:" + (SpawnNearHost ? "host" : "respawn"),
             MpOptions.Prefix + "rejoin:" + (AutoReconnect ? "on" : "off"),
@@ -284,6 +299,8 @@ public sealed class OnlineSettings : System.Text.Json.Serialization.IJsonOnDeser
         options.Motd = Motd ?? "";
         options.MotdTitle = MotdTitle ?? "";
         options.Pvp = Pvp;
+        options.Contracts = Contracts;
+        options.Progression = Progression;
         options.OfflineRaidProtection = OfflineRaidProtection;
         options.PcuLimit = PcuLimit;
         options.SunRotation = SunRotation;

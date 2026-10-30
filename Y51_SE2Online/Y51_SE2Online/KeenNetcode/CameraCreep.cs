@@ -44,8 +44,14 @@ internal static class CameraCreep
 	public static void Install(Harmony harmony)
 	{
 		if (!IgnoreOff)
+		{
 			harmony.Patch(AccessTools.Method(typeof(CharacterThirdPersonAdapterComponent), nameof(CharacterThirdPersonAdapterComponent.CanObstructView)),
 				prefix: new HarmonyMethod(typeof(CameraCreep), nameof(CanObstructPrefix)));
+			// The ship camera ignores the grid and grids attached to it, not the pilot sitting in it: the seated character
+			// trails the grid by a physics step (5 m at 300 m/s) onto the ray, and the camera jumped in to it for a frame.
+			harmony.Patch(AccessTools.Method(typeof(CubeGridThirdPersonAdapterComponent), nameof(CubeGridThirdPersonAdapterComponent.CanObstructView)),
+				prefix: new HarmonyMethod(typeof(CameraCreep), nameof(GridCanObstructPrefix)));
+		}
 		if (Diag || !WatchOff)
 			harmony.Patch(AccessTools.Method(typeof(ThirdPersonCameraComponent), "CameraCollisionDetection"),
 				postfix: new HarmonyMethod(typeof(CameraCreep), nameof(CollisionPostfix)));
@@ -55,6 +61,13 @@ internal static class CameraCreep
 		=> entity != root.DEntity && new DEntityContext(root.Scene, entity).GetTopLevelParent().Entity == root.DEntity;
 
 	private static bool CanObstructPrefix(CharacterThirdPersonAdapterComponent __instance, DEntity entity, ref bool __result)
+	{
+		if (!MpPlugin.Online || __instance.ObservedEntityRootInHierarchy is not { } root || !OwnHierarchy(root, entity)) return true;
+		__result = false;
+		return false;
+	}
+
+	private static bool GridCanObstructPrefix(CubeGridThirdPersonAdapterComponent __instance, DEntity entity, ref bool __result)
 	{
 		if (!MpPlugin.Online || __instance.ObservedEntityRootInHierarchy is not { } root || !OwnHierarchy(root, entity)) return true;
 		__result = false;

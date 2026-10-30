@@ -106,7 +106,7 @@ public sealed class DedicatedConfig
     /// <summary>The option paths in a server.json this build has no setting for (one level into Network, AutoRestart...).</summary>
     internal static List<string> UnknownOptions(string text)
         => System.Text.Json.Nodes.JsonNode.Parse(text) is System.Text.Json.Nodes.JsonObject file
-            ? JsonDefaults.UnknownKeys(file, (System.Text.Json.Nodes.JsonObject)JsonSerializer.SerializeToNode(new DedicatedConfig(), Json)!, FreeForm)
+            ? JsonDefaults.UnknownKeys(file, Known(), FreeForm)
             : new List<string>();
 
     private static readonly HashSet<string> FreeForm = new(StringComparer.OrdinalIgnoreCase) { "SessionSettings", "DefinitionSettings", "RconRoles" };
@@ -128,10 +128,20 @@ public sealed class DedicatedConfig
     };
 
     /// <summary>Writes options this version added into the host's server.json with their defaults; returns their paths.</summary>
-    public static List<string> AddNewOptions(string path)
+    public static List<string> AddNewOptions(DedicatedConfig config)
     {
         var defaults = (System.Text.Json.Nodes.JsonObject)JsonSerializer.SerializeToNode(new DedicatedConfig(), Json)!;
-        return JsonDefaults.UpgradeFile(path, defaults, NotAdded, text => JsonSerializer.Deserialize<DedicatedConfig>(text, Lenient));
+        // A server.json from before 0.18.3 gets the research sharing its SharedResearch chose.
+        defaults["Network"]!["ResearchSharing"] = config.Network.ResearchSharing;
+        return JsonDefaults.UpgradeFile(config.ConfigPath, defaults, NotAdded, text => JsonSerializer.Deserialize<DedicatedConfig>(text, Lenient));
+    }
+
+    // SharedResearch is still read from a server.json from before 0.18.3, so it is not an unknown option.
+    private static System.Text.Json.Nodes.JsonObject Known()
+    {
+        var known = (System.Text.Json.Nodes.JsonObject)JsonSerializer.SerializeToNode(new DedicatedConfig(), Json)!;
+        known["Network"]!["SharedResearch"] = true;
+        return known;
     }
 
     public static DedicatedConfig Read(string path)
@@ -142,7 +152,7 @@ public sealed class DedicatedConfig
             ?? throw new ArgumentException("Dedicated configuration is empty.");
         // An unknown option is a newer version's setting (warned, ignored), unless it looks like a typo of a known one: then
         // the server does not start, rather than run with that setting (a password, a port) left at its default.
-        var known = (System.Text.Json.Nodes.JsonObject)JsonSerializer.SerializeToNode(new DedicatedConfig(), Json)!;
+        var known = Known();
         foreach (string option in UnknownOptions(text))
         {
             string name = option[(option.LastIndexOf('.') + 1)..];

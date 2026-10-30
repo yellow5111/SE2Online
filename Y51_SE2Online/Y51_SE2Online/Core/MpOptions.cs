@@ -49,6 +49,10 @@ public sealed class MpOptions
 
 	public bool Pvp { get; internal set; } = true;
 
+	public Y51_SE2Online.Sync.ResearchMode Contracts { get; internal set; }
+
+	public bool Progression { get; internal set; } = true;
+
 	public bool OfflineRaidProtection { get; internal set; } = true;
 
 	public int? PcuLimit { get; internal set; }
@@ -447,7 +451,8 @@ public sealed class MpOptions
 			{
 				"shared" => ResearchMode.Shared,
 				"own" => ResearchMode.Own,
-				_ => throw new FormatException("expected -y51online:research:shared or :own"),
+				"faction" => ResearchMode.Faction,
+				_ => throw new FormatException("expected -y51online:research:shared, :faction or :own"),
 			};
 			return true;
 		case "nametags":
@@ -635,7 +640,7 @@ public sealed class MpOptions
 			if (Host)
 			{
 				parts.Add(Identities
-					? $"identities=on grids={(Grids == GridPermissionMode.Team ? "team" : "strict")} research={(Research == ResearchMode.Shared ? "shared" : "own")}"
+					? $"identities=on grids={(Grids == GridPermissionMode.Team ? "team" : "strict")} research={Sharing.Name(Research)} contracts={Sharing.Name(Contracts)} progression={(Progression ? "on" : "off")}"
 					: "identities=off");
 			}
 			if (Host)

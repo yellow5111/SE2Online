@@ -26,8 +26,11 @@ public static partial class OnlineRules
 	public static OnlineSettings Apply(OnlineSettings current, Dictionary<string, JsonElement> online, List<string> problems)
 	{
 		var node = JsonSerializer.SerializeToNode(current)!.AsObject();
-		foreach (var (rawKey, value) in online ?? new())
+		foreach (var (fileKey, fileValue) in online ?? new())
 		{
+			// Rules files from before 0.18.3 say SharedResearch; false meant each player on their own.
+			var (rawKey, value) = fileKey.Equals("SharedResearch", StringComparison.OrdinalIgnoreCase) && fileValue.ValueKind is JsonValueKind.True or JsonValueKind.False
+				? ("ResearchSharing", JsonSerializer.SerializeToElement(fileValue.GetBoolean() ? Sync.Sharing.Everyone : Sync.Sharing.Individual)) : (fileKey, fileValue);
 			if (!Shareable.Contains(rawKey)) { problems.Add($"Online.{rawKey}: not an SE2 Online option a shared file may set (only gameplay options travel)."); continue; }
 			string key = node.Select(p => p.Key).FirstOrDefault(k => k.Equals(rawKey, StringComparison.OrdinalIgnoreCase));
 			if (key == null) { problems.Add($"Online.{rawKey}: this version of SE2 Online has no such option; skipped."); continue; }

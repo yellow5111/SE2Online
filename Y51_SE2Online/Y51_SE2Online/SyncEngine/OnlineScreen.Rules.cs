@@ -39,8 +39,8 @@ public sealed partial class OnlineScreen
 
     private readonly TextBox _ruleSearch = OnlineUi.Input("Search: inventory, jetpack, weld, thrust, a block name...", 100);
     private readonly ComboBox _ruleCategory = new() { MinHeight = 48, FontSize = 22, MinWidth = 300 };
-    private readonly CheckBox _ruleChanged = new() { MinHeight = 44, VerticalAlignment = VerticalAlignment.Center };
-    private readonly CheckBox _ruleSingle = new() { MinHeight = 44, VerticalAlignment = VerticalAlignment.Center };
+    private readonly CheckBox _ruleChanged = OnlineUi.Check("Changed only");
+    private readonly CheckBox _ruleSingle = OnlineUi.Check("Single definitions");
     private readonly ComboBox _rulePreset = new() { MinHeight = 48, FontSize = 22, MinWidth = 360 };
     private readonly ComboBox _ruleFile = new() { MinHeight = 48, FontSize = 22, MinWidth = 420 };
     private readonly TextBlock _ruleWorld = OnlineUi.Text("", "SubTitle", 20);
@@ -57,17 +57,6 @@ public sealed partial class OnlineScreen
     private DispatcherTimer _ruleTimer;
 
     private static string RulesFolder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "SE2 Online", "Rules");
-
-    // A check box with its label beside it: SE2's own check box template draws a content label over the box.
-    private static Control Checked(CheckBox box, string label)
-    {
-        var text = OnlineUi.Text(label, null, 21);
-        text.Margin = new Thickness(6, 0, 0, 0);
-        text.PointerPressed += (_, _) => box.IsChecked = box.IsChecked != true;
-        var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        row.Children.Add(box); row.Children.Add(text);
-        return row;
-    }
 
     private Control BuildRulesPage()
     {
@@ -98,7 +87,7 @@ public sealed partial class OnlineScreen
         foreach (var t in new[] { _ruleStatus, _ruleCount, _ruleWorld }) { t.HorizontalAlignment = HorizontalAlignment.Left; t.TextAlignment = TextAlignment.Left; }
         var top = new StackPanel { Spacing = 8 };
         foreach (var c in new Control[] { intro, _ruleWorld, _ruleBanner, _ruleRetry,
-            OnlineUi.Row(_ruleSearch, _ruleCategory, Checked(_ruleChanged, "Changed only"), Checked(_ruleSingle, "Single definitions"), _ruleCount),
+            OnlineUi.Row(_ruleSearch, _ruleCategory, _ruleChanged, _ruleSingle, _ruleCount),
             OnlineUi.Row(_rulePreset, apply, _ruleFile, import, export, folder),
             OnlineUi.Row(check, reset, _ruleSave, _ruleApplyNow), _ruleStatus })
             top.Children.Add(c);

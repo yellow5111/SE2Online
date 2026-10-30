@@ -61,6 +61,8 @@ internal static class KeenGuards
 		});
 		Guard("destroy body", () => harmony.Patch(AccessTools.Method(typeof(HavokLargeWorldManager), "DestroyBody", new[] { typeof(DEntity), typeof(bool) }),
 			prefix: new HarmonyMethod(typeof(KeenGuards), nameof(DestroyBodyPrefix))));
+		Guard("shared motion removal", () => harmony.Patch(AccessTools.Method(AccessTools.TypeByName("Keen.VRage.Physics.Havok.Constraints.HavokSharedMotionConstraintManager"), "ReconcileEdge"),
+			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(SharedMotionFinalizer))));
 		Guard("steam display name", () => harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Steam.EngineComponents.SteamSocialInteractionServiceComponent), "GetDisplayName"),
 			finalizer: new HarmonyMethod(typeof(KeenGuards), nameof(DisplayNameFinalizer))));
 		Guard("replay signals", () => harmony.Patch(AccessTools.Method(typeof(Keen.VRage.Multiplayer.Transport.InProcess.InProcessServerPeerTransportSessionComponent), "ReplaySignals"),
@@ -126,6 +128,15 @@ internal static class KeenGuards
 		support.CharacterContacts.Clear();
 		support.AnyBreachedContacts = false;
 		GameLog.Instance.WarnOnce("support-contact", "keen guards: a character stood on a body removed this frame; its contacts were skipped for one frame");
+		return null;
+	}
+
+	// On a bulk character unload an edge can remain after both bodies left simulation. The game's own method says that
+	// case needs no action until a body is simulated again, but throws instead while splitting a constraint group.
+	private static Exception? SharedMotionFinalizer(Exception? __exception)
+	{
+		if (__exception is not InvalidOperationException { Message: "Body A and B are not on a simulation" }) return __exception;
+		GameLog.Instance.WarnOnce("shared-motion-unloaded", "keen guards: skipped a shared-motion edge after both bodies left simulation");
 		return null;
 	}
 

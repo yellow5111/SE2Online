@@ -65,12 +65,20 @@ internal static class MotionSmoothing
 	internal static long HeldSamples, Released, Late;
 
 	private static readonly bool PlayoutOff = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "playout:off");
+	private static readonly bool PlayOwnOff = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "playown:off");
+	private static volatile HashSet<DEntity> _mine = new();
 	private static readonly bool PlayoutRateOff = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "playoutrate:off");
 	private static bool _playoutInstalled;
 
 	// Under Gate: the joined player's playback clock and each body's samples on it.
 	// -y51online:playbeat:off: pre2's clock (held at the newest sample whenever no sample came, every quiet tick counted).
-	private static readonly Sync.PlayoutClock Clock = new() { LegacyCap = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "playbeat:off") };
+	private static readonly Sync.PlayoutClock Clock = new()
+	{
+		LegacyCap = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "playbeat:off"),
+		// One-frame delay ran into the stream edge during short packet bursts, then blended the ship back onto its track.
+		MinimumDelay = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "playbuffer:off")
+			? Sync.PlayoutClock.MinDelay : Sync.PlayoutClock.Frame * 6
+	};
 	private static readonly Dictionary<Entity, Sync.PlayoutTrack<EntityMotionState>> Tracks = new();
 	private static volatile MotionInterpolationSessionComponent? _playInterpolation;
 	private static long _nextClock, _nextStep, _playoutLogMs, _playoutRetryMs;
@@ -145,11 +153,23 @@ internal static class MotionSmoothing
 		foreach (var character in session.GetEntitiesOfType<CharacterLifeComponent>())
 			if (!own.Contains(character) && (me == 0 || SyncEngine.TeamPermissions.OwnerOf(character) != me)) characters.Add(character.DEntity);
 		_characters = characters;
+		if (PlayOwnOff)
+		{
+			var mine = new HashSet<DEntity>();
+			foreach (var e in own)
+			{
+				mine.Add(e.DEntity);
+				if (SyncEngine.WorldSocial.GridOf(e) is { } grid) mine.Add(grid.DEntity);
+			}
+			if (OwnMotion.OwnEntity is { } ownChar) mine.Add(ownChar.DEntity);
+			_mine = mine;
+		}
 		_scene = session.GetEntitiesOfType<CharacterLifeComponent>().FirstOrDefault()?.Scene;
 		foreach (var gone in Widened.Keys)
 			if (!characters.Contains(gone)) Widened.TryRemove(gone, out _);
 		foreach (var gone in Buffered.Keys)
 			if (!characters.Contains(gone)) Buffered.TryRemove(gone, out _);
+		if (HostPlayout) HostTick(session, own);
 		if (Playout)
 		{
 			try { if (MpClock.NowMs() >= _playoutRetryMs) Play(session); }
@@ -193,8 +213,68 @@ internal static class MotionSmoothing
 		if (history.BlendDuration != TimeSpan.Zero && Cursor(interpolation, history) - history.BlendStart >= history.BlendDuration) history.BlendDuration = TimeSpan.Zero;
 	}
 
+	// Co-op host: its own scene gets every body from its in-process server, on another thread, and the game's clock
+	// chases the newest sample, so one, none or two samples landing in a frame stepped other players and grids short
+	// and long by turns. Those are played here on a clock of their own (the pair and cadence are rewritten so the
+	// game's cursor lands on it); the host's own character and the grid it controls stay on the game's clock.
+	// -y51online:hostplayout:off goes back to that.
+	private static readonly bool HostPlayoutOff = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "hostplayout:off");
+	private static readonly object HostGate = new();
+	private static readonly Sync.PlayoutClock HostClock = new() { MinimumDelay = Sync.PlayoutClock.Frame * 2 };
+	private static readonly Dictionary<DEntity, Sync.PlayoutTrack<EntityMotionState>> HostTracks = new();
+	private static volatile HashSet<DEntity> _hostOwn = new();
+	private static double _hostStep;
+	internal static long HostPlayed;
+	private static bool HostPlayout => _playoutInstalled && !HostPlayoutOff && MpPlugin.App?.ServerSession != null;
+
+	private static bool HostPlay(DEntity entity, ref MotionHistory history, MotionInterpolationSessionComponent interpolation)
+	{
+		var newest = history.Newest;
+		if (newest.ServerTime == TimeSpan.Zero || _hostOwn.Contains(entity)) return false;
+		lock (HostGate)
+		{
+			if (!HostTracks.TryGetValue(entity, out var track))
+				HostTracks[entity] = track = new Sync.PlayoutTrack<EntityMotionState>(static (s, time) => s with { ServerTime = TimeSpan.FromTicks(time) });
+			long time = newest.ServerTime.Ticks;
+			if (time > track.NewestTime)
+			{
+				track.Add(time, (newest.Flags & MotionStateFlags.Teleported) != 0, (newest.Flags & MotionStateFlags.Resting) != 0, newest);
+				HostClock.Arrive(time);
+			}
+			if (!HostClock.Primed) return false;
+			double cursor = track.Cursor(HostClock.Play, _hostStep, HostClock.Rate);
+			if (!track.Pick(ref cursor, out var previous, out var next, out _, out _)) return false;
+			history.Previous = previous;
+			history.Newest = next;
+			history.BlendDuration = TimeSpan.Zero;
+			history.Cadence = TimeSpan.FromTicks(Sync.PlayoutClock.CadenceFor(interpolation.Clock.Ticks, (long)cursor, interpolation.FrameStep.Ticks));
+			HostPlayed++;
+			return true;
+		}
+	}
+
+	private static void HostTick(Session session, HashSet<Entity> own)
+	{
+		var mine = new HashSet<DEntity>();
+		foreach (var e in own)
+		{
+			mine.Add(e.DEntity);
+			if (SyncEngine.WorldSocial.GridOf(e) is { } grid) mine.Add(grid.DEntity);
+		}
+		_hostOwn = mine;
+		lock (HostGate)
+		{
+			double was = HostClock.Play;
+			bool primed = HostClock.Primed;
+			HostClock.Advance(Wall.Elapsed.TotalMilliseconds);
+			_hostStep = primed ? HostClock.Play - was : HostClock.Rate;
+			foreach (var gone in HostTracks.Keys.Where(d => !session.Scene.IsEntityAlive(d)).ToList()) HostTracks.Remove(gone);
+		}
+	}
+
 	private static void EvaluatePrefix(DEntity entity, ref MotionHistory history, MotionInterpolationSessionComponent interpolation)
 	{
+		if (HostPlayout && HostPlay(entity, ref history, interpolation)) return;
 		// On the playback clock every body's cadence is written by Play.
 		if (_haveNext && ReferenceEquals(interpolation, _playInterpolation)) return;
 		if (!_characters.Contains(entity) || history.Newest.ServerTime == TimeSpan.Zero) return;
@@ -239,6 +319,7 @@ internal static class MotionSmoothing
 			Clock.Arrive(state.ServerTime.Ticks);
 			if (MpClock.NowMs() < _playoutRetryMs) return false;
 			if (!ReferenceEquals(target.Scene, MpPlugin.App?.ClientSession?.Scene) || ReferenceEquals(target, OwnMotion.Driving)) return false;
+			if (PlayOwnOff && _mine.Contains(target.DEntity)) { if (Tracks.ContainsKey(target)) Drop(target); return false; }
 			bool first = (state.Flags & MotionStateFlags.Teleported) != 0;
 			// The sample that attaches a body's playback goes to the game as before, and starts its track too (the next one
 			// would otherwise be held for a delay).
@@ -249,7 +330,8 @@ internal static class MotionSmoothing
 			if (Refused.Contains(target)) return false;
 			if (!Tracks.TryGetValue(target, out var track))
 				Tracks[target] = track = new Sync.PlayoutTrack<EntityMotionState>(static (s, time) => s with { ServerTime = TimeSpan.FromTicks(time) },
-					VelocityOff ? null : (s, time) => Extrapolated(target, s, time), static s => s.ParentEpoch == 0) { BlendGap = BlendAlwaysOn ? null : PoseGap };
+					VelocityOff ? null : (s, time) => Extrapolated(target, s, time), static s => s.ParentEpoch == 0)
+					{ BlendGap = BlendAlwaysOn ? null : PoseGap, PositionGap = static (a, b) => (a.Transform.Position - b.Transform.Position).Length() };
 			track.Add(state.ServerTime.Ticks, first, (state.Flags & MotionStateFlags.Resting) != 0, state);
 			if (!playback) return false;
 			HeldSamples++;
@@ -309,7 +391,7 @@ internal static class MotionSmoothing
 		if (!Tracks.Remove(entity, out var track)) return;
 		AskedParent.Remove(entity);
 		var scene = MpPlugin.App?.ClientSession?.Scene;
-		if (scene == null || !track.Last(out var last)) return;
+		if (scene == null || !ReferenceEquals(entity.Scene, scene) || SyncEngine.EngineCodec.IsDead(entity) || !track.Last(out var last)) return;
 		ref var history = ref DataMarshal.TryGetDataPointer<MotionHistory>(scene, entity.DEntity, writeAccess: true);
 		if (System.Runtime.CompilerServices.Unsafe.IsNullRef(ref history)) return;
 		// A corpse: its ragdoll takes over a frame later (f75); a sample put back would pin it there meanwhile.
@@ -443,11 +525,10 @@ internal static class MotionSmoothing
 	}
 
 	// Havok moves a played-back grid (a kinematic body here) to each new pose by velocity over the step, unless the pose is
-	// 5.5 m or more away (SceneSettings.MinDrivingTeleportDistance): then it puts it there. A grid at the 300 m/s speed
-	// limit moves 5 m a tick, 5.5 m with the clock's 10% catch-up: every such tick the deck jumped out from under a
-	// character standing on it instead of carrying it (thrown across the deck, out of a cockpit). Here only a pose more
-	// than DriveTeleportMeters away (a real teleport, a jump) is put there. -y51online:deckdrive:off keeps the game's.
-	private const float DriveTeleportMeters = 7;
+	// 5.5 m or more away (SceneSettings.MinDrivingTeleportDistance): then it puts it there. At 300 m/s a normal target
+	// can be 7.4 m ahead; teleporting there adds another 5 m in that physics step, then almost none in the next one.
+	// Leave two frames of travel plus margin for playback before treating a pose as a jump.
+	private const float DriveTeleportMeters = 12;
 	private static readonly bool DriveOff = MpPlugin.LaunchArgs.Contains(MpOptions.Prefix + "deckdrive:off");
 
 	private const float FastDeck = 250, FastDeckOff = 230;

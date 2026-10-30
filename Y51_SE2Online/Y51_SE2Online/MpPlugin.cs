@@ -156,7 +156,9 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		if (ruleFailures.Count > 0) throw new InvalidOperationException("server rules could not be installed for this game build: " + string.Join("; ", ruleFailures));
 		Optional("offline survival stats", () => OfflineStatsGuard.Install(_harmony));
 		Optional("shared discoveries", () => SharedDiscoveries.Install(_harmony));
+		Optional("research, contract and progression sharing", () => ProgressionSharing.Install(_harmony));
 		Optional("motion playback", () => MotionSmoothing.Install(_harmony));
+		Optional("VSync held on", () => KeenNetcode.ForceVSync.Install(_harmony));
 		Optional("motion trace", () => KeenNetcode.MotionTrace.Install(_harmony));
 		Optional("flora collider recovery", () => KeenNetcode.FloraPhysicsRecovery.Install(_harmony));
 #if !PULSAR
@@ -176,6 +178,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 		Optional("resilient replication", () => ResilientReplication.Install(_harmony));
 		Optional("cockpit toolbars for players", () => KeenNetcode.ToolbarRequests.Install(_harmony));
 		Optional("terminal waits for this player's data", () => KeenNetcode.TerminalGuard.Install(_harmony));
+		Optional("terminal races: duplicate inventory, removed grid blocks", () => KeenNetcode.TerminalRaces.Install(_harmony));
 		Optional("trade station prices settle one by one", () => KeenNetcode.TradeScreenGuard.Install(_harmony));
 		Optional("jetpack flames after a repeated state", () => KeenNetcode.JetpackFlames.Install(_harmony));
 		Optional("world saves survive a reference to an unsaved entity", () => KeenNetcode.SaveGuard.Install(_harmony));
@@ -229,6 +232,7 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			Optional("trade UI", TradeUi.Install);
 			Optional("third-person camera memory", () => CameraMemory.Install(_harmony));
 			Optional("third-person camera ignores the character's own parts", () => KeenNetcode.CameraCreep.Install(_harmony));
+			Optional("fast avatar animation follows its character", () => KeenNetcode.SeatedAvatarPose.Install(_harmony));
 			Optional("passenger seats", () => PassengerSeats.Install(_harmony));
 			Optional("water sync", () => WaterMirror.Install(_harmony));
 			Optional("cockpit passengers", () => CockpitPassenger.Install(_harmony));
@@ -304,7 +308,8 @@ public sealed class MpPlugin : IPlugin, IDisposable
 			hostWorld.SpawnNearHost = _options.SpawnNearHost;
 			hostWorld.OnePilot = _options.OnePilot;
 			hostWorld.DesyncChecks = _options.DesyncChecks;
-			HostSettings settings = new HostSettings(_options.Identities, _options.Grids, _options.Research);
+			hostWorld.Contracts = _options.Contracts;
+			HostSettings settings = new HostSettings(_options.Identities, _options.Grids, _options.Research, ProgressionOff: !_options.Progression);
 			hostWorld.ConfigureIdentities(settings);
 			if (settings.Identities) hooks.AddRange(PatchPermissions("host"));
 		}

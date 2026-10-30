@@ -62,7 +62,15 @@ public sealed partial class OnlineScreen : ScreenView
     private readonly OnlineToggle _waterSync = new OnlineToggle("Water sync (experimental)", "Synchronizes water between players.",
         "Performance heavy and uses extra bandwidth; not meant for full time use as water is not officially in the game yet!");
     private readonly OnlineToggle _team = new OnlineToggle("Keep existing grids shared when upgrading an older world");
-    private readonly OnlineToggle _research = new OnlineToggle("Share research progression");
+    private static readonly string[] SharingChoices = { "Everyone", "Faction members", "Each player alone" };
+    private static readonly string[] SharingKeys = { Sharing.Everyone, Sharing.FactionMembers, Sharing.Individual };
+    private readonly ComboBox _research = SharingCombo(), _contracts = SharingCombo();
+    private readonly OnlineToggle _progression = new OnlineToggle("Progression: blocks unlock through research", "Off: every block is available to everyone; turning it back on restores what each player unlocked.");
+    private static ComboBox SharingCombo() => new()
+    {
+        MinHeight = 48, FontSize = 22, HorizontalAlignment = HorizontalAlignment.Stretch, ItemsSource = SharingChoices,
+        ItemTemplate = new Avalonia.Controls.Templates.FuncDataTemplate<string>((t, _) => t == null ? null : OnlineUi.Text(t, size: 22, inheritForeground: true))
+    };
     private readonly OnlineToggle _turrets = new OnlineToggle("PvP: players can damage each other; turrets attack players outside your faction");
     private readonly OnlineToggle _nametags = new OnlineToggle("Show player name tags");
     private readonly (Slider S, Control Row) _range = OnlineUi.Slider(50, 10000, 50, v => v + " m");
@@ -163,7 +171,10 @@ public sealed partial class OnlineScreen : ScreenView
         var settings = OnlineUi.Scroll(OnlineUi.Stack(
             OnlineUi.Section("PLAYER", OnlineUi.Field("Player name", _name), _nametags, OnlineUi.Field("Name tag range", _range.Row, "How far away player name tags show"),
                 OnlineUi.Text("Connection diagnostics: press F11 in game until the Space Engineers 2 Online stats page shows.", "SubtleNotice", 21)),
-            OnlineUi.Section("WORLD RULES", OnlineUi.Text("New grids are private. Use Grid ownership and Factions in the pause menu to control sharing.", "SubtleNotice", 21), _team, _research, _turrets, _raid, _offlineStats, _spawn,
+            OnlineUi.Section("WORLD RULES", OnlineUi.Text("New grids are private. Use Grid ownership and Factions in the pause menu to control sharing.", "SubtleNotice", 21), _team, _progression,
+                OnlineUi.Field("Research sharing", _research, "Who shares block unlocks and discoveries. Faction members: players in the same SE2 Online faction"),
+                OnlineUi.Field("Contract sharing", _contracts, "Who shares accepted contracts, their progress and rewards"),
+                _turrets, _raid, _offlineStats, _spawn,
                 OnlineUi.Field("PCU limit per player", _pcu, "Empty keeps the world's limit, 0 is unlimited"),
                 OnlineUi.Field("Energy usage", _energyUse.Row, "Suit energy, jetpack and tools, and block power use. x1 is normal, x0 uses none"),
                 OnlineUi.Field("Hydrogen usage", _hydrogenUse.Row, "Jetpack boost and hydrogen thrusters and engines"),
@@ -271,7 +282,7 @@ public sealed partial class OnlineScreen : ScreenView
         _limit.S.Value = Math.Clamp(s.MaxPlayers, OnlineSettings.MinPlayers, OnlineSettings.PlayerLimit); ReadVisibility(s);
         _directIp.IsChecked = s.AllowDirectIp; _waterSync.IsChecked = s.WaterSync; _buildGhosts.IsChecked = s.BuildGhosts; _clientMovement.IsChecked = s.ClientMovement; _ownReplication.IsChecked = s.OwnReplication; _onePilot.IsChecked = s.OnePilot;
         _bind.Text = s.BindAddress; _port.Text = s.ListenPort.ToString(CultureInfo.InvariantCulture); _publicAddress.Text = s.PublicAddress; _showAddressOverride = !string.IsNullOrWhiteSpace(s.PublicAddress);
-        _team.IsChecked = s.TeamGrids; _research.IsChecked = s.SharedResearch; _turrets.IsChecked = s.Pvp; _nametags.IsChecked = s.Nametags;
+        _team.IsChecked = s.TeamGrids; _research.SelectedIndex = Math.Max(0, Array.IndexOf(SharingKeys, Sharing.Name(s.Research))); _contracts.SelectedIndex = Math.Max(0, Array.IndexOf(SharingKeys, Sharing.Name(s.Contracts))); _progression.IsChecked = s.Progression; _turrets.IsChecked = s.Pvp; _nametags.IsChecked = s.Nametags;
         _range.S.Value = Math.Clamp(s.NametagRange, 50, 10000); _spawn.IsChecked = s.SpawnNearHost;
         _energyUse.S.Value = Math.Clamp(s.EnergyUsageMultiplier * 10, 0, ResourceMultipliers.Max * 10); _hydrogenUse.S.Value = Math.Clamp(s.HydrogenUsageMultiplier * 10, 0, ResourceMultipliers.Max * 10); _oxygenUse.S.Value = Math.Clamp(s.OxygenUsageMultiplier * 10, 0, ResourceMultipliers.Max * 10);
         _playerInventory.S.Value = Math.Clamp(s.PlayerInventoryMultiplier * 10, InventoryMultipliers.Min * 10, InventoryMultipliers.Max * 10); _cargoInventory.S.Value = Math.Clamp(s.CargoInventoryMultiplier * 10, InventoryMultipliers.Min * 10, InventoryMultipliers.Max * 10);
@@ -308,7 +319,7 @@ public sealed partial class OnlineScreen : ScreenView
             PlayerName = _name.Text ?? "", SessionName = _sessionName.Text ?? "", Description = _description.Text ?? "", Country = _country.Text ?? "", MaxPlayers = limit,
             FriendsOnly = _visibility == FriendsOnly, Advertise = _visibility == Public, AdvertiseChosen = true, AllowDirectIp = _directIp.IsChecked == true, WaterSync = _waterSync.IsChecked == true, BuildGhosts = _buildGhosts.IsChecked == true, ClientMovement = _clientMovement.IsChecked == true, OwnReplication = _ownReplication.IsChecked == true, OnePilot = _onePilot.IsChecked == true,
             BindAddress = _bind.Text ?? "", ListenPort = port, PublicAddress = _publicAddress.Text ?? "",
-            TeamGrids = _team.IsChecked == true, SharedResearch = _research.IsChecked == true, Pvp = _turrets.IsChecked == true, Nametags = _nametags.IsChecked == true, NametagRange = range,
+            TeamGrids = _team.IsChecked == true, ResearchSharing = SharingKeys[Math.Max(0, _research.SelectedIndex)], ContractSharing = SharingKeys[Math.Max(0, _contracts.SelectedIndex)], Progression = _progression.IsChecked == true, Pvp = _turrets.IsChecked == true, Nametags = _nametags.IsChecked == true, NametagRange = range,
             SpawnNearHost = _spawn.IsChecked == true, AutoReconnect = _reconnect.IsChecked == true, CheckForUpdates = _updates.IsChecked == true, AutoUpdate = _autoUpdate.IsChecked == true, InterpolationMs = smoothing, StateBudgetKiB = bandwidth,
             Password = _password.Text ?? "", ChatKey = _chatKey.Binding, PlayersKey = _playersKey.Binding, AdminKey = _adminKey.Binding, BroadcastKey = _broadcastKey.Binding, SuitBroadcast = MpMenu.Settings.SuitBroadcast, SkippedUpdate = MpMenu.Settings.SkippedUpdate,
             StreamingRadiusMeters = streaming ?? 0, OfflineRaidProtection = _raid.IsChecked, PauseOfflineStats = _offlineStats.IsChecked, PcuLimit = (int?)pcu,

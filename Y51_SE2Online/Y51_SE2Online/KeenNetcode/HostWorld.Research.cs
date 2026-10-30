@@ -24,13 +24,30 @@ internal sealed partial class HostWorld
 
 	internal static bool ResearchShared => Current?._research == ResearchMode.Shared;
 
+	internal static ResearchMode? HostResearch => Current?._research;
+
+	private bool _progressionOff;
+
+	internal static bool? HostProgressionOff => Current?._progressionOff;
+
+	internal ResearchMode Contracts { get; set; }
+
+	internal static ResearchMode HostContracts => Current?.Contracts ?? ResearchMode.Shared;
+
+	private readonly System.Collections.Generic.Dictionary<long, string> _researchFaction = new();
+
 	private readonly System.Collections.Generic.HashSet<long> _discoveriesCaughtUp = new();
 
 	private void ShareResearch(Session session, IdentitiesSessionComponent identities)
 	{
-		if (_research != ResearchMode.Shared) return;
+		if (_research == ResearchMode.Own) return;
 		var data = session.SessionComponents.TryGet<InProcessPerPlayerDataSessionComponent>();
 		if (data == null) return;
+		if (_research == ResearchMode.Faction)
+		{
+			CatchUpFactions(session, data);
+			return;
+		}
 		IdentityId owner = identities.LocalIdentity;
 		foreach (long identity in _identityOf.Values)
 		{
@@ -41,6 +58,21 @@ internal sealed partial class HostWorld
 			// Discoveries stay per identity; while research is shared a new player gets everything anyone discovered.
 			if (_discoveriesCaughtUp.Add(identity) && SharedDiscoveries.CatchUp(session, data, new IdentityId(identity)) is > 0 and int raised)
 				_log.Info($"research: identity {identity} caught up on {raised} discoveries");
+		}
+	}
+
+	// Faction research: joining a faction brings everything its members discovered; leaving keeps what the player saw.
+	private void CatchUpFactions(Session session, InProcessPerPlayerDataSessionComponent data)
+	{
+		foreach (long identity in _identityOf.Values)
+		{
+			if (identity == 0) continue;
+			var faction = TeamPermissions.OnlineFactionOf(identity);
+			string id = faction?.Id ?? "";
+			if (_researchFaction.TryGetValue(identity, out string was) && was == id) continue;
+			_researchFaction[identity] = id;
+			if (faction is { } f && SharedDiscoveries.CatchUp(session, data, new IdentityId(identity), f.Members) is > 0 and int raised)
+				_log.Info($"research: identity {identity} caught up on {raised} discoveries of its faction");
 		}
 	}
 

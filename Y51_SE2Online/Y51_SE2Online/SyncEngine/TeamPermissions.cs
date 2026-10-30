@@ -85,6 +85,16 @@ internal static class TeamPermissions
 		return false;
 	}
 
+	/// <summary>The SE2 Online faction of an identity, as this game sees it (like <see cref="SameOnlineFaction"/>); null without one.</summary>
+	internal static (string Id, long[] Members)? OnlineFactionOf(long identity)
+	{
+		if (ClientWorld.Current?.BoundSession is { } client)
+			return client.Social?.Factions.FirstOrDefault(f => f.Members.Contains(identity)) is { } mine ? (mine.Id, mine.Members.ToArray()) : null;
+		if (HostWorld.Current?.Social is { } social)
+			lock (social.Sync) return social.State.FactionOf(identity) is { } own ? (own.Id, own.Members.ToArray()) : null;
+		return null;
+	}
+
 	// SE2 4.0 puts every player into one default faction, and its permission rule gives a faction member the owner's
 	// access: every player owned every grid, was friendly to every turret and filled one shared PCU pool. In an SE2
 	// Online session the faction is the player's SE2 Online faction. Research keeps the default faction: 4.0 stores

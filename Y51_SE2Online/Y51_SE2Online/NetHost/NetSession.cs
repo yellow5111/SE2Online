@@ -430,7 +430,7 @@ internal sealed partial class NetSession
 					ResolveType = EngineCodec.ResolveType,
 					IsClientInput = EngineCodec.IsClientInput,
 					CheckSignal = CommandLayouts.Check,
-					Settings = new HostSettings(_o.Identities, _o.Grids, _o.Research, _o.WaterSync, _o.ClientMovement, true),
+					Settings = new HostSettings(_o.Identities, _o.Grids, _o.Research, _o.WaterSync, _o.ClientMovement, true, !_o.Progression),
 					HostName = name,
 					LookTotals = _o.Predict,
 					MaxPlayers = _o.MaxPlayers,

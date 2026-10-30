@@ -446,6 +446,9 @@ public sealed class OwnCorrection
 	public const double PersistMeters = 0.1;
 	public const float SoftVelocity = 0.5f;
 
+	/// <summary>From this speed (m/s) up the soft rate ramps into the normal one (fully at twice it).</summary>
+	public const double SoftUntilSpeed = 4;
+
 	/// <summary>Small errors wait for <see cref="PersistAcks"/> and ease slowly (see the summary).</summary>
 	public readonly bool Soft;
 	private int _persist, _turnPersist;
@@ -457,6 +460,16 @@ public sealed class OwnCorrection
 	// these, a standing / not turning player's error waits for the next input; a bigger one (the server moving the
 	// player) is followed down to the moving deadband, so it never stops short and leaves up to 10 cm behind.
 	public const double StandingDeadbandMeters = 0.1, SteadyFacingDeadbandDegrees = 2;
+	public const double FastFacingLateralTolerance = 0.2, FastFacingFloorDegrees = 0.05;
+	public const double SpeedSlipMinSpeed = 60, SpeedSlipCapShare = 0.01, SpeedSlipClearMeters = 0.25;
+
+	/// <summary>Soft, moving: errors under this are left alone. At 2 cm the error just sat at the deadband (pre1 on one PC:
+	/// ack error median 2.0-3.5 cm at every speed, a correction written on half of all ticks); the prediction itself
+	/// drifts only millimetres a tick, so a few centimetres are left to settle on their own.</summary>
+	public const double SoftDeadbandMeters = 0.04;
+
+	/// <summary>Soft, flying fast: velocity errors under this are left alone (pre1 corrected 0.05 m/s every ack).</summary>
+	public const float FastVelocity = 0.1f;
 	public const int Ring = 512, MismatchLimit = 30;
 
 	// While the build or blueprint placer is active its aim starts at the character's own transform
@@ -467,6 +480,11 @@ public sealed class OwnCorrection
 
 	/// <summary>The player is aiming a block or blueprint placement (set each tick by the caller).</summary>
 	public bool Placing;
+
+	/// <summary>Flying (jetpack, in the air) at this speed relative to what the character moves with (set each tick by the
+	/// caller; 0 on the ground): only then the soft rate gives way with speed and small velocity errors are corrected.
+	/// On the ground the controller sets the velocity itself and a sprint's few centimetres a tick showed as tugs.</summary>
+	public double FlyingSpeed;
 
 	private struct Predicted
 	{
@@ -484,12 +502,14 @@ public sealed class OwnCorrection
 	private uint _parent;
 	private int _mismatches;
 	private uint _newestAck;
+	private uint? _blindTo;
 	private Vec3D _applied, _pending;
 	private Vector3 _appliedVelocity, _pendingVelocity;
 	private Quaternion _appliedTurn = Quaternion.Identity, _pendingTurn = Quaternion.Identity;
 	private bool _snapNow;
+	private bool _speedSlip;
 
-	public long Acks, Snaps, Rebases, DeckVelocityKept;
+	public long Acks, Snaps, Rebases, DeckVelocityKept, Blinded;
 	public double ErrorSum, ErrorMax, StepMax, TurnErrorSum, TurnErrorMax;
 
 	/// <summary>The newest measured error (diagnostics).</summary>
@@ -506,7 +526,21 @@ public sealed class OwnCorrection
 		_appliedVelocity = _pendingVelocity = default;
 		_appliedTurn = _pendingTurn = Quaternion.Identity;
 		_snapNow = false;
+		_speedSlip = false;
 		_persist = _turnPersist = 0;
+		_blindTo = null;
+	}
+
+	/// <summary>A voxel cut near the character reached this game's colliders after input <paramref name="seq"/> ran. The
+	/// server ran the inputs up to it with the cut and this game without, so their acks show a gap (a floor cut away, a
+	/// face dug through) that this game's own physics closes now; easing it in as well moved the body twice and back
+	/// on every cut (Xero's underground mining shake). Those acks are not measured and what was being eased is dropped.</summary>
+	public void Blind(uint seq)
+	{
+		_blindTo = seq;
+		_pending = default;
+		_pendingVelocity = default;
+		_persist = 0;
 	}
 
 	/// <summary>After input <paramref name="seq"/> ran: where the character is, in <paramref name="parent"/>'s frame.</summary>
@@ -520,6 +554,7 @@ public sealed class OwnCorrection
 			_appliedVelocity = _pendingVelocity = default;
 			_appliedTurn = _pendingTurn = Quaternion.Identity;
 			_snapNow = false;
+			_speedSlip = false;
 			_persist = _turnPersist = 0;
 		}
 		_ring[seq % Ring] = new Predicted { Seq = seq, Parent = parent, Gen = _gen, Position = position, Applied = _applied, Velocity = velocity, AppliedVelocity = _appliedVelocity, Rotation = rotation, AppliedTurn = _appliedTurn };
@@ -561,22 +596,40 @@ public sealed class OwnCorrection
 			TurnErrorSum += turn;
 			TurnErrorMax = Math.Max(TurnErrorMax, turn);
 			bool turning = Degrees(_pendingTurn) >= 1e-3;
-			if (turn < (steady && !turning ? SteadyFacingDeadbandDegrees : FacingDeadbandDegrees)) { _pendingTurn = Quaternion.Identity; _turnPersist = 0; }
+			double facingDeadband = steady && !turning ? SteadyFacingDeadbandDegrees : FacingDeadbandDegrees;
+			if (FlyingSpeed >= 8)
+				facingDeadband = Math.Min(facingDeadband, Math.Max(FastFacingFloorDegrees,
+					Math.Atan(FastFacingLateralTolerance / FlyingSpeed) * 180 / Math.PI));
+			if (turn < facingDeadband) { _pendingTurn = Quaternion.Identity; _turnPersist = 0; }
 			else if (Soft && turn < SoftDegrees && !turning && ++_turnPersist < PersistAcks) { }
 			else { _pendingTurn = off; _turnPersist = 0; }
 		}
-		bool below = size < (standing && _pending == default ? StandingDeadbandMeters : DeadbandMeters);
+		if (_blindTo is uint blind && !Seq.Newer(ack, blind) && size < SnapMeters) { Blinded++; return Outcome.None; }
+		bool below = size < (standing && _pending == default ? StandingDeadbandMeters : Soft ? SoftDeadbandMeters : DeadbandMeters);
 		if (below) { _pending = default; _persist = 0; }
 		// Soft: a small error that just appeared waits until it has held (one that is already being eased follows the newest).
 		else if (Soft && size < PersistMeters && _pending == default && ++_persist < PersistAcks) { }
 		else { _pending = error; _persist = 0; }
 		// Soft: a small velocity error is left to the position easing; a real one (a push the prediction missed, drift in
 		// zero g) is still corrected, or the body would stay shifted every tick, tens of centimetres off.
-		_pendingVelocity = velocityError.Length() < (Soft && size < SoftMeters ? SoftVelocity : 0.05f) ? default : velocityError;
+		// Moving fast a velocity error is corrected too: left to the position easing, a jetpack flown 0.5 m/s off the server's
+		// rebuilt the same offset ack after ack (0.18.2 on Freejack's server: 30-46 cm for a minute).
+		bool fast = FlyingSpeed >= 2 * SoftUntilSpeed;
+		_pendingVelocity = velocityError.Length() < (Soft && size < SoftMeters ? fast ? FastVelocity : SoftVelocity : 0.05f) ? default : velocityError;
 		// On a moving deck the two velocities are the deck's at two different moments (the server's when it ran the input,
 		// this game's a playout delay before): the difference is the deck's own acceleration, not the character's.
 		if (onDeck && _pendingVelocity != default) { _pendingVelocity = default; DeckVelocityKept++; }
-		if (size <= SnapMeters) return _pending == default && _pendingVelocity == default ? Outcome.None : Outcome.Blend;
+		// Merging two inputs advances the ack by two sequence numbers in one server tick. At boost speed the
+		// resulting error is exactly one tick of travel behind the player's prediction, with matching velocity.
+		// Spreading that distance over later ticks avoids an entire frame of backward motion.
+		double travel = FlyingSpeed / 60;
+		double along = error.X * p.Velocity.X + error.Y * p.Velocity.Y + error.Z * p.Velocity.Z;
+		bool oneTickBehind = !onDeck && FlyingSpeed >= SpeedSlipMinSpeed &&
+			Math.Abs(size - travel) <= Math.Max(0.2, travel * 0.08) && velocityError.Length() < 3 &&
+			along < -0.95 * size * p.Velocity.Length();
+		if (oneTickBehind) _speedSlip = true;
+		else if (size < SpeedSlipClearMeters || size > travel * 1.5 || along > 0) _speedSlip = false;
+		if (size <= SnapMeters || _speedSlip) return _pending == default && _pendingVelocity == default ? Outcome.None : Outcome.Blend;
 		_snapNow = true;
 		Snaps++;
 		return Outcome.Snap;
@@ -616,12 +669,17 @@ public sealed class OwnCorrection
 		{
 			// Soft: from half of SoftMeters up the gentle rate ramps into the normal one, so a growing error never switches
 			// from a 1 cm to a 6 cm step between two ticks.
-			double hard = Soft ? Math.Clamp((_pending.Length - SoftMeters / 2) / (SoftMeters / 2), 0, 1) : 1;
+			// Moving fast (jetpack, sprinting) the gentle rate is the normal one: there a few centimetres a tick do not show
+			// against the character's own travel, and eased gently a 40 cm offset took over a second to go.
+			double hard = Soft ? Math.Max(Math.Clamp((_pending.Length - SoftMeters / 2) / (SoftMeters / 2), 0, 1), Math.Clamp((FlyingSpeed - SoftUntilSpeed) / SoftUntilSpeed, 0, 1)) : 1;
 			double blend = SoftBlendSeconds + (BlendSeconds - SoftBlendSeconds) * hard;
 			double share = 1 - Math.Exp(-dt / blend);
 			dp = _pending * share;
 			double softCap = SoftStep + SoftSpeedShare * speed * dt, hardCap = MaxStep + SpeedShare * speed * dt;
 			double cap = Placing && _pending.Length <= PlacingFreeMeters ? PlacingStepMeters : softCap + (hardCap - softCap) * hard, size = dp.Length;
+			if (FlyingSpeed >= 8 && _pending.Length > SoftMeters && !Placing)
+				cap = Math.Max(cap, MaxStep + 0.5 * speed * dt);
+			if (_speedSlip) cap = Math.Min(cap, Math.Max(0.01, speed * dt * SpeedSlipCapShare));
 			if (size > cap) dp = dp * (cap / size);
 			else if (_pending.Length < 0.002) dp = _pending;
 			dv = _pendingVelocity * (float)share;

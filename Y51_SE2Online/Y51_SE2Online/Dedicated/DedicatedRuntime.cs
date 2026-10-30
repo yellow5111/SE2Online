@@ -82,7 +82,7 @@ internal static class DedicatedRuntime
             Config = DedicatedConfig.Read(selected.Substring(Argument.Length));
             try
             {
-                var added = DedicatedConfig.AddNewOptions(Config.ConfigPath);
+                var added = DedicatedConfig.AddNewOptions(Config);
                 if (added.Count > 0) GameLog.Instance.Info($"dedicated: added {added.Count} new option(s) to {Path.GetFileName(Config.ConfigPath)} with their defaults, your settings untouched (previous file kept as {Path.GetFileName(Config.ConfigPath)}.bak): {string.Join(", ", added)}");
             }
             catch (Exception ex) { GameLog.Instance.Warn($"dedicated: could not add new options to {Path.GetFileName(Config.ConfigPath)} ({ex.GetType().Name}: {ex.Message}); the server runs on it as it is"); }

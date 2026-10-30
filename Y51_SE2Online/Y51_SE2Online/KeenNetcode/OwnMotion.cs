@@ -79,9 +79,10 @@ internal static class OwnMotion
 
 	// A stall of this game (0.2-1.3 s a few times a minute: an autosave, a GC) is followed by the missed ticks back to
 	// back. Each of them predicted the character and sent an input: about 36 inputs in 100 ms after a 0.6 s stall, over the
-	// server's 100 a second (the rest guessed), and a queue the server drained by merging. Those ticks now hold the
-	// character still (as a skipped tick does) and send nothing. -y51online:catchupfreeze:off predicts them as before.
-	private static readonly bool CatchUpFreezeOff = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "catchupfreeze:off");
+	// server's 100 a second (the rest guessed), and a queue the server drained by merging. Holding the character on
+	// those ticks left it the whole stall behind the server, which kept moving it on the last input: at speed that came
+	// back as one 10-20 m snap after every stall. They are predicted again; -y51online:catchupfreeze:on holds them.
+	private static readonly bool CatchUpFreezeOff = !System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "catchupfreeze:on");
 	private static readonly System.Diagnostics.Stopwatch TickWall = System.Diagnostics.Stopwatch.StartNew();
 	private static readonly CatchUpDetector CatchUp = new();
 	internal static long CatchUpHeld;
@@ -107,6 +108,20 @@ internal static class OwnMotion
 		if (!System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "ownyaw:off"))
 			harmony.Patch(AccessTools.Method(typeof(CharacterMovementComponent), "ApplyControlData"), postfix: Hook(nameof(GroundYawPostfix)));
 		OwnStatePrediction.Install(harmony);
+		if (!VoxelCutOff && AccessTools.Method(typeof(Keen.VRage.Voxels.Components.VoxelPhysicsComponent), "OnVoxelPhysicsChunkChanged") is { } chunkChanged)
+			harmony.Patch(chunkChanged, postfix: Hook(nameof(VoxelChunkPostfix)));
+	}
+
+	// -y51online:voxelcut:off: acks of inputs predicted before a nearby voxel cut reached this game's colliders are
+	// corrected like any other (Sync.OwnCorrection.Blind).
+	private static readonly bool VoxelCutOff = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "voxelcut:off");
+	private const double VoxelCutReach = 2;
+	private static readonly ConcurrentQueue<BoundingBoxD> VoxelCuts = new();
+
+	// After the collider update is applied (DCS thread): the chunk's world bounds.
+	private static void VoxelChunkPostfix(BoundingBoxD worldBounds, Keen.VRage.Voxels.Components.VoxelPhysicsChunkChange change)
+	{
+		if (_driving && change == Keen.VRage.Voxels.Components.VoxelPhysicsChunkChange.Updated) VoxelCuts.Enqueue(worldBounds);
 	}
 
 
@@ -372,12 +387,16 @@ internal static class OwnMotion
 		_own = own!.DEntity;
 		_driving = true;
 		Frames++;
+		var standsAt = own.Data.GetWorldTransform().Position;
+		while (VoxelCuts.TryDequeue(out var cut))
+			if (cut.Distance(standsAt) < VoxelCutReach) Correction.Blind(_seq);
 		if (ack is { } a)
 		{
 			own.Data.TryGet<ControlData>(out var ownControl);
 			own.Data.TryGet<RigidBodyData>(out var ownBody);
 			bool atRest = ownControl.Movement == Vector3.Zero && !_jumpPending && RelativeSpeed(own, ownBody) < 0.3f;
 			// Aiming a placement turns the mouse, which would leave only the 0.5 deg band: placing uses the steady 2 deg one.
+			Correction.FlyingSpeed = Flying(own) ? RelativeSpeed(own, ownBody) : 0;
 			switch (Correction.Measure(a.Seq, a.Parent, a.Position, a.Velocity, a.Rotation, standing: atRest, steady: ownControl.Rotation == Vector3.Zero || SyncEngine.BuildGhosts.LocalPlacing, onDeck: !DeckVelocityOff && OnMovingDeck(own)))
 			{
 			case OwnCorrection.Outcome.Rebase:
@@ -389,7 +408,7 @@ internal static class OwnMotion
 				break;
 			}
 			if (MotionTrace.Recording)
-				MotionTrace.Note("ack", "own", FormattableString.Invariant($"seq={a.Seq} age={_seq - a.Seq} error_cm={Correction.LastError.Length * 100:0.0} velocity_error={Correction.LastVelocityError.Length():0.00}"));
+				MotionTrace.Note("ack", "own", FormattableString.Invariant($"seq={a.Seq} age={_seq - a.Seq} error_cm={Correction.LastError.Length * 100:0.0} ex={Correction.LastError.X * 100:0.0} ey={Correction.LastError.Y * 100:0.0} ez={Correction.LastError.Z * 100:0.0} velocity_error={Correction.LastVelocityError.Length():0.00} speed={ownBody.LinearVelocity.Length():0.0} flying={(Flying(own) ? 1 : 0)}"));
 		}
 		if (ack is { } measured && Correction.LastError.Length > ErrorLogMeters && now - _errorLogMs > 1000)
 		{
@@ -466,6 +485,7 @@ internal static class OwnMotion
 		Correction.Record(++_seq, parent, new Vec3D(local.X, local.Y, local.Z), new System.Numerics.Vector3(velocity.X, velocity.Y, velocity.Z),
 			new System.Numerics.Quaternion(relative.Orientation.X, relative.Orientation.Y, relative.Orientation.Z, relative.Orientation.W));
 		Correction.Placing = SyncEngine.BuildGhosts.LocalPlacing;
+		Correction.FlyingSpeed = Flying(own) ? RelativeSpeed(own, body) : 0;
 		var (dp, dv) = Correction.Step(TickSeconds, velocity.Length());
 		var turn = FacingOff ? System.Numerics.Quaternion.Identity : Correction.StepTurn();
 		if (dp != default || dv != default || !turn.IsIdentity) Shift(own, frame, dp, dv, turn);
@@ -503,7 +523,7 @@ internal static class OwnMotion
 	}
 
 	internal static string DescribeCorrection()
-		=> $"{Correction.Acks} acks, error mean {Correction.MeanError * 100:0.0} cm max {Correction.ErrorMax * 100:0.0} cm, largest eased step {Correction.StepMax * 100:0.0} cm, facing off mean {(Correction.Acks == 0 ? 0 : Correction.TurnErrorSum / Correction.Acks):0.00} max {Correction.TurnErrorMax:0.00} deg, {Correction.Snaps} applied at once, {Correction.Rebases} rebased, {_shiftsTurned}/{_shifts} eased shifts kept the tick's turn ({_softShifts} soft), {CatchUpHeld} catch-up ticks held, {_snaps} grounded turns snapped, {_turns} facing corrections";
+		=> $"{Correction.Acks} acks, error mean {Correction.MeanError * 100:0.0} cm max {Correction.ErrorMax * 100:0.0} cm, largest eased step {Correction.StepMax * 100:0.0} cm, facing off mean {(Correction.Acks == 0 ? 0 : Correction.TurnErrorSum / Correction.Acks):0.00} max {Correction.TurnErrorMax:0.00} deg, {Correction.Snaps} applied at once, {Correction.Rebases} rebased, {Correction.Blinded} not measured after nearby voxel cuts,{_shiftsTurned}/{_shifts} eased shifts kept the tick's turn ({_softShifts} soft), {CatchUpHeld} catch-up ticks held, {_snaps} grounded turns snapped, {_turns} facing corrections";
 
 	private static OwnInput InputOf(Entity own)
 	{
@@ -545,11 +565,12 @@ internal static class OwnMotion
 				// up beside or in front of the character, F19).
 				if (!SoftSyncOff) soft.Value.Position = to.Position;
 				if (turning || !SoftSyncOff) own.Data.Set(soft);
-				// A small shift goes in through the SoftTransform alone, which Havok's controller moves to over the step: a
-				// written WorldTransform takes precedence as a teleport of the controller (HavokSessionComponent
-				// CollectDataForCharacters), which loses its ground contact and step state, every tick an error was eased.
-				// -y51online:softshift:off writes the WorldTransform for every shift as in pre3.
-				if (!SoftShiftOff && !SoftSyncOff && shift.Length() < SoftShiftMeters)
+				// Off by default since 0.18.3 (-y51online:softshift:on tries it): a shift written to the SoftTransform alone is
+				// not where Havok's character controller ends up. 0.18.2 eased 1295 such shifts a minute while jetpacking on
+				// Freejack's server and the error stayed at 30-46 cm the whole time (every ack the same offset again, the
+				// view easing all along): the controller kept its own position and the shift was lost each step, while the
+				// correction counted it as applied. Every shift writes the WorldTransform, as before 0.18.2.
+				if (SoftShiftOn && !SoftSyncOff && shift.Length() < SoftShiftMeters)
 				{
 					_softShiftPending = true;
 					_shifts++;
@@ -578,7 +599,7 @@ internal static class OwnMotion
 	// movement jobs turned, so every eased correction would drop that tick's turn and the facing would drift from the
 	// server's. The shifted position keeps the turned facing.
 	private static readonly bool SoftSyncOff = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "softsync:off");
-	private static readonly bool SoftShiftOff = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "softshift:off");
+	private static readonly bool SoftShiftOn = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "softshift:on");
 	private const double SoftShiftMeters = 0.05;
 	private static long _softShifts;
 	private static volatile bool _softShiftPending;
@@ -680,6 +701,11 @@ internal static class OwnMotion
 		if (under == null || EngineCodec.IsDead(under) || !under.Data.Has<DynamicTag>()) return null;
 		return under;
 	}
+
+	// The jetpack on, or in the air (no ground under the feet).
+	private static bool Flying(Entity own)
+		=> own.TryGet<CharacterMovementComponent>()?.CurrentMovementState == CharacterMovementState.Jetpack
+			|| own.Data.TryGet<Keen.VRage.Physics.Character.CharacterPhysicsState>(out var state) && !state.Supported;
 
 	private static bool OnMovingDeck(Entity own)
 		=> DeckUnder(own) is { } deck && deck.Data.TryGet<RigidBodyData>(out var b) && (b.LinearVelocity.LengthSquared() >= 0.25f || b.AngularVelocity.LengthSquared() >= 1e-3f);

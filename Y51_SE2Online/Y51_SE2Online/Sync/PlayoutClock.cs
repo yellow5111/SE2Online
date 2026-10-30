@@ -28,6 +28,7 @@ public sealed class PlayoutClock
 	/// <summary>pre2's rules (capped at the newest sample whenever no sample came, every quiet tick counted as lateness, the
 	/// line started over after every long quiet): -y51online:playbeat:off.</summary>
 	public bool LegacyCap;
+	public double MinimumDelay = MinDelay;
 
 	/// <summary>The most server time one tick may play (TimeSpan ticks; unlimited by default). While the player stands on a
 	/// very fast ship its played-back speed must stay under Havok's 310 m/s character limit: the clock's catch-ups and
@@ -59,6 +60,7 @@ public sealed class PlayoutClock
 	private double _newestWall;
 	private readonly Queue<(double Wall, long Server)> _rateWindow = new();
 	private double _rateWindowLast;
+	private double _rateCandidateSince = double.NaN;
 
 	/// <summary>The last tick (the trace): wall gap in frames, steady, line, error, jumped, held at the cap.</summary>
 	public (double GapFrames, bool Steady, double Line, double Error, bool Jumped, bool HeldAtCap) LastTick { get; private set; }
@@ -121,6 +123,7 @@ public sealed class PlayoutClock
 		Array.Clear(_bucketTick);
 		_lastWallMs = double.NaN;
 		_rateWindow.Clear();
+		_rateCandidateSince = double.NaN;
 		_gapAt = _gapCount = 0;
 		_skipNextArrival = false;
 	}
@@ -199,7 +202,7 @@ public sealed class PlayoutClock
 					_skipNextArrival = true;
 					// The server's time stood still (no catch-up): the line starts over from here, and the rate is measured
 					// from here (a stall in the window would read as a slower server for its length).
-					if (s - _newest < 0.5 * (wallMs - _newestWall) / FrameMs * _rate) { _expected = s; _rateWindow.Clear(); }
+					if (s - _newest < 0.5 * (wallMs - _newestWall) / FrameMs * _rate) { _expected = s; _rateWindow.Clear(); _rateCandidateSince = double.NaN; }
 				}
 				bool measure = steady && !burst && !_skipNextArrival;
 				if (measure) WallRate(wallMs, s);
@@ -263,7 +266,7 @@ public sealed class PlayoutClock
 		else if (LegacyCap || tick != _beatTick) { if (_quietCount < _quiet.Length) _quiet[_quietCount++] = late; }
 		if (tick - _jitterTick >= 30) { _jitterTick = tick; _jitter = LatenessQuantile(); }
 		// Bodies sent less often than every tick add their own gap (PlayoutTrack.Cursor).
-		double wanted = Math.Clamp(_jitter + Margin, MinDelay, MaxDelay);
+		double wanted = Math.Clamp(_jitter + Margin, MinimumDelay, MaxDelay);
 		// Up as fast as one frame a tick (late packets started: the cursor slows at most 10% anyway), down by half a percent of
 		// the difference a tick (about 2.3 s to halve it).
 		_delay = wanted > _delay ? Math.Min(wanted, _delay + Frame) : _delay - (_delay - wanted) * 0.005;
@@ -325,6 +328,14 @@ public sealed class PlayoutClock
 		var (w, s0) = _rateWindow.Peek();
 		if (wallMs - w < 1500) return;
 		double measured = Math.Clamp((server - s0) / (wallMs - w) * FrameMs, Frame * 0.25, Frame * 2.5);
+		double departure = Math.Abs(measured / Frame - 1);
+		// A short packet burst can skew this window by a few percent; only a sustained change slows the visible ship.
+		if (departure >= WallSameRate && departure < 0.1)
+		{
+			if (double.IsNaN(_rateCandidateSince)) _rateCandidateSince = wallMs;
+			if (wallMs - _rateCandidateSince < 500) return;
+		}
+		else _rateCandidateSince = double.NaN;
 		_rate = Math.Abs(measured / Frame - 1) < WallSameRate ? Frame : measured;
 	}
 
@@ -372,8 +383,8 @@ public sealed class PlayoutClock
 /// One remote body's samples on the <see cref="PlayoutClock"/>: the pair the game's playback interpolates at this body's
 /// cursor. A body sent less often than every server tick (far away, thinned) plays its own sample gap further back, the
 /// change eased in at most <see cref="LagSlew"/> of a tick's step so its cursor never runs backwards. A teleport is never
-/// interpolated into (the old pose holds until the cursor reaches it); after a pause in the stream (a body at rest, a
-/// stream that stopped) the old pose holds until one gap before the next sample instead of sliding there over the pause.
+/// interpolated into (the old pose holds until the cursor reaches it). A stopped body's old pose holds until one gap
+/// before its next sample; a moving body crosses a long sample gap when its velocity predicts the next pose closely.
 /// </summary>
 public sealed class PlayoutTrack<T>
 {
@@ -389,6 +400,8 @@ public sealed class PlayoutTrack<T>
 	/// <summary>The distance between two pairs' poses at their factors (old pair, its factor, new pair, its factor); with it, a
 	/// late pair whose pose is within <see cref="BlendFrom"/> of the old track's is taken without a blend.</summary>
 	public Func<T, T, double, T, T, double, double>? BlendGap;
+	/// <summary>Distance between poses, used to distinguish a server stall from a body that stopped sending motion.</summary>
+	public Func<T, T, double>? PositionGap;
 
 	public const double BlendFrom = 0.05;
 
@@ -624,5 +637,12 @@ public sealed class PlayoutTrack<T>
 	}
 
 	private bool Paused(in (long Time, bool Teleport, bool Resting, T Value) a, in (long Time, bool Teleport, bool Resting, T Value) b)
-		=> a.Resting || b.Time - a.Time > PauseGaps * Math.Max(Gap, PlayoutClock.Frame);
+	{
+		if (a.Resting) return true;
+		if (b.Time - a.Time <= PauseGaps * Math.Max(Gap, PlayoutClock.Frame)) return false;
+		if (_extrapolate == null || PositionGap == null || _byVelocity != null && !_byVelocity(a.Value)) return true;
+		var continued = _extrapolate(a.Value, b.Time);
+		double travel = PositionGap(a.Value, continued);
+		return PositionGap(continued, b.Value) > Math.Max(0.05, travel * 0.25);
+	}
 }

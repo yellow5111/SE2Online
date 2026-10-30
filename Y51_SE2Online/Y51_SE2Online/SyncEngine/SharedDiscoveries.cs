@@ -26,7 +26,7 @@ internal static class SharedDiscoveries
 
     public static long Mirrored, CaughtUp;
 
-    private static bool Active => HostWorld.ResearchShared;
+    private static bool Active => HostWorld.HostResearch is ResearchMode.Shared or ResearchMode.Faction;
 
     public static void Install(Harmony harmony)
         => harmony.Patch(AccessTools.Method(typeof(DiscoveriesServerSessionComponent), nameof(DiscoveriesServerSessionComponent.TryIncreaseDiscoveryState)),
@@ -39,8 +39,9 @@ internal static class SharedDiscoveries
         try
         {
             // Offline identities are not registered for the discoverable (vanilla only registers players with a client); they catch up at join.
+            long[] faction = HostWorld.HostResearch == ResearchMode.Faction ? TeamPermissions.OnlineFactionOf((long)owner)?.Members ?? Array.Empty<long>() : null;
             foreach (IdentityId other in __instance._perPlayerData.GetIdentityIds().ToList())
-                if ((long)other != (long)owner && __instance._identities.TryGetClientFromIdentity(other).HasValue && __instance.TryIncreaseDiscoveryState(other, provider, state))
+                if ((long)other != (long)owner && (faction == null || faction.Contains((long)other)) &&__instance._identities.TryGetClientFromIdentity(other).HasValue && __instance.TryIncreaseDiscoveryState(other, provider, state))
                     Mirrored++;
         }
         finally
@@ -50,13 +51,14 @@ internal static class SharedDiscoveries
     }
 
     /// <summary>Raises each of the identity's discoveries to the furthest state any identity in the world has reached.</summary>
-    public static int CatchUp(Session server, InProcessPerPlayerDataSessionComponent ppd, IdentityId identity)
+    public static int CatchUp(Session server, InProcessPerPlayerDataSessionComponent ppd, IdentityId identity, long[] from = null)
     {
         if (server.SessionComponents.TryGet<DiscoveriesServerSessionComponent>() == null) return 0;
         var target = ppd.GetPerPlayerData<DiscoveriesPlayerDataServer>(identity);
         var others = new List<DiscoveriesPlayerDataServer>();
-        foreach (var (_, records) in ppd._perPlayerData)
-            others.AddRange(records.OfType<DiscoveriesPlayerDataServer>().Where(d => d != target));
+        foreach (var (id, records) in ppd._perPlayerData)
+            if (from == null || from.Contains((long)id))
+                others.AddRange(records.OfType<DiscoveriesPlayerDataServer>().Where(d => d != target));
         int raised = 0;
         foreach (Entity entity in target._discoveries.Keys.ToList())
         {

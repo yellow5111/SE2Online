@@ -262,7 +262,7 @@ internal static class OnlineUi
     }
 
     public static TextBox Input(string watermark = "", int length = 256) => new() { Watermark = watermark, MaxLength = length, FontSize = 24, MinHeight = 50 };
-    public static CheckBox Check(string label) => new() { Content = label, FontSize = 24, MinHeight = 48 };
+    public static CheckBox Check(string label) => new LampToggle(label);
     public static ListBox List(string name)
     {
         var list = new ListBox { Name = name };

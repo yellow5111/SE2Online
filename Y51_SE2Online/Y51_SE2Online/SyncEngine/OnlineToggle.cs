@@ -1,35 +1,28 @@
 using System;
+using System.Linq;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
-using NativeSwitch = Keen.Game2.Client.UI.Library.Controls.ContentControls.Switch;
 
 namespace Y51_SE2Online.SyncEngine;
 
+/// <summary>A setting's lamp tile (<see cref="LampToggle"/>) with its help and warning lines centred under the label. A Grid so
+/// pages that set ColumnDefinitions on it keep compiling; the tile spans every column.</summary>
 internal sealed class OnlineToggle : Grid
 {
-    private readonly NativeSwitch _switch = new() { MinHeight = 50, HorizontalAlignment = HorizontalAlignment.Stretch };
+    private readonly LampToggle _switch;
     public event EventHandler IsCheckedChanged;
-    public bool IsChecked { get => _switch.IsChecked; set => _switch.IsChecked = value; }
-    /// <summary>Help and warning lines sit under the label like a field's hint; the warning is red and bold.</summary>
+    public bool IsChecked { get => _switch.IsChecked == true; set => _switch.IsChecked = value; }
+
     public OnlineToggle(string label, string help = null, string warning = null)
     {
-        ColumnDefinitions = new ColumnDefinitions("*,24,480");
-        MinHeight = 54;
-        var caption = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
-        caption.Children.Add(OnlineUi.Text(label, "SubTitle"));
-        foreach (string line in new[] { help, warning })
-        {
-            if (line == null) continue;
-            if (line == warning) { caption.Children.Add(OnlineUi.Warning(line)); continue; }
-            var hint = OnlineUi.Text(line, "SubtleNotice", 17);
-            hint.HorizontalAlignment = HorizontalAlignment.Left; hint.TextAlignment = TextAlignment.Left;
-            caption.Children.Add(hint);
-        }
-        Children.Add(caption);
-        _switch.Classes.Add("SubTitle");
-        Grid.SetColumn(_switch, 2); Children.Add(_switch);
-        _switch.PropertyChanged += (_, e) => { if (e.Property == NativeSwitch.IsCheckedProperty) IsCheckedChanged?.Invoke(this, EventArgs.Empty); };
+        var lines = new[] { help == null ? null : OnlineUi.Text(help, "SubtleNotice", 14), warning == null ? null : OnlineUi.Warning(warning) }
+            .Where(l => l != null).ToArray();
+        foreach (var line in lines) { line.HorizontalAlignment = HorizontalAlignment.Center; line.TextAlignment = TextAlignment.Center; }
+        _switch = new LampToggle(label, lines) { Width = 440 };
+        SetColumnSpan(_switch, 3);
+        Children.Add(_switch);
+        _switch.IsCheckedChanged += (_, _) => IsCheckedChanged?.Invoke(this, EventArgs.Empty);
     }
 }

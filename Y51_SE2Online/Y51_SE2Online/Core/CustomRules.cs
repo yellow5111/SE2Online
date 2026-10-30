@@ -256,7 +256,7 @@ public static partial class OnlineRules
 {
 	public static readonly string[] Keys =
 	{
-		"Description", "MaxPlayers", "TeamGrids", "SharedResearch", "Nametags", "NametagRange", "SpawnNearHost", "StreamingRadiusMeters", "WaterSync",
+		"Description", "MaxPlayers", "TeamGrids", "SharedResearch", "ResearchSharing", "ContractSharing", "Progression","Nametags", "NametagRange", "SpawnNearHost", "StreamingRadiusMeters", "WaterSync",
 		"BuildGhosts", "ClientMovement", "OwnReplication", "VoiceEnabled", "VoiceRadiusMeters", "EnergyUsageMultiplier", "HydrogenUsageMultiplier",
 		"OxygenUsageMultiplier", "PlayerInventoryMultiplier", "CargoInventoryMultiplier", "RespawnShips", "RespawnShipCooldownMinutes", "VanillaRespawnShips", "Pvp",
 		"OfflineRaidProtection", "PauseOfflineStats", "PcuLimit", "SunRotation", "SunPeriodMinutes", "Hacking", "AllowHackingPlayerGrids",
