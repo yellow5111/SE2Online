@@ -225,7 +225,12 @@ internal static class MotionSmoothing
 	private static volatile HashSet<DEntity> _hostOwn = new();
 	private static double _hostStep;
 	internal static long HostPlayed;
-	private static bool HostPlayout => _playoutInstalled && !HostPlayoutOff && MpPlugin.App?.ServerSession != null;
+	
+	// Only in an SE2 Online session. Offline the game runs an in-process server too, and the ship a player stood up in (no
+	// longer the grid it controls) was played on this clock a few frames back while the character stayed on the game's:
+	// the ship drawn behind the character, more with speed, collisions where the ship really was.
+	private static bool HostPlayout => _playoutInstalled && !HostPlayoutOff && MpPlugin.App?.ServerSession != null
+		&& Y51_SE2Online.NetHost.NetSession.Current != null;
 
 	private static bool HostPlay(DEntity entity, ref MotionHistory history, MotionInterpolationSessionComponent interpolation)
 	{
