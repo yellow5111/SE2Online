@@ -169,7 +169,20 @@ internal static class MotionSmoothing
 			if (!characters.Contains(gone)) Widened.TryRemove(gone, out _);
 		foreach (var gone in Buffered.Keys)
 			if (!characters.Contains(gone)) Buffered.TryRemove(gone, out _);
-		if (HostPlayout) HostTick(session, own);
+		bool hostPlayout = HostPlayoutWanted;
+		if (hostPlayout != _hostPlayout)
+		{
+			_hostPlayout = false;
+			lock (HostGate)
+			{
+				HostClock.Reset();
+				HostTracks.Clear();
+			}
+			_hostOwn = new HashSet<DEntity>();
+			_hostPlayout = hostPlayout;
+			GameLog.Instance.Info($"motion: host playback {(hostPlayout ? "on" : "off")}, its clock and tracks reset");
+		}
+		if (hostPlayout) HostTick(session, own);
 		if (Playout)
 		{
 			try { if (MpClock.NowMs() >= _playoutRetryMs) Play(session); }
@@ -225,7 +238,18 @@ internal static class MotionSmoothing
 	private static volatile HashSet<DEntity> _hostOwn = new();
 	private static double _hostStep;
 	internal static long HostPlayed;
-	private static bool HostPlayout => _playoutInstalled && !HostPlayoutOff && MpPlugin.App?.ServerSession != null;
+	
+	// Only while this game hosts a running SE2 Online session (a stopped one stays Current until the next starts). Offline
+	// the game runs an in-process server too, and the ship a player stood up in (no longer the grid it controls) was played
+	// on this clock a few frames back while the character stayed on the game's: the ship drawn behind the character, more
+	// with speed, collisions where the ship really was.
+	private static bool HostPlayoutWanted => _playoutInstalled && !HostPlayoutOff && MpPlugin.App?.ServerSession != null
+		&& Y51_SE2Online.NetHost.NetSession.Current is { IsHost: true, HasStopped: false };
+	// Decided once per client tick (ClientTick). Hosting starts and stops in a running world, and nothing advances the
+	// clock in between: it and the tracks start afresh on each change, or the clock would jump by the time it stood still
+	// and play stale samples.
+	private static volatile bool _hostPlayout;
+	private static bool HostPlayout => _hostPlayout;
 
 	private static bool HostPlay(DEntity entity, ref MotionHistory history, MotionInterpolationSessionComponent interpolation)
 	{
