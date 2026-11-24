@@ -284,6 +284,9 @@ internal static class MotionSmoothing
 		{
 			mine.Add(e.DEntity);
 			if (SyncEngine.WorldSocial.GridOf(e) is { } grid) mine.Add(grid.DEntity);
+			// The ship the host's character stands or flies in stays on the game's clock with it, else it is drawn
+			// behind the character after the host leaves its seat.
+			if (OwnMotion.DeckUnder(e, motionParent: true) is { } deck) mine.Add(deck.DEntity);
 		}
 		_hostOwn = mine;
 		lock (HostGate)

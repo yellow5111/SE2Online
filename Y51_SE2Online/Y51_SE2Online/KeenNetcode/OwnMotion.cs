@@ -695,9 +695,9 @@ internal static class OwnMotion
 	internal static double DeckCarryMax;
 
 	// Standing or walking on a grid that moves (not one at rest, not a planet or station).
-	private static Entity? DeckUnder(Entity own)
+	internal static Entity? DeckUnder(Entity own, bool motionParent = false)
 	{
-		var under = Parent(own, motionParent: false);
+		var under = Parent(own, motionParent);
 		if (under == null || EngineCodec.IsDead(under) || !under.Data.Has<DynamicTag>()) return null;
 		return under;
 	}
