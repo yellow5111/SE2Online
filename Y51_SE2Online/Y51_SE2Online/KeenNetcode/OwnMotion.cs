@@ -694,10 +694,19 @@ internal static class OwnMotion
 	internal static long DeckCarried;
 	internal static double DeckCarryMax;
 
-	// Standing or walking on a grid that moves (not one at rest, not a planet or station).
-	internal static Entity? DeckUnder(Entity own, bool motionParent = false)
+	/// <summary>Every grid whose box, <paramref name="pad"/> wider, holds <paramref name="character"/>. A co-op host's game
+	/// has no support contacts or MotionParent for its own character, so <see cref="DeckUnder"/> finds nothing there.</summary>
+	internal static IEnumerable<Entity> GridsAround(Session session, Entity character, double pad)
 	{
-		var under = Parent(own, motionParent);
+		var at = character.Data.GetWorldTransform().Position;
+		foreach (Entity grid in session.GetEntitiesOfType<Keen.Game2.Simulation.WorldObjects.CubeGrids.CubeGridComponent>())
+			if (BoundingBoxData.TryGetWorldOriented(grid.Data) is { } box && box.Inflate(pad).Contains(in at)) yield return grid;
+	}
+
+	// Standing or walking on a grid that moves (not one at rest, not a planet or station).
+	private static Entity? DeckUnder(Entity own)
+	{
+		var under = Parent(own, motionParent: false);
 		if (under == null || EngineCodec.IsDead(under) || !under.Data.Has<DynamicTag>()) return null;
 		return under;
 	}

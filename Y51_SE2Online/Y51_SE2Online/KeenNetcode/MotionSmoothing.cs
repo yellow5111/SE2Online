@@ -277,6 +277,8 @@ internal static class MotionSmoothing
 		}
 	}
 
+	private const double ShipPad = 2;
+
 	private static void HostTick(Session session, HashSet<Entity> own)
 	{
 		var mine = new HashSet<DEntity>();
@@ -285,12 +287,18 @@ internal static class MotionSmoothing
 			mine.Add(e.DEntity);
 			if (SyncEngine.WorldSocial.GridOf(e) is { } grid) mine.Add(grid.DEntity);
 			// The ship the host's character stands or flies in stays on the game's clock with it, else it is drawn
-			// behind the character after the host leaves its seat.
-			if (OwnMotion.DeckUnder(e, motionParent: true) is { } deck) mine.Add(deck.DEntity);
+			// behind the character after the host leaves its seat (1.4 m at 100 km/h). This game's scene has no support
+			// contacts or MotionParent for its own character: it is every grid whose box holds the character, a little
+			// wider (the ship may still be drawn behind, and a character on the hull stands just outside the box).
+			if (e.TryGet<CharacterLifeComponent>() != null)
+				foreach (var ship in OwnMotion.GridsAround(session, e, ShipPad)) mine.Add(ship.DEntity);
 		}
 		_hostOwn = mine;
 		lock (HostGate)
 		{
+			// Back on this clock later (the host left the ship), a body starts a fresh track instead of blending from
+			// the sample it had when it left.
+			foreach (var d in mine) HostTracks.Remove(d);
 			double was = HostClock.Play;
 			bool primed = HostClock.Primed;
 			HostClock.Advance(Wall.Elapsed.TotalMilliseconds);
