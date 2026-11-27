@@ -842,6 +842,11 @@ internal static class OwnMotion
 
 		// Server thread only.
 		public Entity? Character;
+		// The movement state after the last input applied, and the server tick the game switched between jetpack and
+		// ground itself since then (outside the inputs): the same key press may still be on its way in the inputs.
+		public byte StateAfter;
+		public bool StateKnown;
+		public long OutsideJetpackTick = long.MinValue / 2;
 		public bool Held, Driving, Sprint, Boost, BoostHeld, Holding, ResyncHeld;
 		public int HeldTicks;
 		public Frozen? Frozen;
@@ -910,6 +915,7 @@ internal static class OwnMotion
 		// at speed).
 		bool catchingUp = stamp - _lastServerTick < System.Diagnostics.Stopwatch.Frequency * CatchUpMs / 1000;
 		_lastServerTick = stamp;
+		_serverTick++;
 		if (MotionTrace.Recording)
 		{
 			_serverTicksSecond++;
@@ -1053,7 +1059,10 @@ internal static class OwnMotion
 				lock (player.Gate) player.Inputs.Reset();
 				continue;
 			}
+			NoteOutsideJetpack(player, character);
 			Apply(player, character, take.Input);
+			player.StateAfter = OwnStatePrediction.Pack(character);
+			player.StateKnown = true;
 			player.AppliedSeq = take.Ack;
 			lock (player.Gate)
 			{
@@ -1082,6 +1091,34 @@ internal static class OwnMotion
 		_togglesServer = toggles;
 	}
 
+	// In gravity the server's game switches the jetpack on by itself as the player presses the key (the character leaves
+	// the ground: CharacterMovementServerComponent.OnExitGravityAndSurface, a call of its own past the toggle gate), and
+	// the same press arriving in the inputs a few ticks later switched it straight back off. A switch between jetpack and
+	// ground the game made since the last input, up to SamePressTicks before the input's jetpack toggle, is that press:
+	// the input's toggle is left out.
+	private const int SamePressTicks = 12;
+	private static long _samePressDropped;
+
+	private static void NoteOutsideJetpack(Player player, Entity character)
+	{
+		if (!player.StateKnown) return;
+		var was = (CharacterMovementState)OwnState.Movement(player.StateAfter);
+		var now = (CharacterMovementState)OwnState.Movement(OwnStatePrediction.Pack(character));
+		if (was != now && (was is CharacterMovementState.Ground or CharacterMovementState.Jetpack) && (now is CharacterMovementState.Ground or CharacterMovementState.Jetpack))
+			player.OutsideJetpackTick = _serverTick;
+	}
+
+	private static OwnToggles SamePress(Player player, OwnToggles toggles)
+	{
+		long since = _serverTick - player.OutsideJetpackTick;
+		if ((toggles & OwnToggles.Jetpack) == 0 || since > SamePressTicks) return toggles;
+		player.OutsideJetpackTick = long.MinValue / 2;
+		long n = ++_samePressDropped;
+		if (n <= 20 || n % 100 == 0)
+			GameLog.Instance.Info($"own motion: jetpack: the game switched it itself {since} ticks before this input's toggle; the same press, the input's toggle left out ({n} so far)");
+		return toggles & ~OwnToggles.Jetpack;
+	}
+
 	// What Keen's own server does with a client's ControlData and its jump/sprint/boost requests, for this tick's input.
 	private static void Apply(Player player, Entity character, in OwnInput input)
 	{
@@ -1089,12 +1126,13 @@ internal static class OwnMotion
 		var rotation = new Vector3(input.Rotation.X, input.Rotation.Y, input.Rotation.Z);
 		character.Data.Set(new ControlData { Movement = movement, Rotation = rotation });
 		character.Data.Set(new AngularControlData { TargetAngularVelocity = rotation });
+		var toggles = SamePress(player, input.Toggles);
 		if (player.Toggles)
 		{
-			player.Expected = OwnState.Expect(OwnStatePrediction.Pack(character), input.Toggles);
+			player.Expected = OwnState.Expect(OwnStatePrediction.Pack(character), toggles);
 			player.BoostHeld = input.Boost;
 		}
-		if (input.Toggles != OwnToggles.None && player.Toggles) OwnStatePrediction.ApplyServer(character, input.Toggles);
+		if (toggles != OwnToggles.None && player.Toggles) OwnStatePrediction.ApplyServer(character, toggles);
 		if (character.TryGet<CharacterMovementServerComponent>() is not { } requests) return;
 		_ourRequest = true;
 		try
@@ -1215,7 +1253,7 @@ internal static class OwnMotion
 	// input is let go. -y51online:resynchold:off moves it at once.
 	private static readonly bool ResyncHoldOff = System.Linq.Enumerable.Contains(MpPlugin.LaunchArgs, MpOptions.Prefix + "resynchold:off");
 	private const long ResyncHoldMs = 750;
-	private static long _lastServerTick, _inputWaits, _inputWaitsServed;
+	private static long _lastServerTick, _serverTick, _inputWaits, _inputWaitsServed;
 
 	// A catch-up tick whose input is not here yet waits a few milliseconds for the network thread before guessing.
 	private static void WaitForInput(Player player, long now)
